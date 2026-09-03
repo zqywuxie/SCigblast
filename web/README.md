@@ -26,6 +26,14 @@ docker compose up -d
 docker compose logs -f scigblast-web
 ```
 
+也可以在仓库根目录使用一键部署脚本（首次运行会提示配置 `web/.env`）：
+
+```bash
+bash deploy.sh
+```
+
+脚本会检查 Docker Compose、构建并重建容器，最后轮询 `/health` 健康检查。也可以通过 `SCIGBLAST_ENV_FILE=/path/to/.env bash deploy.sh` 指定配置文件。
+
 浏览器访问 `http://服务器地址:8000`。
 
 > 如果服务器的 8000 端口已被占用，可在 `.env` 中设置 `SCIGBLAST_WEB_PORT=8080`，此时访问 `http://服务器地址:8080`。
