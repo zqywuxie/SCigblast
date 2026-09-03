@@ -1,0 +1,31 @@
+services:
+  scigblast-web:
+    build: .
+    container_name: scigblast-web
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${SCIGBLAST_WEB_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\" "]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      SCIGBLAST_PIPELINE_ROOT: /opt/scigblast
+      SCIGBLAST_STATE_DIR: /var/lib/scigblast-web
+      SCIGBLAST_DEFAULT_OUTPUT_ROOT: /colddata/zqy/SCigblast/results/web_output
+      SCIGBLAST_ALLOWED_INPUT_ROOTS: /colddata
+      SCIGBLAST_ALLOWED_SUBMISSION_ROOTS: /colddata
+      SCIGBLAST_ALLOWED_BARCODE_ROOTS: /colddata
+      SCIGBLAST_ALLOWED_OUTPUT_ROOTS: /colddata/zqy/SCigblast/results
+      SCIGBLAST_MAX_ACTIVE_JOBS: ${SCIGBLAST_MAX_ACTIVE_JOBS:-2}
+      PATH: /opt/scigblast-tools/bin:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      - ${SCIGBLAST_HOST_PIPELINE_ROOT:-/opt/scigblast}:/opt/scigblast:ro
+      - ${SCIGBLAST_HOST_COLD_DATA:-/colddata}:/colddata:ro
+      - ${SCIGBLAST_HOST_RESULTS_ROOT:-/colddata/zqy/SCigblast/results}:/colddata/zqy/SCigblast/results:rw
+      - ${SCIGBLAST_HOST_TOOL_ROOT:-/opt/scigblast-tools}:/opt/scigblast-tools:ro
+      - ./runtime:/var/lib/scigblast-web
+    mem_limit: 300g

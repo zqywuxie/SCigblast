@@ -1,0 +1,35 @@
+# Runtime state and local deployment secrets
+web/.env
+web/runtime/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pipeline-generated data and results
+10X_split/data/
+IR_split/IR_split/
+IR_split/**/.tmp_*/
+**/output/
+**/outputs/
+**/results/
+**/work/
+**/.batches/
+**/*.fq
+**/*.fq.gz
+**/*.fastq
+**/*.fastq.gz
+**/*.fasta
+**/*.fa
+**/*.fa.gz
+**/*.tsv
+**/*.csv
+**/*.jsonl
+**/*.sqlite3
+
+# Local editor / OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

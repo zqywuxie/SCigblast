@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SCigblast · 任务控制台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark"><i></i><i></i><i></i></span><span>SCIGBLAST</span></a>
+      <div class="topbar-right"><span class="server-state"><b></b> 服务器在线</span><span class="topbar-divider"></span><span class="topbar-caption">Pipeline Runner</span></div>
+    </header>
+
+    <section class="page-head">
+      <div><p class="eyebrow">PIPELINE OPERATIONS / 01</p><h1>任务控制台</h1><p class="page-subtitle">在这里提交、审核和追踪所有分析任务。第一次运行只生成 Match 清单，确认后才进入重型阶段。</p></div>
+      <button id="open-drawer" class="button button-primary button-large"><span>＋</span> 新建任务</button>
+    </section>
+
+    <section class="stat-grid" aria-label="任务概览">
+      <div class="stat-card"><span class="stat-label">运行中</span><strong id="stat-active">—</strong><small id="stat-capacity">读取中</small><span class="stat-accent teal"></span></div>
+      <div class="stat-card"><span class="stat-label">待审核</span><strong id="stat-review">—</strong><small>需要 Match 确认</small><span class="stat-accent amber"></span></div>
+      <div class="stat-card"><span class="stat-label">已结束</span><strong id="stat-done">—</strong><small>成功、失败或已停止</small><span class="stat-accent indigo"></span></div>
+      <div class="stat-card"><span class="stat-label">任务总数</span><strong id="stat-total">—</strong><small>最多显示最近 200 条</small><span class="stat-accent coral"></span></div>
+    </section>
+
+    <section class="panel tasks-panel">
+      <div class="panel-heading tasks-heading"><div><p class="eyebrow">PIPELINE QUEUE / 02</p><h2>操作列表</h2></div><button id="refresh-jobs" class="button button-ghost">↻ 刷新</button></div>
+      <div class="list-toolbar">
+        <div class="filter-tabs" role="tablist" aria-label="任务状态筛选"><button class="filter-tab active" role="tab" aria-selected="true" data-filter="all">全部 <span id="count-all">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="active">运行中 <span id="count-active">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="review">待审核 <span id="count-review">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="done">已结束 <span id="count-done">0</span></button></div>
+        <div class="toolbar-tools"><select id="pipeline-filter" aria-label="按 Pipeline 筛选"><option value="">全部 Pipeline</option></select><label class="search-box"><span>⌕</span><input id="job-search" placeholder="搜索 Job 或 Dataset" aria-label="搜索任务"></label></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>任务 / 数据集</th><th>Pipeline</th><th>当前阶段</th><th>进度</th><th>操作者</th><th>状态</th><th class="action-col">操作</th></tr></thead><tbody id="jobs"></tbody></table><div id="empty-state" class="empty-state hidden"><div class="empty-icon">＋</div><strong>没有符合条件的任务</strong><span>调整筛选条件，或创建一个新任务</span></div></div>
+      <div class="pagination"><span id="page-summary">—</span><div><button id="page-prev" class="button button-ghost button-small" disabled>← 上一页</button><button id="page-next" class="button button-ghost button-small" disabled>下一页 →</button></div></div>
+    </section>
+    <footer class="footer"><span>SCIGBLAST RUNNER · v0.1</span><span>页面只管理任务，不保存生物学数据</span></footer>
+  </main>
+
+  <div id="drawer-shell" class="drawer-shell" aria-hidden="true"><div id="drawer-backdrop" class="drawer-backdrop"></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <div class="drawer-header"><div><p class="eyebrow">NEW RUN / 03</p><h2 id="drawer-title">新建任务</h2></div><button id="close-drawer" class="close-button" aria-label="关闭新建任务">×</button></div>
+    <div class="drawer-body">
+      <div class="drawer-step"><span class="step-number">1</span><div><strong>选择 Pipeline</strong><small>根据数据类型选择分析流程</small></div></div>
+      <div id="pipeline-cards" class="pipeline-cards"></div>
+      <select name="pipeline" id="pipeline" class="visually-hidden" required></select>
+      <div class="drawer-step"><span class="step-number">2</span><div><strong>设置路径</strong><small>只接受服务器上的绝对路径</small></div></div>
+      <form id="new-job-form">
+        <div class="field-stack">
+          <label class="field"><span class="field-label">操作者</span><input name="operator" required placeholder="姓名或工号" autocomplete="name"><span class="field-hint">会记录在操作历史中</span></label>
+          <label class="field"><span class="field-label">原始数据目录</span><div class="input-with-state"><input name="input_path" required placeholder="/colddata/.../raw" spellcheck="false"><span class="path-state" data-for="input_path"></span></div><span class="field-hint">输入目录需位于服务器允许根目录</span></label>
+          <label class="field"><span class="field-label">Submission 文件或目录</span><div class="input-with-state"><input name="submission_path" required placeholder="/colddata/.../submission" spellcheck="false"><span class="path-state" data-for="submission_path"></span></div><span class="field-hint">支持单个 .xlsx 或包含多个 .xlsx 的目录</span></label>
+          <label class="field" id="barcode-row"><span class="field-label">Barcode CSV</span><div class="input-with-state"><input name="barcode_csv" placeholder="/colddata/.../8bp_barcodes.csv" spellcheck="false"><span class="path-state" data-for="barcode_csv"></span></div><span class="field-hint">IR_split、10X_split 必填</span></label>
+          <label class="field"><span class="field-label">输出根目录 <em>可选</em></span><input name="output_root" placeholder="留空使用服务默认目录" spellcheck="false"><span class="field-hint">必须位于允许的 output 根目录</span></label>
+          <label class="field"><span class="field-label">Dataset label <em>可选</em></span><input name="dataset_label" placeholder="默认使用输入目录名"><span class="field-hint">用于 output 和断点目录</span></label>
+        </div>
+        <div id="ir-options" class="ir-options hidden"><div class="drawer-step compact-step"><span class="step-number">3</span><div><strong>IR 专用参数</strong><small>只对 IR_split 生效</small></div></div><div class="field-grid compact"><label class="field"><span class="field-label">输入模式</span><select name="ir_input_mode"><option value="raw">raw · 未拆分</option><option value="presplit">presplit · 已拆分</option></select></label><label class="field"><span class="field-label">流程模式</span><select name="ir_variant"><option value="representative">representative</option><option value="merged">merged</option></select></label><label class="field"><span class="field-label">Preprocessing</span><select name="run_preprocessing"><option value="auto">auto</option><option value="1">启用</option><option value="0">关闭</option></select></label></div></div>
+        <div class="review-box"><div class="review-box-icon">✓</div><div><strong>提交前检查</strong><p id="validation-summary">填写路径后可验证任务配置</p></div><button id="validate-button" type="button" class="button button-ghost button-small">验证路径</button></div>
+        <div class="drawer-footer"><span id="form-message" class="form-message" role="status" aria-live="polite"></span><button class="button button-primary" type="submit"><span>创建任务并执行 Match</span><b>→</b></button></div>
+      </form>
+    </div>
+  </aside></div>
+<script src="/static/index.js"></script>
+</body>
+</html>
