@@ -38,7 +38,7 @@ bash deploy.sh
 
 > 如果服务器的 8000 端口已被占用，可在 `.env` 中设置 `SCIGBLAST_WEB_PORT=8080`，此时访问 `http://服务器地址:8080`。
 
-页面首页是全宽任务控制台：可以按状态、Pipeline 和关键词筛选任务；“新建任务”从右侧抽屉打开，并提供路径验证。任务详情页分为运行概览、Match 审核、实时日志、输出文件和参数记录五个标签。日志按字节增量读取，支持暂停刷新、自动滚动和复制。
+页面首页是全宽任务控制台：可以按状态、Pipeline 和关键词筛选任务；“新建任务”从右侧抽屉打开，并提供路径验证。输入目录、Submission、Barcode CSV 和输出目录都可以手动填写，也可以点击“浏览”通过服务器文件树选择（仅显示 `SCIGBLAST_ALLOWED_*_ROOTS` 下的内容）。任务详情页分为运行概览、Match 审核、实时日志、输出文件和参数记录五个标签。日志按字节增量读取，支持暂停刷新、自动滚动和复制。
 
 默认结果目录为 `/colddata/zqy/SCigblast/results/web_output`，也可以在页面填写允许根目录下的其他输出目录。`runtime/scigblast.sqlite3` 保存任务和操作记录；pipeline 的 FASTQ、FASTA、TSV、日志和 DONE marker 仍写入用户指定的 output。
 

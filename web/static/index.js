@@ -12,6 +12,46 @@
   const rememberedFields = ['operator', 'input_path', 'submission_path', 'barcode_csv', 'output_root'];
   function restoreForm() { rememberedFields.forEach((name) => { const value = localStorage.getItem(`scigblast.${name}`); const input = document.querySelector(`[name="${name}"]`); if (value && input) input.value = value; }); }
   function rememberForm(body) { rememberedFields.forEach((name) => { if (body[name]) localStorage.setItem(`scigblast.${name}`, body[name]); }); }
+  const browseLabels = { input: '原始数据目录', submission: 'Submission 文件或目录', barcode: 'Barcode CSV', output: '输出根目录' };
+  let pickerKind = '', pickerTarget = '', pickerPath = '', pickerBusy = false;
+
+  function closePicker() { $('#file-picker-shell').classList.remove('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'true'); pickerKind = ''; pickerTarget = ''; pickerPath = ''; }
+  function pickerEntry(entry) {
+    const icon = entry.type === 'directory' ? '▱' : '▤';
+    const size = entry.size == null ? '' : ` · ${(entry.size / 1024).toFixed(1)} KB`;
+    return `<button type="button" class="file-tree-entry ${entry.type}" data-path="${esc(entry.path)}" data-entry-type="${entry.type}" ${entry.selectable ? '' : 'aria-disabled="true"'}><span class="file-tree-icon">${icon}</span><span class="file-tree-copy"><strong>${esc(entry.name)}</strong><small>${entry.type === 'directory' ? '目录' : `文件${size}`}</small></span><span class="file-tree-action">${entry.type === 'directory' ? '打开 ›' : (entry.selectable ? '选择' : '')}</span></button>`;
+  }
+  function renderPicker(data) {
+    pickerPath = data.path || '';
+    $('#file-picker-current').textContent = data.path || '允许的根目录';
+    $('#file-picker-up').disabled = !data.parent;
+    $('#file-picker-up').dataset.path = data.parent || '';
+    $('#file-picker-select').disabled = !data.can_select_current || !data.path;
+    $('#file-picker-select').classList.toggle('hidden', pickerKind === 'barcode');
+    const entries = data.entries || [];
+    $('#file-picker-entries').innerHTML = entries.length ? entries.map(pickerEntry).join('') : '<div class="file-tree-empty">当前目录没有可选择的文件</div>';
+  }
+  async function loadPicker(path = '') {
+    if (pickerBusy) return;
+    pickerBusy = true;
+    $('#file-picker-message').textContent = '读取目录中…';
+    try {
+      const params = new URLSearchParams({ kind: pickerKind });
+      if (path) params.set('path', path);
+      const response = await fetch(`/api/browse?${params}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || '无法读取目录');
+      renderPicker(data);
+      $('#file-picker-message').textContent = `${browseLabels[pickerKind]} · 只显示允许根目录下的内容`;
+    } catch (error) {
+      $('#file-picker-message').textContent = error.message || '读取失败';
+      $('#file-picker-entries').innerHTML = '<div class="file-tree-empty error-text">无法读取该目录，请手动输入服务器绝对路径</div>';
+      $('#file-picker-up').disabled = true;
+      $('#file-picker-select').disabled = true;
+    } finally { pickerBusy = false; }
+  }
+  function openPicker(kind, target) { pickerKind = kind; pickerTarget = target; $('#file-picker-title').textContent = `选择${browseLabels[kind] || '路径'}`; $('#file-picker-shell').classList.add('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'false'); loadPicker(); }
+  function choosePickerPath(path) { const input = document.querySelector(`[name="${pickerTarget}"]`); if (input) { input.value = path; input.dispatchEvent(new Event('input', { bubbles: true })); } closePicker(); }
 
   function openDrawer() { $('#drawer-shell').classList.add('open'); $('#drawer-shell').setAttribute('aria-hidden', 'false'); setTimeout(() => $('#drawer-shell input[name="operator"]')?.focus(), 120); }
   function closeDrawer() { $('#drawer-shell').classList.remove('open'); $('#drawer-shell').setAttribute('aria-hidden', 'true'); }
@@ -65,8 +105,11 @@
 
   $('#new-job-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.classList.add('loading'); const body = Object.fromEntries(new FormData(event.target).entries()); if (!body.barcode_csv) body.barcode_csv = null; const response = await fetch('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const result = await response.json(); button.disabled = false; button.classList.remove('loading'); if (response.ok) { rememberForm(body); showMessage(`任务 ${result.id} 已加入队列`); closeDrawer(); event.target.reset(); restoreForm(); updatePipelineFields(); await refreshJobs(); } else { showMessage(result.detail || '创建失败，请检查路径', true); } });
   $('#open-drawer').addEventListener('click', openDrawer); $('#close-drawer').addEventListener('click', closeDrawer); $('#drawer-backdrop').addEventListener('click', closeDrawer); $('#validate-button').addEventListener('click', validatePaths); $('#pipeline').addEventListener('change', updatePipelineFields); $('#refresh-jobs').addEventListener('click', refreshJobs); $('#job-search').addEventListener('input', () => { page = 0; refreshJobs(); }); $('#pipeline-filter').addEventListener('change', () => { page = 0; refreshJobs(); }); $('#page-prev').addEventListener('click', () => { if (page > 0) { page -= 1; refreshJobs(); } }); $('#page-next').addEventListener('click', () => { page += 1; refreshJobs(); }); document.querySelectorAll('.field input').forEach((input) => input.addEventListener('input', () => { const state = document.querySelector(`.path-state[data-for="${input.name}"]`); if (state) state.classList.remove('ok', 'bad'); }));
+  document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', () => openPicker(button.dataset.browseKind, button.dataset.browseTarget)));
+  $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });
+  $('#file-picker-entries').addEventListener('click', (event) => { const entry = event.target.closest('.file-tree-entry'); if (!entry) return; const path = entry.dataset.path; if (entry.dataset.entryType === 'directory') { loadPicker(path); } else { choosePickerPath(path); } });
   document.querySelectorAll('.filter-tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.filter-tab').forEach((item) => { item.classList.remove('active'); item.setAttribute('aria-selected', 'false'); }); tab.classList.add('active'); tab.setAttribute('aria-selected', 'true'); filter = tab.dataset.filter; page = 0; refreshJobs(); }));
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeDrawer(); });
+  document.addEventListener('keydown', (event) => { if (event.key !== 'Escape') return; if ($('#file-picker-shell').classList.contains('open')) closePicker(); else closeDrawer(); });
   loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); restoreForm(); refreshJobs(); });
   setInterval(refreshJobs, 5000);
 })();

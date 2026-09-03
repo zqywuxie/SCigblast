@@ -196,6 +196,93 @@ def validate_output(value: str | None) -> Path:
     return resolved
 
 
+BROWSE_SPECS: dict[str, tuple[str, set[str]]] = {
+    "input": ("SCIGBLAST_ALLOWED_INPUT_ROOTS", set()),
+    "submission": ("SCIGBLAST_ALLOWED_SUBMISSION_ROOTS", {".xlsx"}),
+    "barcode": ("SCIGBLAST_ALLOWED_BARCODE_ROOTS", {".csv"}),
+    "output": ("SCIGBLAST_ALLOWED_OUTPUT_ROOTS", set()),
+}
+
+
+def browse_directory(kind: str, value: str | None) -> dict[str, Any]:
+    """Return one safe directory level for the web file-tree picker.
+
+    Only configured roots and their descendants are exposed. File contents are
+    never returned; callers receive names and absolute server paths only.
+    """
+    if kind not in BROWSE_SPECS:
+        raise HTTPException(400, "unsupported browse kind")
+    env_name, suffixes = BROWSE_SPECS[kind]
+    roots = configured_roots(env_name, "/colddata")
+    if not roots:
+        return {"kind": kind, "path": None, "parent": None, "roots": [], "entries": []}
+
+    current: Path | None = None
+    if value:
+        requested = Path(value).expanduser()
+        if not requested.is_absolute():
+            raise HTTPException(400, "browse path must be an absolute server path")
+        resolved = requested.resolve()
+        if not is_under(resolved, roots):
+            raise HTTPException(400, "browse path is outside the allowed roots")
+        if not resolved.exists():
+            raise HTTPException(400, f"browse path does not exist: {resolved}")
+        if resolved.is_file():
+            if resolved.suffix.lower() not in suffixes:
+                raise HTTPException(400, "file type is not selectable for this field")
+            current = resolved.parent
+        elif resolved.is_dir():
+            current = resolved
+        else:
+            raise HTTPException(400, "browse path is not a directory")
+
+    if current is None:
+        root_entries = [
+            {
+                "name": str(root),
+                "path": str(root),
+                "type": "directory",
+                "selectable": kind != "barcode",
+            }
+            for root in roots
+            if root.exists() and root.is_dir()
+        ]
+        return {"kind": kind, "path": None, "parent": None, "roots": [str(root) for root in roots], "entries": root_entries}
+
+    entries: list[dict[str, Any]] = []
+    try:
+        children = sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))
+    except OSError as exc:
+        raise HTTPException(403, f"cannot list browse path: {current}") from exc
+    for child in children:
+        if child.name.startswith("."):
+            continue
+        try:
+            resolved_child = child.resolve()
+            if not is_under(resolved_child, roots):
+                continue
+            if child.is_dir():
+                entries.append({"name": child.name, "path": str(resolved_child), "type": "directory", "selectable": kind != "barcode"})
+            elif child.is_file() and child.suffix.lower() in suffixes:
+                entries.append({"name": child.name, "path": str(resolved_child), "type": "file", "selectable": True, "size": child.stat().st_size})
+        except OSError:
+            continue
+
+    parent = None
+    if not any(current == root for root in roots):
+        candidate_parent = current.parent.resolve()
+        if is_under(candidate_parent, roots):
+            parent = str(candidate_parent)
+    return {
+        "kind": kind,
+        "path": str(current),
+        "parent": parent,
+        "roots": [str(root) for root in roots],
+        "entries": entries,
+        "can_select_current": kind != "barcode",
+    }
+
+
 def safe_dataset(value: str, input_path: Path) -> str:
     raw = value.strip() or input_path.name
     result = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._")
@@ -536,6 +623,12 @@ def pipelines() -> dict[str, Any]:
         }
         for key, value in REGISTRY.items()
     }
+
+
+@app.get("/api/browse")
+def browse(kind: str = "input", path: str | None = None) -> dict[str, Any]:
+    """List a single safe directory level for the path picker."""
+    return browse_directory(kind, path)
 
 
 @app.post("/api/jobs")
