@@ -30,12 +30,16 @@ compose=(docker compose --env-file "${ENV_FILE}" --project-directory "${WEB_DIR}
 
 log "检查 Compose 配置"
 "${compose[@]}" config >/dev/null
+if [[ -n "$("${compose[@]}" ps --status running -q "$SERVICE")" ]]; then
+  log "检查现有服务是否还有运行或排队任务"
+  "${compose[@]}" exec -T "$SERVICE" python -c 'import json,urllib.request,sys; s=json.load(urllib.request.urlopen("http://127.0.0.1:8000/health",timeout=5)); sys.exit(1 if s.get("active_jobs",0) or s.get("queued_jobs",0) else 0)' || die "服务仍有任务或无法确认状态；请先在网页停止任务，再部署。"
+fi
 log "构建并启动 ${SERVICE}"
 "${compose[@]}" up -d --build --force-recreate
 log "容器状态"
 "${compose[@]}" ps
 
-port="$(grep -E '^[[:space:]]*SCIGBLAST_WEB_PORT[[:space:]]*=' "${ENV_FILE}" | head -n 1 | cut -d= -f2- | tr -d '[:space:]"')"
+port="$(awk -F= '/^[[:space:]]*SCIGBLAST_WEB_PORT[[:space:]]*=/{gsub(/[[:space:]\"]/,"",$2); print $2; exit}' "${ENV_FILE}")"
 port="${port:-8000}"
 health_url="http://127.0.0.1:${port}/health"
 
@@ -50,7 +54,9 @@ if command -v curl >/dev/null 2>&1; then
   done
   log "容器已启动，但健康检查超时：${health_url}"
 else
-  log "未找到 curl，跳过宿主机健康检查。"
+  "${compose[@]}" exec -T "$SERVICE" python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health",timeout=5)' || die "容器内健康检查失败"
+  log "容器内服务已就绪；浏览器访问：http://服务器IP:${port}"
+  exit 0
 fi
 
 log "查看日志：${compose[*]} logs -f ${SERVICE}"

@@ -776,7 +776,7 @@ if [[ -s "$MATCH_REVIEW_MARKER" ]] \
    && grep -qx "config_sha256=${CONFIG_SHA256}" "$MATCH_REVIEW_MARKER" 2>/dev/null; then
     MATCH_REVIEW_CURRENT=1
 fi
-if [[ "$MATCH_ONLY_FIRST_RUN" == "1" && "$MATCH_REVIEW_CURRENT" -ne 1 ]]; then
+if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "$MATCH_ONLY_FIRST_RUN" == "1" && "$MATCH_REVIEW_CURRENT" -ne 1 ) ]]; then
     marker_tmp="${MATCH_REVIEW_MARKER}.tmp.${BASHPID:-$$}"
     {
         printf 'status=READY_FOR_REVIEW\n'

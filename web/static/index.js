@@ -53,9 +53,20 @@
   function openPicker(kind, target) { pickerKind = kind; pickerTarget = target; $('#file-picker-title').textContent = `选择${browseLabels[kind] || '路径'}`; $('#file-picker-shell').classList.add('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'false'); loadPicker(); }
   function choosePickerPath(path) { const input = document.querySelector(`[name="${pickerTarget}"]`); if (input) { input.value = path; input.dispatchEvent(new Event('input', { bubbles: true })); } closePicker(); }
 
-  function openDrawer() { $('#drawer-shell').classList.add('open'); $('#drawer-shell').setAttribute('aria-hidden', 'false'); setTimeout(() => $('#drawer-shell input[name="operator"]')?.focus(), 120); }
-  function closeDrawer() { $('#drawer-shell').classList.remove('open'); $('#drawer-shell').setAttribute('aria-hidden', 'true'); }
+  function openDrawer() { document.body.classList.add('task-dialog-open'); $('#drawer-shell').classList.add('open'); $('#drawer-shell').setAttribute('aria-hidden', 'false'); setTimeout(() => $('#drawer-shell input[name="operator"]')?.focus(), 120); }
+  function closeDrawer() { document.body.classList.remove('task-dialog-open'); $('#drawer-shell').classList.remove('open'); $('#drawer-shell').setAttribute('aria-hidden', 'true'); $('#open-drawer').focus(); }
   function selectedPipeline() { return $('#pipeline').value; }
+  async function loadPipelines() {
+    const response = await fetch('/api/pipelines');
+    if (!response.ok) throw new Error('无法读取 Pipeline');
+    pipelineInfo = await response.json();
+    const defaults = await Submission.api('/api/defaults');
+    $('[name="barcode_csv"]').value = defaults.barcode_csv;
+    $('#pipeline-cards').insertAdjacentHTML('beforebegin', '<p id="pipeline-root-hint" class="field-hint"></p>');
+    $('#pipeline-root-hint').textContent = `项目目录：${defaults.pipeline_root}`;
+    $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
+    updatePipelineFields();
+  }
 
   function renderPipelineCards() {
     const cards = Object.entries(pipelineInfo).map(([key, info]) => `<button type="button" class="pipeline-card ${key === selectedPipeline() ? 'selected' : ''}" data-pipeline="${key}"><span class="pipeline-dot ${info.accent || 'teal'}"></span><span class="pipeline-card-copy"><strong>${esc(info.label)}</strong><small>${esc(info.description || '')}</small></span><span class="pipeline-card-check">✓</span></button>`).join('');
@@ -67,6 +78,10 @@
     const info = pipelineInfo[selectedPipeline()] || {};
     $('#barcode-row').classList.toggle('hidden', !info.requires_barcode);
     $('#ir-options').classList.toggle('hidden', !info.ir_options);
+    $('[name="barcode_csv"]').disabled = !info.requires_barcode;
+    let stages = info.stages || [];
+    if (info.ir_options && $('[name="ir_variant"]').value === 'merged') stages = stages.filter(s => !['06.representative', '08.preprocessing'].includes(s));
+    $('#pipeline-guide').innerHTML = `<p>${esc(info.description)}</p><div class="flow-nodes">${stages.map(s => `<span>${esc(info.stage_labels?.[s] || s)}</span>`).join('<b>→</b>')}</div><small>脚本负责分析；网页负责配置、审核和启动。内部并发参数保持脚本设置。</small>`;
     document.querySelectorAll('.pipeline-card').forEach((card) => card.classList.toggle('selected', card.dataset.pipeline === selectedPipeline()));
   }
 
@@ -98,18 +113,67 @@
 
   async function refreshJobs() { if (busy) return; busy = true; const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (filter === 'active') params.set('status', 'QUEUED,RUNNING,MATCHING,STOPPING'); if (filter === 'review') params.set('status', 'WAITING_REVIEW'); if (filter === 'done') params.set('status', 'SUCCEEDED,FAILED,STOPPED,INTERRUPTED,COMPLETED_WITHOUT_MARKER'); if ($('#pipeline-filter').value) params.set('pipeline', $('#pipeline-filter').value); if ($('#job-search').value.trim()) params.set('query', $('#job-search').value.trim()); try { const data = await (await fetch(`/api/jobs?${params}`)).json(); allJobs = data.jobs || []; renderJobs(data); } finally { busy = false; } }
 
-  async function runAction(id, action) { if (action === 'stop' && !window.confirm('停止这个任务？中间产物会保留，可稍后续跑。')) return; const response = await fetch(`/api/jobs/${id}/${action === 'confirm' ? 'confirm-match' : action}`, { method: 'POST' }); if (!response.ok) { const error = await response.json().catch(() => ({})); showMessage(error.detail || '操作失败', true); } else { showMessage(action === 'confirm' ? 'Match 已确认，任务继续运行' : '操作已提交'); } await refreshJobs(); }
+  async function runAction(id, action) { if (action === 'confirm') { location.href = `/jobs/${id}#match`; return; } if (action === 'stop' && !window.confirm('停止这个任务？中间产物会保留，可稍后续跑。')) return; try { await Submission.api(`/api/jobs/${id}/${action}`, {}); await refreshJobs(); } catch(error) { showMessage(error.message, true); } }
   function showMessage(message, error = false) { const node = $('#form-message'); node.textContent = message; node.classList.toggle('error', error); clearTimeout(showMessage.timer); showMessage.timer = setTimeout(() => { node.textContent = ''; node.classList.remove('error'); }, 4500); }
 
-  async function validatePaths() { const form = $('#new-job-form'); const body = Object.fromEntries(new FormData(form).entries()); if (!body.barcode_csv) body.barcode_csv = null; const response = await fetch('/api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const result = await response.json(); const summary = $('#validation-summary'); document.querySelectorAll('.path-state').forEach((state) => state.classList.toggle('ok', response.ok)); document.querySelectorAll('.path-state').forEach((state) => state.classList.toggle('bad', !response.ok)); if (response.ok) { summary.textContent = `路径可用 · Dataset: ${result.dataset} · 输出: ${result.output_root}`; summary.parentElement.parentElement.classList.add('valid'); } else { summary.textContent = result.detail || '路径验证失败'; summary.parentElement.parentElement.classList.remove('valid'); } }
+  async function validatePaths() {
+    const button=$('#validate-button'); button.disabled=true;
+    try {
+      const body=Object.fromEntries(new FormData($('#new-job-form')).entries());if(!body.barcode_csv)body.barcode_csv=null;
+      const result=await Submission.api('/api/validate',body);
+      $('#validation-summary').textContent=`路径可用 · Dataset: ${result.dataset} · 输出: ${result.output_root}`;
+      const check=await Submission.api(`/api/preflight?pipeline=${encodeURIComponent(body.pipeline)}`);
+      const missing=[...Object.entries(check.commands).filter(([,v])=>!v).map(([k])=>k),...check.missing_modules];
+      $('#validation-summary').textContent+= missing.length ? `。环境缺项：${missing.join('、')}；请管理员补齐后再分析。` : '。入口工具和 Python 库检查通过；数据库仍需核对。';
+    }catch(error){$('#validation-summary').textContent=error.message;}finally{button.disabled=false;}
+  }
 
-  $('#new-job-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.classList.add('loading'); const body = Object.fromEntries(new FormData(event.target).entries()); if (!body.barcode_csv) body.barcode_csv = null; const response = await fetch('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const result = await response.json(); button.disabled = false; button.classList.remove('loading'); if (response.ok) { rememberForm(body); showMessage(`任务 ${result.id} 已加入队列`); closeDrawer(); event.target.reset(); restoreForm(); updatePipelineFields(); await refreshJobs(); } else { showMessage(result.detail || '创建失败，请检查路径', true); } });
+  $('#new-job-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.classList.add('loading'); try { const body = Object.fromEntries(new FormData(event.target).entries()); if (!body.barcode_csv) body.barcode_csv = null; const result = await Submission.api('/api/jobs', body); rememberForm(body); location.href = `/jobs/${result.id}`; } catch(error) { showMessage(error.message, true); } finally { button.disabled = false; button.classList.remove('loading'); } });
   $('#open-drawer').addEventListener('click', openDrawer); $('#close-drawer').addEventListener('click', closeDrawer); $('#drawer-backdrop').addEventListener('click', closeDrawer); $('#validate-button').addEventListener('click', validatePaths); $('#pipeline').addEventListener('change', updatePipelineFields); $('#refresh-jobs').addEventListener('click', refreshJobs); $('#job-search').addEventListener('input', () => { page = 0; refreshJobs(); }); $('#pipeline-filter').addEventListener('change', () => { page = 0; refreshJobs(); }); $('#page-prev').addEventListener('click', () => { if (page > 0) { page -= 1; refreshJobs(); } }); $('#page-next').addEventListener('click', () => { page += 1; refreshJobs(); }); document.querySelectorAll('.field input').forEach((input) => input.addEventListener('input', () => { const state = document.querySelector(`.path-state[data-for="${input.name}"]`); if (state) state.classList.remove('ok', 'bad'); }));
   document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', () => openPicker(button.dataset.browseKind, button.dataset.browseTarget)));
   $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });
   $('#file-picker-entries').addEventListener('click', (event) => { const entry = event.target.closest('.file-tree-entry'); if (!entry) return; const path = entry.dataset.path; if (entry.dataset.entryType === 'directory') { loadPicker(path); } else { choosePickerPath(path); } });
   document.querySelectorAll('.filter-tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.filter-tab').forEach((item) => { item.classList.remove('active'); item.setAttribute('aria-selected', 'false'); }); tab.classList.add('active'); tab.setAttribute('aria-selected', 'true'); filter = tab.dataset.filter; page = 0; refreshJobs(); }));
-  document.addEventListener('keydown', (event) => { if (event.key !== 'Escape') return; if ($('#file-picker-shell').classList.contains('open')) closePicker(); else closeDrawer(); });
-  loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); restoreForm(); refreshJobs(); });
+  document.addEventListener('keydown', (event) => { if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return; if ($('#file-picker-shell').classList.contains('open')) closePicker(); else closeDrawer(); });
+  let submissionDraft = null, submissionGeneration = 0;
+  function acceptSubmission(data) { submissionDraft = data; $('[name="submission_revision"]').value = data.revision; $('[name="submission_path"]').required = false; $('#submission-status').textContent = `工作副本已就绪 · ${data.sheets.reduce((n, s) => n + s.rows.length, 0)} 行`; }
+  function resetSubmission() { submissionGeneration++; submissionDraft = null; $('[name="submission_revision"]').value = ''; $('[name="submission_path"]').required = true; }
+  async function loadSubmission(load) {
+    const generation = submissionGeneration;
+    $('#submission-edit').disabled = true; $('#submission-upload').disabled = true;
+    $('#submission-status').textContent = '正在读取 Submission…';
+    try {
+      const data = await load();
+      if (generation !== submissionGeneration) return;
+      submissionDraft = data;
+      $('#submission-status').textContent = '工作副本已载入，可再次查看 / 编辑；请保存并使用后创建任务';
+      Submission.open(data, acceptSubmission);
+    } catch(error) {
+      if (generation === submissionGeneration) $('#submission-status').textContent = `读取失败：${error.message}`;
+    } finally { $('#submission-edit').disabled = false; $('#submission-upload').disabled = false; }
+  }
+  $('#submission-edit').onclick = () => loadSubmission(async () => {
+    if (submissionDraft) return submissionDraft;
+    const token = $('[name="submission_revision"]').value;
+    if (token) return Submission.api(`/api/submissions?revision=${encodeURIComponent(token)}`);
+    const path = $('[name="submission_path"]').value.trim();
+    if (!path) throw new Error('请先上传 XLSX，或选择服务器上的 Submission 文件 / 目录');
+    return Submission.api('/api/submissions/import', {path});
+  });
+  $('#submission-upload').onchange = (event) => {
+    const file = event.target.files[0]; if (!file) return;
+    resetSubmission();
+    $('[name="submission_path"]').value = '';
+    loadSubmission(async () => {
+      const response = await fetch(`/api/submissions/upload?filename=${encodeURIComponent(file.name)}`, {method: 'POST', body: file});
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
+      return data;
+    });
+    event.target.value = ''; // Allow retrying the same file after an upload error.
+  };
+  $('[name="submission_path"]').addEventListener('input', () => { resetSubmission(); $('#submission-upload').value = ''; $('#submission-status').textContent = '路径已变更，请重新查看工作副本'; });
+  $('[name="ir_variant"]').addEventListener('change', updatePipelineFields);
+  loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); restoreForm(); refreshJobs(); }).catch(error => showMessage(error.message, true));
   setInterval(refreshJobs, 5000);
 })();

@@ -1,18 +1,38 @@
-FROM python:3.11-slim
+FROM mambaorg/micromamba:2.9.0
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+USER root
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    SCIGBLAST_PIPELINE_ROOT=/opt/scigblast \
+    SCIGBLAST_RUNTIME_BIN_DIR=/opt/conda/bin \
+    PATH=/opt/conda/bin:/usr/local/bin:/usr/bin:/bin
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates coreutils findutils tini \
+    && apt-get install -y --no-install-recommends bash ca-certificates coreutils findutils tini procps util-linux time pigz gawk sed grep gzip \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY web/environment.yml /app/environment.yml
+RUN micromamba install --yes --name base --strict-channel-priority --file /app/environment.yml \
+    && micromamba list --name base --explicit > /app/conda-explicit.txt \
+    && micromamba clean --all --yes
+ARG MAMBA_DOCKERFILE_ACTIVATE=1
+COPY web/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY web/check_runtime.py /app/check_runtime.py
+RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
 
-COPY app.py pipeline_registry.json /app/
-COPY templates /app/templates
-COPY static /app/static
+COPY web/app.py web/submission.py web/pipeline_registry.json /app/
+COPY web/templates /app/templates
+COPY web/static /app/static
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# The build context is the repository root, restricted by Dockerfile.dockerignore.
+COPY IR_split/pipeline/ /opt/scigblast/IR_split/pipeline/
+COPY 10X_split/pipeline/ /opt/scigblast/10X_split/pipeline/
+COPY Igblast_base/pipeline/ /opt/scigblast/Igblast_base/pipeline/
+COPY PigIgblast/pipeline/ /opt/scigblast/PigIgblast/pipeline/
+COPY reference/8bp_barcodes.csv /opt/scigblast/reference/8bp_barcodes.csv
+COPY web/check_bundle.py /app/check_bundle.py
+RUN python /app/check_bundle.py
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/_entrypoint.sh"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

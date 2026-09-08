@@ -251,7 +251,7 @@ SCIGBLAST_BASE_DEFAULT_CHAINS="${SCIGBLAST_BASE_DEFAULT_CHAINS:-}" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/01.match_sample.py" || MATCH_STATUS=$?
 [[ -s "$SUMMARY" ]] || { echo "[BASE] match did not produce summary" >&2; exit "${MATCH_STATUS:-1}"; }
 MAPPING_SHA256="$(hash_file "$SUMMARY" 2>/dev/null || printf unknown)"
-if [[ "${SCIGBLAST_MATCH_ONLY_FIRST_RUN:-${MATCH_ONLY_FIRST_RUN:-1}}" == "1" && ! -f "${STATE_DIR}/.match_review.done" ]]; then
+if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "${SCIGBLAST_MATCH_ONLY_FIRST_RUN:-${MATCH_ONLY_FIRST_RUN:-1}}" == "1" && ! -f "${STATE_DIR}/.match_review.done" ) ]]; then
   match_review_marker="${STATE_DIR}/.match_review.done"
   match_review_tmp="${match_review_marker}.tmp.${BASHPID:-$$}"
   printf 'status=READY_FOR_REVIEW\ntimestamp=%s\n' "$(date -Iseconds)" > "$match_review_tmp"

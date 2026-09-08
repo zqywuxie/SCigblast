@@ -1,0 +1,27 @@
+# Deny files by default. Only source and the default Barcode CSV enter the build.
+**
+!**/
+!web/Dockerfile
+!web/environment.yml
+!web/requirements.txt
+!web/check_runtime.py
+!web/check_bundle.py
+!web/app.py
+!web/submission.py
+!web/pipeline_registry.json
+!web/templates/*.html
+!web/static/*.css
+!web/static/*.js
+!IR_split/pipeline/**/*.py
+!IR_split/pipeline/**/*.sh
+!IR_split/pipeline/00.pipeline_config.env
+!10X_split/pipeline/**/*.py
+!10X_split/pipeline/**/*.sh
+!10X_split/pipeline/00.pipeline_config.env
+!Igblast_base/pipeline/**/*.py
+!Igblast_base/pipeline/**/*.sh
+!Igblast_base/pipeline/00.pipeline_config.env
+!PigIgblast/pipeline/**/*.py
+!PigIgblast/pipeline/**/*.sh
+!PigIgblast/pipeline/00.pipeline_config.env
+!reference/8bp_barcodes.csv

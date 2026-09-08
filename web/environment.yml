@@ -1,0 +1,17 @@
+name: base
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=3.11
+  - pip
+  - fastp=0.23.4
+  - pandaseq=2.11
+  - igblast=1.22.0
+  - blast=2.16.0
+  - numpy=1.26.4
+  - pandas=2.2.3
+  - biopython=1.85
+  - scikit-bio=0.6.3
+  - parmap=1.7.0

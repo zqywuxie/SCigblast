@@ -10,25 +10,30 @@ import threading
 import time
 import uuid
 import csv
+import tempfile
+import shutil
+import shlex
+import submission
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 
 APP_DIR = Path(__file__).resolve().parent
-PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT", "/opt/scigblast")).resolve()
+PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent).resolve()
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
 DEFAULT_OUTPUT_ROOT = Path(
     os.environ.get("SCIGBLAST_DEFAULT_OUTPUT_ROOT", "/colddata/zqy/SCigblast/results/web_output")
 ).resolve()
-MAX_ACTIVE_JOBS = max(1, int(os.environ.get("SCIGBLAST_MAX_ACTIVE_JOBS", "2")))
+MAX_ACTIVE_JOBS = min(2, max(1, int(os.environ.get("SCIGBLAST_MAX_ACTIVE_JOBS", "2"))))
 
 
 def load_registry() -> dict[str, dict[str, Any]]:
@@ -46,11 +51,16 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def db() -> sqlite3.Connection:
+@contextmanager
+def db():
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
-    return connection
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def init_db() -> None:
@@ -91,6 +101,11 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+            CREATE TABLE IF NOT EXISTS reviews (
+                job_id TEXT NOT NULL, revision TEXT NOT NULL, row_key TEXT NOT NULL,
+                label TEXT NOT NULL, note TEXT NOT NULL,
+                PRIMARY KEY(job_id, revision, row_key)
+            );
             """
         )
 
@@ -172,6 +187,8 @@ def validate_submission(value: str) -> Path:
 
 
 def validate_barcode(value: str | None, required: bool) -> Path | None:
+    if not value and required:
+        value = str(PIPELINE_ROOT / 'reference' / '8bp_barcodes.csv')
     if not value:
         if required:
             raise HTTPException(400, "barcode_csv is required for this pipeline")
@@ -179,9 +196,13 @@ def validate_barcode(value: str | None, required: bool) -> Path | None:
     path = Path(value).expanduser().resolve()
     if not path.is_file() or path.suffix.lower() != ".csv":
         raise HTTPException(400, "barcode_csv must be an existing .csv file")
-    if not is_under(path, configured_roots("SCIGBLAST_ALLOWED_BARCODE_ROOTS", "/colddata")):
+    if not is_under(path, barcode_roots()):
         raise HTTPException(400, "barcode_csv is outside the allowed roots")
     return path
+
+
+def barcode_roots() -> list[Path]:
+    return configured_roots('SCIGBLAST_ALLOWED_BARCODE_ROOTS', '/colddata') + [PIPELINE_ROOT / 'reference']
 
 
 def validate_output(value: str | None) -> Path:
@@ -192,7 +213,6 @@ def validate_output(value: str | None) -> Path:
     resolved = path.resolve()
     if not is_under(resolved, configured_roots("SCIGBLAST_ALLOWED_OUTPUT_ROOTS", str(DEFAULT_OUTPUT_ROOT))):
         raise HTTPException(400, "output_root is outside the allowed output roots")
-    resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 
 
@@ -213,7 +233,7 @@ def browse_directory(kind: str, value: str | None) -> dict[str, Any]:
     if kind not in BROWSE_SPECS:
         raise HTTPException(400, "unsupported browse kind")
     env_name, suffixes = BROWSE_SPECS[kind]
-    roots = configured_roots(env_name, "/colddata")
+    roots = barcode_roots() if kind == 'barcode' else configured_roots(env_name, "/colddata")
     if not roots:
         return {"kind": kind, "path": None, "parent": None, "roots": [], "entries": []}
 
@@ -305,7 +325,8 @@ class CreateJob(BaseModel):
     pipeline: str
     operator: str
     input_path: str
-    submission_path: str
+    submission_path: str = ""
+    submission_revision: str = ""
     barcode_csv: str | None = None
     output_root: str | None = None
     dataset_label: str = ""
@@ -319,7 +340,11 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
         raise HTTPException(400, "unknown pipeline")
     config = REGISTRY[request.pipeline]
     input_path = validate_input_path(request.input_path, "input_path")
-    submission_path = validate_submission(request.submission_path)
+    try:
+        submission_path = (submission.resolve(STATE_ROOT, request.submission_revision)
+                           if request.submission_revision else validate_submission(request.submission_path))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     barcode = validate_barcode(request.barcode_csv, bool(config["requires_barcode"]))
     output_root = validate_output(request.output_root)
     dataset = safe_dataset(request.dataset_label, input_path)
@@ -339,6 +364,8 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     env: dict[str, str] = {
         "SCIGBLAST_MULTI_CHILD": "1",
         "SCIGBLAST_MATCH_ONLY_FIRST_RUN": "1",
+        "SCIGBLAST_RUN_MATCH_ONLY_FIRST_RUN": "1",
+        "SCIGBLAST_WEB_MATCH_ONLY": "1",
         "SCIGBLAST_RUN_RAW_INPUT_DIR": str(input_path),
         "SCIGBLAST_RUN_SUBMISSION_PATHS": str(submission_path),
         "SCIGBLAST_DATASET_LABEL": dataset,
@@ -399,15 +426,19 @@ def log_path(row: sqlite3.Row) -> Path:
 
 
 def review_ready(row: sqlite3.Row) -> bool:
+    if json.loads(row["env_json"]).get("SCIGBLAST_WEB_MATCH_ONLY") != "1":
+        return False
     marker = state_dir(row) / ".match_review.done"
     try:
-        return marker.is_file() and "READY_FOR_REVIEW" in marker.read_text(encoding="utf-8", errors="replace")
+        return (marker.is_file() and marker.stat().st_mtime >= datetime.fromisoformat(row['started_at']).timestamp()
+                and "READY_FOR_REVIEW" in marker.read_text(encoding="utf-8", errors="replace")
+                and bool(summary_files(row)))
     except OSError:
         return False
 
 
 def pipeline_done(row: sqlite3.Row) -> bool:
-    config = REGISTRY[row["pipeline"]]
+    config = job_config(row)
     state = state_dir(row)
     if config["completion"] == "pipeline_done" and (state / ".pipeline.DONE").is_file():
         return True
@@ -416,24 +447,26 @@ def pipeline_done(row: sqlite3.Row) -> bool:
         if not stage_names:
             return False
         final = stage_names[-1]
-        for marker in (state / f".pipeline_stage_{final}.DONE", state / ".pipeline.DONE"):
+        marker_name = final.split('.', 1)[1] if row['pipeline'] == 'pig_igblast' else final
+        for marker in (state / f".pipeline_stage_{marker_name}.DONE", state / ".pipeline.DONE"):
             if marker.is_file() and "status=DONE" in marker.read_text(encoding="utf-8", errors="replace"):
                 return True
     return False
 
 
 def snapshot(row: sqlite3.Row) -> dict[str, Any]:
-    config = REGISTRY[row["pipeline"]]
+    config = job_config(row)
     state = state_dir(row)
     done = []
     for stage in config["stages"]:
-        marker = state / f".pipeline_stage_{stage}.DONE"
+        marker_name = stage.split('.', 1)[1] if row['pipeline'] == 'pig_igblast' else stage
+        marker = state / f".pipeline_stage_{marker_name}.DONE"
         if marker.is_file() and "status=DONE" in marker.read_text(encoding="utf-8", errors="replace"):
             done.append(stage)
+    if '01.match' not in done and summary_files(row) and (row['status'] in {'WAITING_REVIEW', 'SUCCEEDED'} or row['current_stage'] not in {'', None, '01.match'}):
+        done.insert(0, '01.match')
     current = row["current_stage"] or (done[-1] if done else "")
-    progress = int(row["progress"] or 0)
-    if not progress and done:
-        progress = int(len(done) * 100 / len(config["stages"]))
+    progress = 100 if row["status"] == "SUCCEEDED" else int(len(done) * 100 / len(config["stages"]))
     return {
         "id": row["id"],
         "operator": row["operator"],
@@ -447,6 +480,8 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "status": row["status"],
         "current_stage": current,
         "progress": progress,
+        "stage_progress": int(row["progress"] or 0),
+        "submission_revision": json.loads(row["options_json"]).get("submission_revision", ""),
         "stages": config["stages"],
         "stage_labels": config.get("stage_labels", {}),
         "completed_stages": done,
@@ -467,47 +502,64 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def parse_progress(row: sqlite3.Row) -> tuple[str, int]:
-    config = REGISTRY[row["pipeline"]]
+    config = job_config(row)
     path = log_path(row)
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")[-250_000:]
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - 250_000))
+            text = handle.read(250_000).decode("utf-8", errors="replace")
     except OSError:
         return row["current_stage"] or "", int(row["progress"] or 0)
     current = row["current_stage"] or ""
-    for match in re.finditer(r"\[(?:IR|10X|BASE|PIG)(?:[^\]]*)?(\d+)/(\d+)\]", text):
+    stage_end = 0
+    for match in re.finditer(r"\[(?:IR|10X|BASE|PIG)\s+(\d+)/(\d+)\]", text):
         number, total = int(match.group(1)), int(match.group(2))
         if total:
             current = config["stages"][min(number - 1, len(config["stages"]) - 1)]
+            stage_end = match.end()
+    if row['pipeline'] == 'pig_igblast':
+        for match in re.finditer(r'\[PIG\]\s+(match|fastp|clean|pandaseq|igblast)\b', text):
+            current = next(s for s in config['stages'] if s.endswith('.' + match.group(1)))
+            stage_end = match.end()
     progress = int(row["progress"] or 0)
-    percentages = re.findall(r"(?:progress|worker_done|\[\s*\d+/\d+)\D{0,20}(\d{1,3})%", text)
+    percentages = re.findall(r"(?:percent=(\d{1,3})|\[\s*\d+/\d+\s+(\d{1,3})(?:\.\d+)?%)", text[stage_end:])
     if percentages:
-        progress = max(0, min(100, int(percentages[-1])))
-    elif current in config["stages"]:
-        progress = max(progress, int(config["stages"].index(current) * 100 / len(config["stages"])))
+        progress = max(0, min(100, int(next(v for v in percentages[-1] if v))))
+    elif current != row["current_stage"]:
+        progress = 0
     return current, progress
 
 
 def active_count() -> int:
-    return sum(1 for process in PROCESSES.values() if process.poll() is None)
+    with PROCESS_LOCK:
+        return len(PROCESSES)
 
 
 def launch_job(job_id: str) -> bool:
     row = get_job_row(job_id)
+    if row["status"] != "QUEUED" or job_id in PROCESSES:
+        return False
     env = json.loads(row["env_json"])
     env = {str(key): str(value) for key, value in env.items()}
     env.update({key: value for key, value in os.environ.items() if key not in env})
+    # Resumed jobs may have saved PATH from an older, host-mounted runtime.
+    # Image-owned tools always follow the currently deployed image.
+    if os.environ.get("SCIGBLAST_RUNTIME_BIN_DIR"):
+        env["SCIGBLAST_RUNTIME_BIN_DIR"] = os.environ["SCIGBLAST_RUNTIME_BIN_DIR"]
+        env["PATH"] = os.environ["PATH"]
     attempt = int(row["attempt_no"] or 0) + 1
     try:
-        process = subprocess.Popen(
-            ["bash", row["runner_path"]],
-            cwd=str(Path(row["runner_path"]).parent),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        pgid = os.getpgid(process.pid)
+        destination = STATE_ROOT / "jobs" / job_id
+        destination.mkdir(parents=True, exist_ok=True)
+        if env.get('SCIGBLAST_WEB_MATCH_ONLY') == '1':
+            (state_dir(row) / '.match_review.done').unlink(missing_ok=True)
+        with (destination / f"launcher-{attempt}.log").open("ab") as launcher:
+            process = subprocess.Popen(
+                ["bash", row["runner_path"]], cwd=str(Path(row["runner_path"]).parent),
+                env=env, stdin=subprocess.DEVNULL, stdout=launcher, stderr=launcher,
+                start_new_session=True,
+            )
+        pgid = process.pid
     except OSError as exc:
         update_job(job_id, status="FAILED", ended_at=now(), exit_code=127, last_error=str(exc))
         return False
@@ -520,18 +572,12 @@ def launch_job(job_id: str) -> bool:
 
 def schedule() -> None:
     with PROCESS_LOCK:
-        slots = max(0, MAX_ACTIVE_JOBS - active_count())
-    if slots <= 0:
-        return
-    with db() as connection:
-        rows = connection.execute(
-            "SELECT id FROM jobs WHERE status = 'QUEUED' ORDER BY created_at"
-        ).fetchall()
-    for row in rows[:slots]:
-        with PROCESS_LOCK:
+        with db() as connection:
+            rows = connection.execute("SELECT id FROM jobs WHERE status='QUEUED' ORDER BY created_at,id").fetchall()
+        for row in rows:
             if active_count() >= MAX_ACTIVE_JOBS:
                 break
-        launch_job(row["id"])
+            launch_job(row["id"])
 
 
 def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
@@ -542,12 +588,23 @@ def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
         time.sleep(2)
         row = get_job_row(job_id)
     exit_code = process.returncode
+    # Do not release a stopped job's slot while its child processes are exiting.
+    if job_id in STOP_REQUESTED:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     row = get_job_row(job_id)
     current, progress = parse_progress(row)
-    with PROCESS_LOCK:
-        stopped = job_id in STOP_REQUESTED
-        PROCESSES.pop(job_id, None)
-        STOP_REQUESTED.discard(job_id)
+    stopped = job_id in STOP_REQUESTED
     if stopped:
         status = "STOPPED"
     elif review_ready(row):
@@ -559,7 +616,10 @@ def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
     else:
         status = "FAILED"
     error = None if status in {"WAITING_REVIEW", "SUCCEEDED"} else f"runner exit={exit_code}"
-    update_job(job_id, status=status, current_stage=current, progress=progress, ended_at=now(), exit_code=exit_code, pid=None, pgid=None, last_error=error)
+    with PROCESS_LOCK:
+        update_job(job_id, status=status, current_stage=current, progress=progress, ended_at=now(), exit_code=exit_code, pid=None, pgid=None, last_error=error)
+        PROCESSES.pop(job_id, None)
+        STOP_REQUESTED.discard(job_id)
     schedule()
 
 
@@ -575,9 +635,68 @@ def summary_files(row: sqlite3.Row) -> list[str]:
     result = []
     for candidate in REGISTRY[row["pipeline"]]["match_summary"]:
         path = Path(row["output_root"]) / candidate.format(dataset=row["dataset"])
-        if path.is_file():
+        if path.is_file() and is_under(path, [Path(row['output_root'])]):
             result.append(str(path))
     return result
+
+
+def job_config(row):
+    config = dict(REGISTRY[row["pipeline"]])
+    config["stages"] = list(config["stages"])
+    options = json.loads(row["options_json"])
+    if row["pipeline"] == "ir_split":
+        if options.get("ir_variant") == "merged":
+            config["stages"] = ["01.match", "02.fastp", "03.split", "04.clean", "05.pandaseq", "06.igblast"]
+            config["stage_labels"] = {**config.get("stage_labels", {}), "06.igblast": "IgBLAST"}
+        elif options.get("run_preprocessing") == "0":
+            config["stages"].remove("08.preprocessing")
+    return config
+
+
+def result_file(row):
+    options = json.loads(row["options_json"])
+    stage = "05.igblastn_out"
+    if row["pipeline"] in {"ir_split", "10x_split"}:
+        stage = "06.igblastn_out" if options.get("ir_variant") == "merged" else "07.igblastn_out"
+    root = Path(row["output_root"])
+    for name in ("chain_summary.csv", "igblast_summary.tsv"):
+        path = root / stage / row["dataset"] / name
+        if path.is_file() and is_under(path, [root]):
+            return path
+    return None
+
+
+def read_table(path: Path, offset=0, limit=50, query="", errors_only=False):
+    rows, counts, matched = [], {"total": 0, "ok": 0, "error": 0}, 0
+    pairs, samples = set(), set()
+    note = ''
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t" if path.suffix == ".tsv" else ",")
+        for index, item in enumerate(reader):
+            if not any(str(v or "").strip() for v in item.values()):
+                note = ''
+                continue
+            if 'note' in item:
+                note = item.get('note') or note
+                item['note'] = note
+            ok = str(item.get("status", "")).upper() == "OK"
+            counts["total"] += 1
+            counts["ok" if ok else "error"] += 1
+            pair = item.get("r1_path") or item.get("pair_id") or re.sub(r"_R[12](?=\.)", "", item.get("file_path", ""))
+            if pair:
+                pairs.add(pair)
+                if ok:
+                    samples.add((pair, item.get("sample_id", "")))
+            if errors_only and ok:
+                continue
+            if query and query.casefold() not in " ".join(str(v or "") for v in item.values()).casefold():
+                continue
+            if max(0, offset) <= matched < max(0, offset) + min(200, max(1, limit)):
+                rows.append({**item, "_row_key": str(index)})
+            matched += 1
+    return {"path": str(path), "columns": reader.fieldnames or [], "rows": rows,
+            "counts": {**counts, "file_pairs": len(pairs), "matched_samples": len(samples)},
+            "total": matched, "offset": max(0, offset)}
 
 
 app = FastAPI(title="SCigblast Pipeline Runner", version="0.1.0")
@@ -605,7 +724,9 @@ def job_page(request: Request, job_id: str) -> HTMLResponse:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "pipelines": list(REGISTRY), "active_jobs": active_count()}
+    with db() as connection:
+        queued = connection.execute("SELECT COUNT(*) FROM jobs WHERE status='QUEUED'").fetchone()[0]
+    return {"status": "ok", "pipelines": list(REGISTRY), "active_jobs": active_count(), "queued_jobs": queued, "max_active_jobs": MAX_ACTIVE_JOBS}
 
 
 @app.get("/api/pipelines")
@@ -625,16 +746,209 @@ def pipelines() -> dict[str, Any]:
     }
 
 
+@app.get('/api/defaults')
+def form_defaults():
+    return {'pipeline_root': str(PIPELINE_ROOT),
+            'barcode_csv': str(PIPELINE_ROOT / 'reference' / '8bp_barcodes.csv')}
+
+
+@app.get('/api/preflight')
+def preflight(pipeline: str):
+    if pipeline not in REGISTRY:
+        raise HTTPException(400, 'Unknown pipeline')
+    config_path = PIPELINE_ROOT / Path(REGISTRY[pipeline]['runner']).parent / '00.pipeline_config.env'
+    settings = {}
+    if config_path.is_file():
+        for line in config_path.read_text(encoding='utf-8').splitlines():
+            match = re.match(r'^(PYTHON_BIN|SCIGBLAST_PANDASEQ_BIN|SCIGBLAST_IGBLAST_BIN|IGBLAST_BIN)=(.*)$', line)
+            if match:
+                value = shlex.split(match[2], comments=True)
+                if len(value) == 1:
+                    settings[match[1]] = value[0]
+    commands = {'python': settings.get('PYTHON_BIN', 'python3'), 'fastp': 'fastp',
+                'pandaseq': settings.get('SCIGBLAST_PANDASEQ_BIN', 'pandaseq'),
+                'igblastn': settings.get('IGBLAST_BIN', settings.get('SCIGBLAST_IGBLAST_BIN', 'igblastn'))}
+    if os.environ.get('SCIGBLAST_RUNTIME_BIN_DIR'):
+        runtime = Path(os.environ['SCIGBLAST_RUNTIME_BIN_DIR'])
+        commands = {name: str(runtime / ('python3' if name == 'python' else name)) for name in commands}
+    checks = {name: shutil.which(command) for name, command in commands.items()}
+    modules = ['openpyxl']
+    if pipeline in {'ir_split', '10x_split'}:
+        modules += ['Bio', 'pandas', 'numpy']
+    if pipeline == 'ir_split':
+        modules += ['parmap', 'skbio']
+    missing = []
+    if checks['python']:
+        code = 'import importlib.util,json; print(json.dumps([m for m in ' + repr(modules) + ' if importlib.util.find_spec(m) is None]))'
+        try:
+            result = subprocess.run([checks['python'], '-c', code], capture_output=True, text=True, timeout=15)
+            missing = json.loads(result.stdout) if result.returncode == 0 else ['Python 环境检查失败']
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            missing = ['Python 环境检查失败']
+    return {'commands': checks, 'missing_modules': missing, 'max_active_jobs': MAX_ACTIVE_JOBS,
+            'notice': '仅检查入口工具和 Python 库；数据库路径及 cgroup 内存仍需在 Linux 部署验收。300g 是整个容器共享上限。'}
+
+
 @app.get("/api/browse")
 def browse(kind: str = "input", path: str | None = None) -> dict[str, Any]:
     """List a single safe directory level for the path picker."""
     return browse_directory(kind, path)
 
 
+@app.post("/api/submissions/import")
+def import_submission(request: dict):
+    path = validate_submission(str(request.get("path", "")))
+    files = sorted(p for p in path.glob("*.xlsx") if not p.name.startswith("~$")) if path.is_dir() else [path]
+    if len(files) > 50:
+        raise HTTPException(400, "Select at most 50 workbooks")
+    try:
+        return submission.create(STATE_ROOT, files, str(path))
+    except Exception as exc:
+        raise HTTPException(400, f"Cannot read workbook: {exc}") from exc
+
+
+@app.post("/api/submissions/upload")
+async def upload_submission(request: Request, filename: str = "submission.xlsx"):
+    if Path(filename).suffix.lower() != ".xlsx":
+        raise HTTPException(400, "Only .xlsx is supported")
+    with tempfile.TemporaryDirectory(prefix="scigblast-upload-") as folder:
+        path = Path(folder) / "submission.xlsx"
+        total = 0
+        with path.open("wb") as handle:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > submission.MAX_BYTES:
+                    raise HTTPException(413, "XLSX exceeds 20 MB")
+                handle.write(chunk)
+        try:
+            return submission.create(STATE_ROOT, [path], filename)
+        except Exception as exc:
+            raise HTTPException(400, f"Invalid XLSX: {exc}") from exc
+
+
+@app.get("/api/submissions")
+def get_submission(revision: str):
+    try:
+        return submission.inspect(STATE_ROOT, revision)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/submissions/revise")
+def revise_submission(request: dict):
+    try:
+        changes = request.get("changes", [])
+        old = submission.inspect(STATE_ROOT, request["revision"])
+        notes = {(s["file"], s["sheet"], c["cell"]) for s in old["sheets"] for r in s["rows"]
+                 for c in r["editable"] if c["kind"] == "note"}
+        for change in changes:
+            if (change["file"], change["sheet"], change["cell"]) in notes:
+                for value in re.split(r"[\r\n;,]+", change["value"]):
+                    if value.strip():
+                        validate_input_path(value.strip(), "Note")
+        return submission.revise(STATE_ROOT, request["revision"], changes)
+    except (KeyError, ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/submissions/download")
+def download_submission(revision: str, filename: str, original: bool = False):
+    try:
+        folder = submission.resolve(STATE_ROOT, revision)
+        if original:
+            metadata = json.loads((folder / 'metadata.json').read_text(encoding='utf-8'))
+            while metadata.get('parent'):
+                folder = submission.resolve(STATE_ROOT, metadata['parent'])
+                metadata = json.loads((folder / 'metadata.json').read_text(encoding='utf-8'))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if filename not in [p.name for p in folder.glob("*.xlsx")]:
+        raise HTTPException(404, "Workbook not found")
+    return FileResponse(folder / filename, filename=filename)
+
+
+@app.post("/api/jobs/{job_id}/rematch")
+def rematch(job_id: str, request: dict):
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING"}:
+            raise HTTPException(409, "Wait for this attempt to finish")
+        token = request.get("revision", "")
+        try:
+            folder = submission.resolve(STATE_ROOT, token)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        options = json.loads(row["options_json"])
+        # Re-match is safe; confirmation below prevents changing any previously
+        # approved assignment while allowing formerly ERROR records to be fixed.
+        options["submission_revision"] = token
+        env = json.loads(row["env_json"])
+        env.update(SCIGBLAST_RUN_SUBMISSION_PATHS=str(folder), SCIGBLAST_WEB_MATCH_ONLY="1", SCIGBLAST_RUN_MATCH_ONLY_FIRST_RUN="1")
+        update_job(job_id, status="QUEUED", submission_path=str(folder), options_json=json.dumps(options), env_json=json.dumps(env), last_error=None)
+        add_action(job_id, row["operator"], "rematch", token)
+    schedule()
+    return snapshot(get_job_row(job_id))
+
+
+@app.post("/api/jobs/{job_id}/review")
+def annotate_match(job_id: str, request: dict):
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        result = match_preview(job_id)
+        if request.get("revision") != result.get("revision") or row["status"] != "WAITING_REVIEW":
+            raise HTTPException(409, "Review is not current")
+        label = request.get("label", "")
+        if label not in {"", "已核对", "待补资料"}:
+            raise HTTPException(400, "Invalid review label")
+        keys = request.get('row_keys', [request.get('row_key')])
+        if not isinstance(keys, list) or not 1 <= len(keys) <= 5000 or any(not isinstance(k, str) or not k.isdecimal() for k in keys):
+            raise HTTPException(400, 'Select between 1 and 5000 valid rows')
+        keys = set(keys)
+        with Path(result['path']).open(encoding='utf-8-sig', newline='') as handle:
+            valid = {str(i) for i, record in enumerate(csv.DictReader(handle))
+                     if any(str(v or '').strip() for v in record.values())}
+        if not keys <= valid:
+            raise HTTPException(400, 'Selection contains rows not in this Match revision')
+        with db() as connection:
+            connection.executemany(
+                'INSERT INTO reviews VALUES(?,?,?,?,?) ON CONFLICT(job_id,revision,row_key) '
+                'DO UPDATE SET label=excluded.label, note=CASE WHEN ? THEN excluded.note ELSE reviews.note END',
+                [(job_id, request['revision'], key, label, str(request.get('note', ''))[:2000], 'note' in request) for key in sorted(keys)])
+        add_action(job_id, row["operator"], "review", json.dumps(request, ensure_ascii=False))
+    return {"ok": True, "updated": len(keys)}
+
+
+@app.get("/api/jobs/{job_id}/results")
+def results(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False):
+    path = result_file(get_job_row(job_id))
+    return read_table(path, offset, limit, query, errors_only) if path else {"path": None, "rows": [], "columns": [], "total": 0}
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download_result(job_id: str, kind: str = "results"):
+    row = get_job_row(job_id)
+    path = result_file(row) if kind == "results" else next(iter(summary_files(row)), None)
+    if path is None or not is_under(Path(path), [Path(row["output_root"])]):
+        raise HTTPException(404, "Summary not available")
+    return FileResponse(path, filename=Path(path).name)
+
+
 @app.post("/api/jobs")
 def create_job(request: CreateJob) -> dict[str, Any]:
+    if not request.submission_revision:
+        source = validate_submission(request.submission_path)
+        files = sorted(source.glob("*.xlsx")) if source.is_dir() else [source]
+        try:
+            request.submission_revision = submission.create(STATE_ROOT, files, str(source))["revision"]
+        except (ValueError, OSError) as exc:
+            raise HTTPException(400, str(exc)) from exc
     job, _ = build_job(request)
-    insert_job(job)
+    with PROCESS_LOCK:
+        with db() as connection:
+            collision = connection.execute("SELECT id FROM jobs WHERE output_root=? AND dataset=?", (job["output_root"], job["dataset"])).fetchone()
+        if collision:
+            raise HTTPException(409, f"Output/dataset already belongs to job {collision['id']}; use its rematch/resume or choose another output")
+        insert_job(job)
     add_action(job["id"], job["operator"], "create", json.dumps(request.model_dump(), ensure_ascii=False))
     schedule()
     return snapshot(get_job_row(job["id"]))
@@ -704,7 +1018,9 @@ def list_jobs(
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
     row = get_job_row(job_id)
-    return {"job": snapshot(row), "options": json.loads(row["options_json"]), "actions": actions_for(job_id), "match_summary": summary_files(row)}
+    options = json.loads(row['options_json'])
+    options.pop('approved_assignments', None)
+    return {"job": snapshot(row), "options": options, "actions": actions_for(job_id), "match_summary": summary_files(row)}
 
 
 def actions_for(job_id: str) -> list[dict[str, Any]]:
@@ -714,12 +1030,15 @@ def actions_for(job_id: str) -> list[dict[str, Any]]:
 
 
 @app.get("/api/jobs/{job_id}/log")
-def job_log(job_id: str, offset: int = 0, max_bytes: int = 262144) -> JSONResponse:
+def job_log(job_id: str, offset: int = 0, max_bytes: int = 262144, source: str = '') -> JSONResponse:
     row = get_job_row(job_id)
     path = log_path(row)
+    if not path.is_file():
+        path = STATE_ROOT / "jobs" / job_id / f"launcher-{row['attempt_no']}.log"
     try:
         size = path.stat().st_size
-        reset = offset < 0 or offset > size
+        identity = f"{row['attempt_no']}:{path}"
+        reset = source != identity or offset < 0 or offset > size
         read_from = 0 if reset else offset
         max_bytes = max(4096, min(max_bytes, 1_048_576))
         with path.open("rb") as handle:
@@ -729,55 +1048,62 @@ def job_log(job_id: str, offset: int = 0, max_bytes: int = 262144) -> JSONRespon
         content = payload.decode("utf-8", errors="replace")
     except OSError:
         return JSONResponse({"content": "pipeline log not created yet\n", "next_offset": 0, "reset": True, "size": 0})
-    return JSONResponse({"content": content, "next_offset": next_offset, "reset": reset, "size": size})
+    return JSONResponse({"content": content, "next_offset": next_offset, "reset": reset, "size": size, "source": identity})
 
 
 @app.get("/api/jobs/{job_id}/match-preview")
-def match_preview(job_id: str) -> dict[str, Any]:
+def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False) -> dict[str, Any]:
     row = get_job_row(job_id)
     files = summary_files(row)
     if not files:
         return {"path": None, "columns": [], "rows": []}
     path = Path(files[0])
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            rows = []
-            total = ok = error = unmatched = 0
-            for item in reader:
-                total += 1
-                status = str(item.get("status", "")).strip().upper()
-                if status == "OK":
-                    ok += 1
-                else:
-                    error += 1
-                    message = f"{item.get('error', '')} {item.get('status', '')}".lower()
-                    if any(token in message for token in ("match", "unmatched", "missing", "ambiguous")):
-                        unmatched += 1
-                if len(rows) < 100:
-                    rows.append(item)
-            return {"path": str(path), "columns": reader.fieldnames or [], "rows": rows, "counts": {"total": total, "ok": ok, "error": error, "unmatched": unmatched}}
+        result = read_table(path, offset, limit, query, errors_only)
+        result["revision"] = f"{row['attempt_no']}:{sha256_file(path)}"
+        options = json.loads(row['options_json'])
+        current = matched_assignments(path)
+        previous = set(options.get('approved_assignments', []))
+        result['changes'] = {'new_ok_records': len(current - previous), 'removed_or_changed_ok_records': len(previous - current)}
+        with db() as connection:
+            annotations = connection.execute("SELECT * FROM reviews WHERE job_id=? AND revision=?", (job_id, result["revision"])).fetchall()
+        result["reviews"] = {r["row_key"]: {"label": r["label"], "note": r["note"]} for r in annotations}
+        return result
     except (OSError, csv.Error) as exc:
         raise HTTPException(500, f"cannot read match summary: {exc}") from exc
 
 
 @app.post("/api/jobs/{job_id}/confirm-match")
-def confirm_match(job_id: str) -> dict[str, Any]:
-    row = get_job_row(job_id)
-    if row["status"] != "WAITING_REVIEW":
-        raise HTTPException(409, "job is not waiting for match confirmation")
-    update_job(job_id, status="QUEUED", last_error=None)
-    add_action(job_id, row["operator"], "confirm-match")
+def confirm_match(job_id: str, request: dict) -> dict[str, Any]:
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        if row["status"] != "WAITING_REVIEW":
+            raise HTTPException(409, "job is not waiting for match confirmation")
+        match = match_preview(job_id)
+        if request.get("revision") != match.get("revision"):
+            raise HTTPException(409, "Match changed; reload and review again")
+        if not match.get("counts", {}).get("ok"):
+            raise HTTPException(409, "No usable matched records")
+        assignments = matched_assignments(Path(match['path']))
+        options = json.loads(row['options_json'])
+        if not set(options.get('approved_assignments', [])).issubset(assignments):
+            raise HTTPException(409, 'Previously approved sample assignments changed. Use a new output to avoid reusing stale results.')
+        options['approved_assignments'] = sorted(assignments)
+        env = json.loads(row["env_json"])
+        env.update(SCIGBLAST_WEB_MATCH_ONLY="0", SCIGBLAST_RUN_MATCH_ONLY_FIRST_RUN="0")
+        update_job(job_id, status="QUEUED", last_error=None, env_json=json.dumps(env), options_json=json.dumps(options))
+        add_action(job_id, row["operator"], "confirm-match", match["revision"])
     schedule()
     return snapshot(get_job_row(job_id))
 
 
 @app.post("/api/jobs/{job_id}/resume")
 def resume_job(job_id: str) -> dict[str, Any]:
-    row = get_job_row(job_id)
-    if row["status"] in {"RUNNING", "QUEUED", "STOPPING"}:
-        raise HTTPException(409, "job is already active")
-    update_job(job_id, status="QUEUED", last_error=None, ended_at=None)
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        if row["status"] not in {"FAILED", "STOPPED", "INTERRUPTED", "COMPLETED_WITHOUT_MARKER"}:
+            raise HTTPException(409, "Use Match review to confirm this job")
+        update_job(job_id, status="QUEUED", last_error=None, ended_at=None)
     add_action(job_id, row["operator"], "resume")
     schedule()
     return snapshot(get_job_row(job_id))
@@ -785,26 +1111,68 @@ def resume_job(job_id: str) -> dict[str, Any]:
 
 @app.post("/api/jobs/{job_id}/stop")
 def stop_job(job_id: str) -> dict[str, Any]:
-    row = get_job_row(job_id)
-    if row["status"] == "QUEUED":
-        update_job(job_id, status="STOPPED", ended_at=now(), last_error="stopped before start")
-    elif row["status"] in {"RUNNING", "MATCHING"}:
-        with PROCESS_LOCK:
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        if row["status"] == "QUEUED":
+            update_job(job_id, status="STOPPED", ended_at=now(), last_error="stopped before start")
+        elif row["status"] in {"RUNNING", "MATCHING"}:
             process = PROCESSES.get(job_id)
             STOP_REQUESTED.add(job_id)
-        try:
-            pgid = int(row["pgid"] or (os.getpgid(process.pid) if process else 0))
-            if pgid > 0:
-                os.killpg(pgid, signal.SIGTERM)
-            elif process:
-                process.terminate()
-        except (OSError, ProcessLookupError):
-            pass
-        update_job(job_id, status="STOPPING")
-    else:
-        raise HTTPException(409, "job is not running")
+            update_job(job_id, status="STOPPING")
+            if process:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                threading.Thread(target=finish_stop, args=(job_id, process), daemon=True).start()
+        else:
+            raise HTTPException(409, "job is not running")
     add_action(job_id, row["operator"], "stop")
     return snapshot(get_job_row(job_id))
+
+
+def finish_stop(job_id, process):
+    # Only the process group created for this attempt; never scan other jobs.
+    time.sleep(15)
+    with PROCESS_LOCK:
+        if PROCESSES.get(job_id) is process:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def matched_assignments(path):
+    fields = ('sample_id', 'file_path', 'r1_path', 'r2_path', 'pair_id', 'barcode_name',
+              'barcode_sequence', 'igblast_chains', 'chains', 'chain', 'species')
+    with path.open(encoding='utf-8-sig', newline='') as handle:
+        return {json.dumps([r.get(k, '') for k in fields], ensure_ascii=False)
+                for r in csv.DictReader(handle) if r.get('status') == 'OK'}
+
+
+@app.get('/api/jobs/{job_id}/metadata-review')
+def metadata_review(job_id: str):
+    row = get_job_row(job_id)
+    token = json.loads(row['options_json']).get('submission_revision')
+    if not token:
+        return {'rows': []}
+    files = summary_files(row)
+    known = set()
+    if files:
+        with Path(files[0]).open(encoding='utf-8-sig', newline='') as handle:
+            known = {r.get('sample_id') for r in csv.DictReader(handle) if r.get('sample_id')}
+    missing = []
+    raw = row['input_path'].replace('\\', '/').rstrip('/')
+    for sheet in submission.inspect(STATE_ROOT, token)['sheets']:
+        for record in sheet['rows']:
+            fields = {cell['kind']: value for cell, value in zip(record['editable'], record['values']) if cell['kind']}
+            notes = [p.strip().replace('\\', '/').rstrip('/') for p in re.split(r'[\r\n;,]+', fields.get('note', '')) if p.strip()]
+            if notes and not any(raw == p or raw.startswith(p + '/') or p.startswith(raw + '/') for p in notes):
+                continue
+            sample = fields.get('sample_id', '')
+            if sample and sample not in known:
+                missing.append({'sample_id': sample, 'note': fields.get('note', ''), 'file': sheet['file'], 'sheet': sheet['sheet'], 'row': record['row'], 'reason': '提交表已登记，但匹配清单未识别该样本；请核对原文件是否存在以及文件名/索引'})
+    return {'rows': missing}
 
 
 @app.get("/api/jobs/{job_id}/artifacts")
@@ -816,6 +1184,9 @@ def artifacts(job_id: str) -> dict[str, Any]:
         output / "logs" / row["dataset"] / "pipeline.log",
         output / ".pipeline_state" / row["dataset"],
     ]
+    final_summary = result_file(row)
+    if final_summary:
+        candidates.append(final_summary)
     return {
         "output_root": str(output),
         "files": [{"path": str(path), "exists": path.exists(), "is_dir": path.is_dir(), "size": path.stat().st_size if path.is_file() else None} for path in candidates],

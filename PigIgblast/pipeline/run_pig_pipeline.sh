@@ -292,7 +292,7 @@ SCIGBLAST_SUBMISSION_PATHS="${SCIGBLAST_SUBMISSION_PATHS:-}" \
 SCIGBLAST_MATCH_OUTPUT="${OUTPUT_ROOT}/01.match/${DATASET_LABEL}/sample_manifest.csv" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/01.match_sample.py" || MATCH_STATUS=$?
 MAPPING_SHA256="$(hash_file "${OUTPUT_ROOT}/01.match/${DATASET_LABEL}/sample_manifest.csv" 2>/dev/null || printf unknown)"
-if [[ "$MATCH_ONLY_FIRST_RUN" == "1" && ! -f "$MATCH_REVIEW_MARKER" ]]; then
+if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "$MATCH_ONLY_FIRST_RUN" == "1" && ! -f "$MATCH_REVIEW_MARKER" ) ]]; then
   marker_tmp="${MATCH_REVIEW_MARKER}.tmp.${BASHPID:-$$}"
   {
     printf 'status=READY_FOR_REVIEW\n'

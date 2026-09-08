@@ -30,4 +30,12 @@ def load_config(path: str | Path | None = None) -> Path:
             try: value = str(ast.literal_eval(value))
             except (SyntaxError, ValueError): value = value[1:-1]
             os.environ.setdefault(key, value)
+    runtime_bin = os.environ.get("SCIGBLAST_RUNTIME_BIN_DIR", "")
+    if runtime_bin:
+        for key, executable in {
+            "PYTHON_BIN": "python3", "SCIGBLAST_FASTP_BIN": "fastp",
+            "SCIGBLAST_PANDASEQ_BIN": "pandaseq", "SCIGBLAST_IGBLAST_BIN": "igblastn",
+            "FASTP_BIN": "fastp", "PANDASEQ_BIN": "pandaseq", "IGBLAST_BIN": "igblastn",
+        }.items():
+            os.environ[key] = str(Path(runtime_bin) / executable)
     return config_path

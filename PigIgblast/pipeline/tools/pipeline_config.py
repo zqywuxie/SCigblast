@@ -23,6 +23,14 @@ def load_config(path: str | Path | None = None) -> dict[str, str]:
     cfg["PIPELINE_DIR"] = str(base)
     for key, value in list(cfg.items()):
         cfg[key] = os.path.expandvars(value).replace("${PIPELINE_DIR}", str(base)).replace("$PIPELINE_DIR", str(base))
+    runtime_bin = os.environ.get("SCIGBLAST_RUNTIME_BIN_DIR", "")
+    if runtime_bin:
+        for key, executable in {
+            "PYTHON_BIN": "python3", "SCIGBLAST_FASTP_BIN": "fastp",
+            "SCIGBLAST_PANDASEQ_BIN": "pandaseq", "SCIGBLAST_IGBLAST_BIN": "igblastn",
+            "FASTP_BIN": "fastp", "PANDASEQ_BIN": "pandaseq", "IGBLAST_BIN": "igblastn",
+        }.items():
+            cfg[key] = str(Path(runtime_bin) / executable)
     return cfg
 
 def path(cfg: dict[str, str], key: str, default: str) -> Path:

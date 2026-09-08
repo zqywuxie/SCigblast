@@ -42,9 +42,12 @@
     <div class="drawer-body">
       <div class="drawer-step"><span class="step-number">1</span><div><strong>选择 Pipeline</strong><small>根据数据类型选择分析流程</small></div></div>
       <div id="pipeline-cards" class="pipeline-cards"></div>
-      <select name="pipeline" id="pipeline" class="visually-hidden" required></select>
+      <select name="pipeline" id="pipeline" form="new-job-form" class="visually-hidden" required></select>
+      <div id="pipeline-guide" class="pipeline-guide"></div>
       <div class="drawer-step"><span class="step-number">2</span><div><strong>设置路径</strong><small>只接受服务器上的绝对路径</small></div></div>
       <form id="new-job-form">
+        <input type="hidden" name="submission_revision">
+        <section class="submission-tools"><strong>Submission 工作副本</strong><p>选择服务器文件或上传 XLSX，然后查看表格、修改 Note。原文件不变。</p><input id="submission-upload" type="file" accept=".xlsx" aria-label="上传 Submission"><button id="submission-edit" type="button" class="button button-ghost">查看 / 编辑 Submission</button><small id="submission-status" role="status">尚未建立工作副本</small></section>
         <div class="field-stack">
           <label class="field"><span class="field-label">操作者</span><input name="operator" required placeholder="姓名或工号" autocomplete="name"><span class="field-hint">会记录在操作历史中</span></label>
           <label class="field"><span class="field-label">原始数据目录</span><div class="path-input-row"><div class="input-with-state"><input name="input_path" required placeholder="/colddata/.../raw" spellcheck="false"><span class="path-state" data-for="input_path"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="input" data-browse-target="input_path">浏览</button></div><span class="field-hint">输入目录需位于服务器允许根目录</span></label>
@@ -70,6 +73,6 @@
       <footer class="file-picker-footer"><button id="file-picker-cancel" type="button" class="button button-ghost">取消</button><button id="file-picker-select" type="button" class="button button-primary" disabled>选择当前目录</button></footer>
     </section>
   </div>
-<script src="/static/index.js"></script>
+<script src="/static/submission.js"></script><script src="/static/index.js"></script>
 </body>
 </html>

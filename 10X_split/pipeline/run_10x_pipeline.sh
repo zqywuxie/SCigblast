@@ -405,7 +405,7 @@ MAPPING_SHA256="$(hash_file "$MAPPING_SUMMARY")" || {
 CONFIG_SHA256="$(hash_file "$CONFIG_FILE")" || { echo "[10X] cannot calculate config checksum" >&2; exit 1; }
 if [[ "$MATCH_STATUS" -eq 0 ]]; then write_stage_marker "01.match"; fi
 
-if [[ "$MATCH_ONLY_FIRST_RUN" == "1" && ! -f "$MATCH_REVIEW_MARKER" ]]; then
+if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "$MATCH_ONLY_FIRST_RUN" == "1" && ! -f "$MATCH_REVIEW_MARKER" ) ]]; then
     marker_tmp="${MATCH_REVIEW_MARKER}.tmp.${BASHPID:-$$}"
     {
         printf 'status=READY_FOR_REVIEW\n'
