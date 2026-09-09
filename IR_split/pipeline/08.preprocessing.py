@@ -24,6 +24,7 @@ import tempfile
 import time
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from pathlib import Path
 from typing import Iterable
 
@@ -103,10 +104,16 @@ class RepresentativeIndex:
     """Read-only representative-state lookup backed by SQLite."""
 
     def __init__(self, database: str | Path):
-        self.connection = sqlite3.connect(str(database))
-        self.connection.execute("PRAGMA query_only=ON")
+        self.database_uri = Path(database).resolve().as_uri() + "?mode=ro"
 
     def lookup_many(self, sample_id: str, query_ids: Iterable[object]) -> dict[str, str]:
+        # TCR/BCR are read concurrently. Connections belong to the calling
+        # thread and are closed even if lookup fails; the index itself is shared.
+        with closing(sqlite3.connect(self.database_uri, uri=True)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            return self._lookup_many(connection, sample_id, query_ids)
+
+    def _lookup_many(self, connection: sqlite3.Connection, sample_id: str, query_ids: Iterable[object]) -> dict[str, str]:
         queries = [_text(value) for value in query_ids]
         variants = {query: _aliases(query) for query in queries if query}
         aliases = sorted({alias for values in variants.values() for alias in values})
@@ -114,7 +121,7 @@ class RepresentativeIndex:
         for offset in range(0, len(aliases), 400):
             part = aliases[offset:offset + 400]
             marks = ",".join("?" for _ in part)
-            rows = self.connection.execute(
+            rows = connection.execute(
                 f"SELECT alias, umi FROM aliases WHERE sample_id=? AND alias IN ({marks})",
                 [sample_id, *part],
             )
@@ -130,7 +137,8 @@ class RepresentativeIndex:
         return result
 
     def close(self) -> None:
-        self.connection.close()
+        # Kept for existing callers; no connection survives lookup_many().
+        pass
 
 
 def build_representative_index(state_paths: list[Path], database: str | Path) -> dict[str, int]:
@@ -679,6 +687,8 @@ def main() -> int:
                 else:
                     failed = True
                 print(f"[IR preprocessing] sample={start + offset}/{len(group_items)} sample={sample} batch={batch} receptors={manifest['available_receptors'] or '-'} status={manifest['status']}", flush=True)
+                for error in errors:
+                    print(f"[IR preprocessing] ERROR sample={sample}: {error}", file=sys.stderr, flush=True)
                 del items
                 gc.collect()
             if failed and manifest_rows and manifest_rows[-1].get("status") == "PAUSED_MEMORY":
