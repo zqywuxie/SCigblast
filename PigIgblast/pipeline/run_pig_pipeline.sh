@@ -278,8 +278,23 @@ stage_output_ready(){ case "$1" in
   igblast) [[ -s "$(stage_root 05.igblastn_out)/chain_summary.csv" || -s "$(stage_root 05.igblastn_out)/igblastn_run_summary.tsv" ]];;
   *) return 1;; esac; }
 MAPPING_SHA256="unknown"
-stage_done(){ local label="$1" marker="${STATE_DIR}/.pipeline_stage_${label}.DONE"; [[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 && -s "$marker" ]] || return 1; grep -qx 'status=DONE' "$marker" || return 1; grep -qx "config_sha256=${CONFIG_SHA256}" "$marker" || return 1; grep -qx "mapping_sha256=${MAPPING_SHA256}" "$marker" || return 1; grep -qx "stage_sha256=$(stage_fingerprint "$label")" "$marker" || return 1; stage_output_ready "$label"; }
-mark_stage(){ local label="$1" marker="${STATE_DIR}/.pipeline_stage_${label}.DONE" tmp="${marker}.tmp.${BASHPID:-$$}"; { printf 'status=DONE\nstage=%s\nconfig_sha256=%s\nmapping_sha256=%s\nstage_sha256=%s\ntimestamp=%s\n' "$label" "$CONFIG_SHA256" "$MAPPING_SHA256" "$(stage_fingerprint "$label")" "$(date -Iseconds)"; } > "$tmp"; mv -f "$tmp" "$marker"; }
+stage_done(){
+  local label="$1"
+  local marker="${STATE_DIR}/.pipeline_stage_${label}.DONE"
+  [[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 && -s "$marker" ]] || return 1
+  grep -qx 'status=DONE' "$marker" || return 1
+  grep -qx "config_sha256=${CONFIG_SHA256}" "$marker" || return 1
+  grep -qx "mapping_sha256=${MAPPING_SHA256}" "$marker" || return 1
+  grep -qx "stage_sha256=$(stage_fingerprint "$label")" "$marker" || return 1
+  stage_output_ready "$label"
+}
+mark_stage(){
+  local label="$1"
+  local marker="${STATE_DIR}/.pipeline_stage_${label}.DONE"
+  local tmp="${marker}.tmp.${BASHPID:-$$}"
+  { printf 'status=DONE\nstage=%s\nconfig_sha256=%s\nmapping_sha256=%s\nstage_sha256=%s\ntimestamp=%s\n' "$label" "$CONFIG_SHA256" "$MAPPING_SHA256" "$(stage_fingerprint "$label")" "$(date -Iseconds)"; } > "$tmp"
+  mv -f "$tmp" "$marker"
+}
 run_stage(){ local label="$1" required_gb="$2"; shift 2; if stage_done "$label"; then echo "[PIG] reusing completed ${label} stage"; return 0; fi; echo "[PIG] ${label} (sample-level resume enabled)"; run_monitored_stage "$label" "$required_gb" "$@" || return $?; stage_output_ready "$label" || { echo "[PIG] ${label} completed but required output is missing" >&2; return 1; }; mark_stage "$label"; }
 # Matching is cheap and must always be rerun so corrected submission rows are
 # visible on the next invocation.  Every downstream stage skips only complete
