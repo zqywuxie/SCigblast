@@ -235,11 +235,11 @@ class WorkflowTests(unittest.TestCase):
         first = self.client.post('/api/jobs', json=body)
         self.assertEqual(first.status_code, 200, first.text)
         path = Path(first.json()['output_root'])
-        self.assertEqual(path.parent, self.out)
-        self.assertRegex(path.name, r'^zqy_igblast_base_\d{8}_\d{6}$')
+        self.assertEqual(path.parent, self.out/'admin'/'igblast_base')
+        self.assertRegex(path.name, r'^\d{8}_\d{6}$')
         self.assertEqual(first.json()['operator'], '郑钦云')
-        self.assertTrue(web.default_job_output('张三', 'ir_split').name.startswith('zs_ir_split_'))
-        self.assertTrue(web.default_job_output('ZQY', 'ir_split').name.startswith('zqy_ir_split_'))
+        self.assertEqual(web.default_job_output('ZQY', 'ir_split').parent, self.out/'zqy'/'ir_split')
+        self.assertEqual(web.default_job_output('user.name_', 'ir_split').parent, self.out/'user.name_'/'ir_split')
         with patch.object(web, 'default_job_output', return_value=path):
             second = self.client.post('/api/jobs', json=body)
         self.assertEqual(second.status_code, 200, second.text)
@@ -248,6 +248,25 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(web, 'default_job_output', return_value=self.out/'whitespace'):
             body['output_root'] = '  '
             self.assertEqual(self.client.post('/api/jobs', json=body).json()['output_root'], str(self.out/'whitespace'))
+
+    def test_user_pipeline_time_layout_reaches_each_runner(self):
+        for pipeline in web.REGISTRY:
+            with self.subTest(pipeline=pipeline):
+                body = {'pipeline': pipeline, 'operator': 'forged-user', 'input_path': str(self.raw),
+                        'submission_revision': self.view['revision']}
+                validated = self.client.post('/api/validate', json=body)
+                self.assertEqual(validated.status_code, 200, validated.text)
+                self.assertEqual(Path(validated.json()['output_root']).parent, self.out/'admin'/pipeline)
+                created = self.client.post('/api/jobs', json=body)
+                self.assertEqual(created.status_code, 200, created.text)
+                row = web.get_job_row(created.json()['id'])
+                output = Path(row['output_root'])
+                self.assertEqual(output.parent, self.out/'admin'/pipeline)
+                self.assertRegex(output.name, r'^\d{8}_\d{6}$')
+                env = json.loads(row['env_json'])
+                self.assertEqual(env['SCIGBLAST_OUTPUT_ROOT'], str(output))
+                self.assertEqual(env['SCIGBLAST_RUN_OUTPUT_ROOT'], str(output))
+                self.assertFalse(output.exists(), 'only the pipeline creates analysis output')
 
     def test_delete_exclusive_results_and_record(self):
         body = {'pipeline':'igblast_base', 'operator':'test', 'input_path':str(self.raw), 'submission_revision':self.view['revision']}
@@ -263,6 +282,8 @@ class WorkflowTests(unittest.TestCase):
         result = self.client.post(f'/api/jobs/{jid}/delete',json=confirm)
         self.assertEqual(result.status_code,200,result.text)
         self.assertFalse(output.exists());self.assertTrue(self.raw.exists());self.assertTrue(self.source.exists())
+        self.assertTrue(output.parent.is_dir(), 'deletion must preserve the pipeline directory')
+        self.assertTrue(output.parent.parent.is_dir(), 'deletion must preserve the user directory')
         self.assertEqual(self.client.get(f'/api/jobs/{jid}').status_code,404)
         with web.db() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM actions WHERE job_id=?',(jid,)).fetchone()[0],0)

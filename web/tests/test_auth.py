@@ -222,6 +222,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         job = result.json()
         self.assertEqual(job['operator'], '测试用户')
+        self.assertEqual(workflow.Path(job['output_root']).parent, self.out/'alice'/'igblast_base')
         own = user.get('/api/jobs').json()
         self.assertEqual(own['total'], 1)
         legacy_response = self.client.post('/api/jobs', json={**body, 'output_root': str(self.out/'legacy')})

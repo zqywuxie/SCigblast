@@ -24,7 +24,6 @@ from contextlib import contextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pypinyin import Style, lazy_pinyin
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -226,12 +225,11 @@ def validate_output(value: str | None) -> Path:
     return resolved
 
 
-def default_job_output(operator: str, pipeline: str) -> Path:
-    # Only directory names use initials; job/operator audit records retain the full name.
-    initials = ''.join(lazy_pinyin(operator.strip(), style=Style.FIRST_LETTER)).lower()
-    name = re.sub(r"[^a-z0-9.-]+", "_", initials).strip("._")[:60] or "operator"
+def default_job_output(username: str, pipeline: str) -> Path:
+    # Use the account username, preserving valid dots, underscores and hyphens.
+    name = username.strip().lower()
     stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
-    return DEFAULT_OUTPUT_ROOT / f"{name}_{pipeline}_{stamp}"
+    return DEFAULT_OUTPUT_ROOT / name / pipeline / stamp
 
 
 BROWSE_SPECS: dict[str, tuple[str, set[str]]] = {
@@ -365,7 +363,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     barcode = validate_barcode(request.barcode_csv, bool(config["requires_barcode"]))
-    output_root = validate_output(request.output_root or str(default_job_output(request.operator, request.pipeline)))
+    output_root = validate_output(request.output_root or str(default_job_output(auth.require_user()['username'], request.pipeline)))
     dataset = safe_dataset(request.dataset_label, input_path)
     if request.operator.strip() == "":
         raise HTTPException(400, "operator is required")

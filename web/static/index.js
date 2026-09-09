@@ -68,7 +68,7 @@
     const defaults = await Submission.api('/api/defaults');
     formDefaults = defaults;
     $('[name="barcode_csv"]').value = defaults.barcode_csv;
-    $('#output-hint').textContent = `留空自动创建 ${defaults.output_base}/姓名拼音首字母_pipeline_日期时间（如 zqy_10x_split_20260909_150443）。网页保留完整姓名，已有目录不改名。填写路径时使用该路径本身。`;
+    $('#output-hint').textContent = `${defaults.output_base}/用户名/Pipeline类型/YYYYMMDD_HHMMSS/（北京时间）`;
     $('#pipeline-cards').insertAdjacentHTML('beforebegin', '<p id="pipeline-root-hint" class="field-hint"></p>');
     $('#pipeline-root-hint').textContent = `项目目录：${defaults.pipeline_root}`;
     $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');

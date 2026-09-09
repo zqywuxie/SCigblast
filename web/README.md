@@ -74,7 +74,7 @@ docker compose exec scigblast-web python /app/check_runtime.py
 
 页面首页是全宽任务控制台：可以按状态、Pipeline 和关键词筛选任务；“新建任务”以居中弹窗打开，先选择 Pipeline，再填写路径。输入目录、Submission、Barcode CSV 和输出目录都可以手动填写，也可以点击“浏览”通过服务器文件树选择（仅显示 `SCIGBLAST_ALLOWED_*_ROOTS` 下的内容）。详情页提供运行概览、Match 审核、实时日志、输出文件、参数记录和 IgBLAST 统计。日志按字节增量读取，支持暂停刷新、自动滚动和复制。
 
-默认结果目录为 `/colddata/zqy/SCigblast/results/姓名拼音首字母_pipeline_YYYYMMDD_HHMMSS`，按北京时间命名；同秒同名冲突追加 `_02` 等编号。例如郑钦云对应 `zqy_ir_split_20260909_143000`，页面和操作历史保留完整姓名。拼音按默认读音转换，多音姓名可直接填写期望的英文缩写。`SCIGBLAST_DEFAULT_OUTPUT_ROOT` 表示独立任务目录的父目录；原始默认值 `/colddata/zqy/SCigblast/results/web_output` 自动兼容为其父目录，新任务不再共享 web_output，旧任务路径不迁移。页面填写自定义输出时使用该目录本身，不额外追加命名。`runtime/scigblast.sqlite3` 保存任务和操作记录。
+默认结果目录按 `results/用户名/Pipeline类型/时间/` 分层，例如 `/colddata/zqy/SCigblast/results/zqy/ir_split/20260909_143000/`。用户名取自登录账户，保留其中的点、下划线和短横线；Pipeline 类型为 `ir_split`、`10x_split`、`igblast_base` 或 `pig_igblast`；时间格式为 `YYYYMMDD_HHMMSS`，使用北京时间。同一用户、同一流程的同秒任务追加 `_02` 等编号，分析阶段目录写入各自的时间目录。`SCIGBLAST_DEFAULT_OUTPUT_ROOT` 仍表示最外层结果根目录，无需调整现有挂载；原始默认值 `/colddata/zqy/SCigblast/results/web_output` 自动兼容为其父目录。已有任务不迁移，续跑、下载及删除均沿用记录中的结果路径；删除新任务只移除其时间目录，保留用户和流程父目录。`runtime/scigblast.sqlite3` 保存任务和操作记录。
 
 ## 使用流程
 
