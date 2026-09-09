@@ -18,7 +18,7 @@ class BootstrapAdminTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         settings = {'SCIGBLAST_ADMIN_USERNAME': 'DeployAdmin',
-                    'SCIGBLAST_ADMIN_PASSWORD': 'deploy-password-$#-123',
+                    'SCIGBLAST_ADMIN_PASSWORD': 'Ab1$#x',
                     'SCIGBLAST_ADMIN_DISPLAY_NAME': 'Deployment Admin'}
         for mock in (patch.object(web, 'STATE_ROOT', root),
                      patch.object(web, 'DB_PATH', root / 'test.sqlite3'),

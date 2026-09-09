@@ -21,8 +21,8 @@ def main():
     name = (args.name or username).strip()
     if not 1 <= len(name) <= 60:
         parser.error('display name must be 1–60 characters')
-    password = getpass.getpass('New password (12–128 characters): ')
-    if not 12 <= len(password) <= 128 or password != getpass.getpass('Confirm password: '):
+    password = getpass.getpass('New password (6–128 characters): ')
+    if not 6 <= len(password) <= 128 or password != getpass.getpass('Confirm password: '):
         parser.error('password length invalid or confirmation does not match')
     encoded = auth.password_hash(password)
     app.init_db()

@@ -121,7 +121,7 @@ def rate_limit(db, key, maximum):
 
 class Credentials(BaseModel):
     username: str = Field(min_length=3, max_length=32, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=6, max_length=128)
 
 
 def bootstrap_admin(db):
@@ -138,8 +138,8 @@ def bootstrap_admin(db):
             return
         if not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{2,31}', username):
             raise RuntimeError('SCIGBLAST_ADMIN_USERNAME must be 3–32 ASCII letters/digits/_.-')
-        if not 12 <= len(password) <= 128:
-            raise RuntimeError('SCIGBLAST_ADMIN_PASSWORD must contain 12–128 characters')
+        if not 6 <= len(password) <= 128:
+            raise RuntimeError('SCIGBLAST_ADMIN_PASSWORD must contain 6–128 characters')
         if not 1 <= len(name) <= 60 or not re.fullmatch(r'[A-Za-z][A-Za-z0-9 ._-]*', name):
             raise RuntimeError('SCIGBLAST_ADMIN_DISPLAY_NAME must be 1–60 characters, start with an English '
                                'letter and contain only ASCII letters/digits/spaces/._-')
@@ -167,7 +167,7 @@ class ActiveRequest(BaseModel):
 
 class PasswordRequest(BaseModel):
     current_password: str = Field(max_length=128)
-    new_password: str = Field(min_length=12, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
 
 
 def router(db):
