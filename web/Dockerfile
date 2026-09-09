@@ -1,4 +1,4 @@
-FROM mambaorg/micromamba:2.9.0
+FROM ghcr.io/mamba-org/micromamba:2.9.0
 
 USER root
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
@@ -18,6 +18,11 @@ RUN micromamba install --yes --name base --strict-channel-priority --file /app/e
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
 COPY web/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+# PANDAseq requires the libltdl.so.7 runtime library.
+# Keep this after environment installation to reuse the expensive Conda layer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libltdl7 \
+    && rm -rf /var/lib/apt/lists/*
 COPY web/check_runtime.py /app/check_runtime.py
 RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
 

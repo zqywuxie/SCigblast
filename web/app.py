@@ -14,7 +14,7 @@ import tempfile
 import shutil
 import shlex
 import submission
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 from contextlib import contextmanager
@@ -31,8 +31,11 @@ PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
 DEFAULT_OUTPUT_ROOT = Path(
-    os.environ.get("SCIGBLAST_DEFAULT_OUTPUT_ROOT", "/colddata/zqy/SCigblast/results/web_output")
+    os.environ.get("SCIGBLAST_DEFAULT_OUTPUT_ROOT", "/colddata/zqy/SCigblast/results")
 ).resolve()
+# Compatibility with the original .env: web_output was a shared task root.
+if DEFAULT_OUTPUT_ROOT == Path('/colddata/zqy/SCigblast/results/web_output').resolve():
+    DEFAULT_OUTPUT_ROOT = DEFAULT_OUTPUT_ROOT.parent
 MAX_ACTIVE_JOBS = min(2, max(1, int(os.environ.get("SCIGBLAST_MAX_ACTIVE_JOBS", "2"))))
 
 
@@ -216,6 +219,13 @@ def validate_output(value: str | None) -> Path:
     return resolved
 
 
+def default_job_output(operator: str, pipeline: str) -> Path:
+    # Preserve Chinese names, but never interpret a name as a filesystem path.
+    name = re.sub(r"[^\w.-]+", "_", operator.strip(), flags=re.UNICODE).strip("._")[:60] or "operator"
+    stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
+    return DEFAULT_OUTPUT_ROOT / f"{name}_{pipeline}_{stamp}"
+
+
 BROWSE_SPECS: dict[str, tuple[str, set[str]]] = {
     "input": ("SCIGBLAST_ALLOWED_INPUT_ROOTS", set()),
     "submission": ("SCIGBLAST_ALLOWED_SUBMISSION_ROOTS", {".xlsx"}),
@@ -336,6 +346,7 @@ class CreateJob(BaseModel):
 
 
 def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
+    request.output_root = (request.output_root or '').strip() or None
     if request.pipeline not in REGISTRY:
         raise HTTPException(400, "unknown pipeline")
     config = REGISTRY[request.pipeline]
@@ -346,7 +357,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     barcode = validate_barcode(request.barcode_csv, bool(config["requires_barcode"]))
-    output_root = validate_output(request.output_root)
+    output_root = validate_output(request.output_root or str(default_job_output(request.operator, request.pipeline)))
     dataset = safe_dataset(request.dataset_label, input_path)
     if request.operator.strip() == "":
         raise HTTPException(400, "operator is required")
@@ -666,6 +677,40 @@ def result_file(row):
     return None
 
 
+def stage_reports(row):
+    root, dataset = Path(row['output_root']), row['dataset']
+    entries = [('fastp', 'Fastp 质量过滤', '输入、保留 reads 及保留比例',
+                [root / '02.fastp' / dataset / 'report/fastp_summary.csv'])]
+    if row['pipeline'] == 'ir_split':
+        entries.append(('split', 'IR Barcode / UMI 拆分', '匹配、丢弃与保留序列数及百分比',
+                        [root / '03.IR_split_output' / dataset / 'ir_split_summary.csv']))
+    if row['pipeline'] == '10x_split':
+        entries.extend([
+            ('prefilter', '10X R1 / R2 预筛选', 'TSO 与 Barcode 筛选结果',
+             [root / '03.prefilter_data' / dataset / 'r1_r2_prefilter_summary.csv']),
+            ('split', '10X Barcode / UMI 拆分', '拆分样本及序列统计',
+             [root / '06.split_output' / dataset / 'all_samples_summary.csv']),
+            ('representative', '10X 代表序列', 'UMI 分组与代表序列统计',
+             [root / '06.split_output' / dataset / 'representative_summary.csv'])])
+    panda = '05.pandaseq' if row['pipeline'] in {'ir_split', '10x_split'} else '04.pandaseq'
+    entries.append(('pandaseq', 'PANDAseq 序列合并', '输入、合并成功数及合并比例',
+                    [root / panda / dataset / 'pandaseq_summary.csv']))
+    entries.append(('results', 'IgBLAST 比对与筛选', '匹配统计与 productive 筛选后统计', [result_file(row)]))
+    reports = []
+    for kind, label, description, candidates in entries:
+        path = next((p for p in candidates if p and p.is_file() and is_under(p, [root])), None)
+        reports.append({'kind': kind, 'label': label, 'description': description,
+                        'path': str(path) if path else None, 'exists': bool(path)})
+    return reports
+
+
+def stage_summary_file(row, kind):
+    if kind == 'match':
+        return next(iter(summary_files(row)), None)
+    report = next((r for r in stage_reports(row) if r['kind'] == kind), None)
+    return Path(report['path']) if report and report['path'] else None
+
+
 def read_table(path: Path, offset=0, limit=50, query="", errors_only=False):
     rows, counts, matched = [], {"total": 0, "ok": 0, "error": 0}, 0
     pairs, samples = set(), set()
@@ -749,6 +794,7 @@ def pipelines() -> dict[str, Any]:
 @app.get('/api/defaults')
 def form_defaults():
     return {'pipeline_root': str(PIPELINE_ROOT),
+            'output_base': str(DEFAULT_OUTPUT_ROOT),
             'barcode_csv': str(PIPELINE_ROOT / 'reference' / '8bp_barcodes.csv')}
 
 
@@ -924,10 +970,18 @@ def results(job_id: str, offset: int = 0, limit: int = 50, query: str = "", erro
     return read_table(path, offset, limit, query, errors_only) if path else {"path": None, "rows": [], "columns": [], "total": 0}
 
 
+@app.get('/api/jobs/{job_id}/stage-summary')
+def stage_summary(job_id: str, kind: str, offset: int = 0, limit: int = 50, query: str = ''):
+    path = stage_summary_file(get_job_row(job_id), kind)
+    if not path:
+        return {'path': None, 'rows': [], 'columns': [], 'total': 0}
+    return read_table(Path(path), offset, limit, query)
+
+
 @app.get("/api/jobs/{job_id}/download")
 def download_result(job_id: str, kind: str = "results"):
     row = get_job_row(job_id)
-    path = result_file(row) if kind == "results" else next(iter(summary_files(row)), None)
+    path = stage_summary_file(row, kind)
     if path is None or not is_under(Path(path), [Path(row["output_root"])]):
         raise HTTPException(404, "Summary not available")
     return FileResponse(path, filename=Path(path).name)
@@ -944,6 +998,17 @@ def create_job(request: CreateJob) -> dict[str, Any]:
             raise HTTPException(400, str(exc)) from exc
     job, _ = build_job(request)
     with PROCESS_LOCK:
+        if not request.output_root:
+            base = Path(job['output_root'])
+            candidate, number = base, 1
+            with db() as connection:
+                while candidate.exists() or connection.execute('SELECT 1 FROM jobs WHERE output_root=?', (str(candidate),)).fetchone():
+                    number += 1
+                    candidate = base.with_name(f'{base.name}_{number:02d}')
+            job['output_root'] = str(candidate)
+            env = json.loads(job['env_json'])
+            env.update(SCIGBLAST_OUTPUT_ROOT=str(candidate), SCIGBLAST_RUN_OUTPUT_ROOT=str(candidate))
+            job['env_json'] = json.dumps(env)
         with db() as connection:
             collision = connection.execute("SELECT id FROM jobs WHERE output_root=? AND dataset=?", (job["output_root"], job["dataset"])).fetchone()
         if collision:
@@ -952,6 +1017,69 @@ def create_job(request: CreateJob) -> dict[str, Any]:
     add_action(job["id"], job["operator"], "create", json.dumps(request.model_dump(), ensure_ascii=False))
     schedule()
     return snapshot(get_job_row(job["id"]))
+
+
+@app.post('/api/jobs/{job_id}/delete')
+def delete_job(job_id: str, request: dict):
+    """Delete only an inactive job's exclusive output, never an input or shared root."""
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        if request.get('output_root') != row['output_root'] or request.get('confirm') != job_id:
+            raise HTTPException(400, '请确认任务和将删除的输出目录')
+        if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING'} or job_id in PROCESSES:
+            raise HTTPException(409, '请先停止任务，等待进程退出后再删除')
+        # A restarted server may have marked a still-live process INTERRUPTED.
+        if row['pgid'] and hasattr(os, 'killpg'):
+            try:
+                os.killpg(row['pgid'], 0)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                raise HTTPException(409, '无法确认任务进程已退出，暂不允许删除')
+            else:
+                raise HTTPException(409, '任务进程组仍存在，暂不允许删除')
+        raw = Path(row['output_root'])
+        output = validate_output(str(raw))
+        if raw.absolute() != output or any(p.is_symlink() for p in (raw, *raw.parents)):
+            raise HTTPException(409, '输出路径包含链接，禁止递归删除')
+        roots = configured_roots('SCIGBLAST_ALLOWED_OUTPUT_ROOTS', str(DEFAULT_OUTPUT_ROOT))
+        if output in [*roots, DEFAULT_OUTPUT_ROOT, Path(output.anchor), PIPELINE_ROOT, STATE_ROOT]:
+            raise HTTPException(409, '不能删除公共输出根目录；请使用每任务独立目录')
+        with db() as connection:
+            all_rows = connection.execute('SELECT * FROM jobs').fetchall()
+        for other in all_rows:
+            if other['id'] != job_id:
+                other_output = Path(other['output_root']).resolve()
+                if is_under(output, [other_output]) or is_under(other_output, [output]):
+                    raise HTTPException(409, '该输出目录与其他任务共享或嵌套，不能整目录删除')
+            options = json.loads(other['options_json'])
+            for value in (other['input_path'], other['submission_path'], other['barcode_csv'], options.get('submission_path')):
+                if value:
+                    protected = Path(value).resolve()
+                    if is_under(protected, [output]) or is_under(output, [protected]):
+                        raise HTTPException(409, '输出与原始数据或 Submission 路径重叠，禁止删除')
+        if is_under(STATE_ROOT, [output]) or is_under(PIPELINE_ROOT, [output]):
+            raise HTTPException(409, '输出包含程序或任务数据库，禁止删除')
+        if output.exists() and (not output.is_dir() or (
+                any(output.iterdir()) and not (output / '01.match' / row['dataset']).is_dir()
+                and not state_dir(row).is_dir())):
+            raise HTTPException(409, '未找到该任务的阶段目录，无法安全确认输出归属')
+        job_state = STATE_ROOT / 'jobs' / job_id
+        if job_state.is_symlink() or not is_under(job_state, [STATE_ROOT / 'jobs']):
+            raise HTTPException(409, '任务日志目录归属异常')
+        try:
+            if output.exists():
+                shutil.rmtree(output)
+            if job_state.exists():
+                shutil.rmtree(job_state)
+        except OSError as exc:
+            raise HTTPException(500, f'删除未完成，任务记录已保留，可检查权限后重试：{exc}') from exc
+        with db() as connection:
+            connection.execute('DELETE FROM reviews WHERE job_id=?', (job_id,))
+            connection.execute('DELETE FROM actions WHERE job_id=?', (job_id,))
+            connection.execute('DELETE FROM jobs WHERE id=?', (job_id,))
+        STOP_REQUESTED.discard(job_id)
+        return {'deleted': job_id, 'output_root': str(output)}
 
 
 @app.post("/api/validate")
@@ -1189,5 +1317,6 @@ def artifacts(job_id: str) -> dict[str, Any]:
         candidates.append(final_summary)
     return {
         "output_root": str(output),
+        "reports": stage_reports(row),
         "files": [{"path": str(path), "exists": path.exists(), "is_dir": path.is_dir(), "size": path.stat().st_size if path.is_file() else None} for path in candidates],
     }

@@ -280,7 +280,8 @@ mkdir -p "$PID_DIR"
 PID_FILE="${PID_DIR}/run.$$.pid"
 printf '%s\n' "$$" > "$PID_FILE"
 cleanup_pid() {
-    local rc=$? status="FAILED" error="exit=${rc}"
+    local rc=$?
+    local status="FAILED" error="exit=${rc}"
     rm -f "$PID_FILE"
     if [[ -n "${PIPELINE_DONE_MARKER:-}" && -f "$PIPELINE_DONE_MARKER" ]]; then
         status="DONE"; error=""

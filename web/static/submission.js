@@ -28,7 +28,7 @@ window.Submission = (() => {
       $('[data-grid]').innerHTML = `<table><thead><tr><th>Excel 行</th>${s.headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${s.rows.slice(page*40,page*40+40).map(r=>`<tr><td>${r.row}</td>${r.values.map((v,i)=> {const c=r.editable[i],k=key(s,c); return `<td>${c.kind ? `<input data-key="${esc(k)}" data-kind="${c.kind}" aria-label="${esc(s.headers[i])} ${r.row}" title="${esc(c.merged || c.cell)}${c.inherited?' · 继承单元格':''}" value="${esc(edits.get(k)?.value ?? v)}">` : esc(v)}</td>`;}).join('')}</tr>`).join('')}</tbody></table>`;
       $('[data-page]').textContent = `${s.rows.length} 行 · 第 ${page+1} / ${Math.max(1,Math.ceil(s.rows.length/40))} 页`;
       $('[data-prev]').disabled=page===0; $('[data-next]').disabled=(page+1)*40>=s.rows.length;
-      $('[data-revision]').textContent = `版本 ${data.revision.split('/')[1].slice(0,8)} · ${edits.size} 个单元格变更`;
+      $('[data-revision]').textContent = `工作副本 · ${edits.size} 个单元格变更`;
     }
     $('[data-grid]').onchange = event => {const input=event.target;if(!input.dataset.key)return;const [file,sheet,cell]=JSON.parse(input.dataset.key);edits.set(input.dataset.key,{file,sheet,cell,value:input.value});render();};
     $('[data-sheet]').onchange = e => {sheetIndex=Number(e.target.value);page=0;render();};
@@ -44,5 +44,27 @@ window.Submission = (() => {
     $('[data-save]').onclick=async()=>{const b=$('[data-save]');b.disabled=true;try{if(edits.size)data=await api('/api/submissions/revise',{revision:data.revision,changes:[...edits.values()]});await accept(data);close();}catch(e){$('[data-message]').textContent=e.message;}finally{b.disabled=false;}};
     render();
   }
-  return {api,open,esc};
+  function deleteJob(job) {
+    return new Promise(resolve => {
+      const modal = document.createElement('dialog'); modal.className = 'delete-dialog';
+      modal.innerHTML = `<header><h2>删除任务与结果</h2><button class="close-button" data-cancel aria-label="取消删除">×</button></header><p><strong>${esc(job.dataset)}</strong> · ${esc(job.pipeline_label)} · ${esc(job.operator)}</p><p>将删除任务列表记录、操作记录及下方服务器结果目录内的全部文件。此操作不可撤销。</p><code class="delete-path">${esc(job.output_root)}</code><p class="muted">不会删除原始数据或 Submission。共享目录、运行中任务及不安全路径会被服务器拒绝。</p><label>输入 <strong>DELETE</strong> 确认<input data-confirm autocomplete="off" spellcheck="false" aria-label="输入 DELETE 确认删除"></label><p data-message role="status" aria-live="polite"></p><footer><button class="button button-ghost" data-cancel>取消</button><button class="button button-danger" data-delete disabled>删除任务及结果</button></footer>`;
+      document.body.append(modal); modal.showModal();
+      let deleting = false;
+      const close = value => { modal.close(); modal.remove(); resolve(value); };
+      modal.querySelectorAll('[data-cancel]').forEach(b => b.onclick = () => { if(!deleting) close(false); });
+      modal.addEventListener('cancel', e => { e.preventDefault(); if(!deleting) close(false); });
+      const input = modal.querySelector('[data-confirm]'), button = modal.querySelector('[data-delete]');
+      input.oninput = () => { button.disabled = input.value !== 'DELETE'; };
+      input.focus();
+      button.onclick = async () => {
+        if(deleting || input.value !== 'DELETE') return;
+        deleting = true; button.disabled = true; input.disabled = true;
+        modal.querySelectorAll('[data-cancel]').forEach(b => b.disabled = true);
+        modal.querySelector('[data-message]').textContent = '正在删除，请勿关闭页面…';
+        try { await api(`/api/jobs/${job.id}/delete`, {confirm:job.id,output_root:job.output_root}); close(true); }
+        catch(e) { modal.querySelector('[data-message]').textContent = e.message; deleting = false; button.disabled = false; input.disabled = false; modal.querySelectorAll('[data-cancel]').forEach(b => b.disabled = false); }
+      };
+    });
+  }
+  return {api,open,esc,deleteJob};
 })();

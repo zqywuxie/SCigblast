@@ -12,7 +12,7 @@
 默认目录布局：`web/`、`reference/`、`IR_split/`、`10X_split/`、`Igblast_base/`、`PigIgblast/` 位于同一个项目根目录。
 Docker 构建上下文是项目根目录，使用 `web/Dockerfile`。四条 pipeline（包括 tools/models）复制到镜像 `/opt/scigblast`，默认 Barcode CSV 复制到 `/opt/scigblast/reference/8bp_barcodes.csv`；运行时不再挂载宿主机源码。非 Docker 启动仍默认使用 `web` 的上一级。
 
-IR / 10X 的 Barcode 默认使用项目下 `reference/8bp_barcodes.csv`，网页自动填入，也可以选择其他 CSV；空值提交会使用该默认文件。Base / Pig 不自动传入 Barcode。文件树会提供项目 `reference` 目录；缺少默认文件时校验明确报错，不会猜选其他 CSV。浏览器之前记住的自定义 Barcode 路径仍优先保留。
+IR / 10X 的 Barcode 默认使用项目下 `reference/8bp_barcodes.csv`，网页自动填入，也可以选择其他 CSV；空值提交会使用该默认文件。Base / Pig 不自动传入 Barcode。每次打开新建任务都会清空上次填写的内容和 Submission 工作副本，仅恢复系统默认 Barcode，不再从浏览器恢复旧任务路径。
 已有 `web/.env` 不会被自动覆盖；旧 `SCIGBLAST_HOST_PIPELINE_ROOT` 已不再使用，可以删除。
 
 1. 构建机器需要完整项目源码；使用已构建镜像的 Linux x86-64 服务器只需 Compose 配置、原始数据、Submission 和 IgBLAST 数据库。镜像内安装完整分析环境，不需要激活或挂载宿主机 Conda。数据库继续使用各 pipeline 配置中的路径；数据库在 `/colddata` 外时，需要另加同路径只读挂载。
@@ -40,7 +40,7 @@ bash deploy.sh
 
 首次缺少 `web/.env` 时会生成配置模板并退出，请填写路径后重新执行。已有镜像时使用 `bash deploy.sh --no-build`；查看帮助使用 `bash deploy.sh --help`。无需先激活 Conda。
 
-脚本会检查 Docker Compose、构建并重建容器，最后轮询 `/health` 健康检查。也可以通过 `SCIGBLAST_ENV_FILE=/path/to/.env bash deploy.sh` 指定配置文件。
+脚本先执行当前分支的 `git pull --ff-only`，然后重新加载更新后的 deploy.sh，再检查 Docker Compose、构建并重建容器，最后轮询 `/health`。有未提交的受版本管理文件改动、无上游、分支分叉或网络错误时停止，不自动 stash/reset。未跟踪文件若阻挡拉取，Git 也会报错停止。`web/.env` 不被覆盖。服务器此前手动修改过 Dockerfile 或 pipeline 配置时，先备份并整理这些改动再拉取。`--no-build` 也会拉取仓库，但现有镜像不会包含新拉取的代码；发布代码更新应使用默认模式。也可以通过 `SCIGBLAST_ENV_FILE=/path/to/.env bash deploy.sh` 指定配置文件。
 
 浏览器访问 `http://服务器地址:8000`。
 
@@ -61,20 +61,22 @@ docker compose exec scigblast-web python /app/check_runtime.py
 
 > 如果服务器的 8000 端口已被占用，可在 `.env` 中设置 `SCIGBLAST_WEB_PORT=8080`，此时访问 `http://服务器地址:8080`。
 
-页面首页是全宽任务控制台：可以按状态、Pipeline 和关键词筛选任务；“新建任务”从右侧抽屉打开，并提供路径验证。输入目录、Submission、Barcode CSV 和输出目录都可以手动填写，也可以点击“浏览”通过服务器文件树选择（仅显示 `SCIGBLAST_ALLOWED_*_ROOTS` 下的内容）。任务详情页分为运行概览、Match 审核、实时日志、输出文件和参数记录五个标签。日志按字节增量读取，支持暂停刷新、自动滚动和复制。
+页面首页是全宽任务控制台：可以按状态、Pipeline 和关键词筛选任务；“新建任务”以居中弹窗打开，先选择 Pipeline，再填写路径。输入目录、Submission、Barcode CSV 和输出目录都可以手动填写，也可以点击“浏览”通过服务器文件树选择（仅显示 `SCIGBLAST_ALLOWED_*_ROOTS` 下的内容）。详情页提供运行概览、Match 审核、实时日志、输出文件、参数记录和 IgBLAST 统计。日志按字节增量读取，支持暂停刷新、自动滚动和复制。
 
-默认结果目录为 `/colddata/zqy/SCigblast/results/web_output`，也可以在页面填写允许根目录下的其他输出目录。`runtime/scigblast.sqlite3` 保存任务和操作记录；pipeline 的 FASTQ、FASTA、TSV、日志和 DONE marker 仍写入用户指定的 output。
+默认结果目录为 `/colddata/zqy/SCigblast/results/执行人_pipeline_YYYYMMDD_HHMMSS`，按北京时间命名；同秒同名冲突追加 `_02` 等编号。例如 `郑钦云_ir_split_20260909_143000`。`SCIGBLAST_DEFAULT_OUTPUT_ROOT` 现在表示这些独立任务目录的父目录；原始默认值 `/colddata/zqy/SCigblast/results/web_output` 自动兼容为其父目录，新任务不再共享 web_output，旧任务路径不迁移。页面填写自定义输出时使用该目录本身，不额外追加命名。`runtime/scigblast.sqlite3` 保存任务和操作记录。
 
 ## 使用流程
 
 1. 选择 Pipeline，页面展示对应流程图；填写操作者、输入/输出和需要的 Barcode CSV。点击“验证路径”检查入口工具与 Python 库缺项。
-2. 上传 XLSX，或选择服务器 Submission 文件/目录后点击“查看 / 编辑”。按工作表分页查看；支持修改样本、Dual Index、Chain、Barcode、Species 和 Note。Note 合并/继承区域一起修改；前缀替换先显示影响行数，目标目录可浏览选择。
+2. 统一在“Submission 文件或目录”中选择路径，再点击同一处“查看 / 编辑”。按工作表分页查看；支持修改样本、Dual Index、Chain、Barcode、Species 和 Note。Note 合并/继承区域一起修改；前缀替换先显示影响行数，目标目录可浏览选择。编辑器仍支持用补齐后的 XLSX 替换工作副本。
 3. 保存工作副本，原始 XLSX 不变。每次编辑生成新版本，当前版本和原始副本均可下载；副本与任务记录保存在 `web/runtime`。
 4. 创建任务首次只做 Match，进入 `WAITING_REVIEW`。按样本/原因搜索、只看 ERROR、分页查看全部记录。支持逐行勾选、全选当前页、跨页保留选择，再批量“已核对 / 待补资料 / 清除标注”；更改筛选或清单版本会清空选择。标注不改变系统 OK/ERROR 状态。
 5. 在 Match 页检查后“审核并继续”。确认绑定当前清单版本，至少一条 OK 才能继续；ERROR 保留，不进入下游。
 6. 补齐资料时点击“编辑资料 / 重新 Match”，再次确认后复用既有样本级断点。若先前确认的样本归属/Barcode/Chain 被改变，禁止复用旧输出，需建立新任务和新输出目录。
 7. 中途失败或停止后点击“断点续跑”。未完成审核的任务不能通过该按钮跳过审核。
 8. “IgBLAST 统计”分页展示原始 chain_summary 列，可搜索样本/链并下载；不跨链相加、不重算分析指标。input=0 但 mapped>0 的行标红。
+9. “输出文件”优先提供 IR 拆分、10X 预筛选/拆分、PANDAseq、fastp 等阶段统计卡片，可分页、搜索及下载原始 CSV/TSV。默认折叠路径字段，不修改计数定义。参数与记录展示中文操作名和第几次 Match，不显示内部哈希；后台仍保留版本校验。
+10. 非运行任务可在列表或详情点击“删除”，输入 `DELETE` 确认。删除任务记录及其独占的服务器结果目录，不删除原始数据、Submission 或共享工作副本。公共根目录、与其他任务共享/嵌套的输出、符号链接或无法验证归属的目录会被拒绝；不会自动删除任何历史任务。删除不可恢复，需保留的结果请事先备份。
 
 任务默认最多同时运行 2 条 pipeline，具体 fastp、PANDAseq、IgBLAST 并发和内存策略仍由各 pipeline 自己的 `00.pipeline_config.env` 控制。
 
@@ -121,6 +123,6 @@ docker load -i /path/to/scigblast-web.tar
 docker compose up -d --no-build
 ```
 
-仅有镜像的服务器也可复制根目录 `deploy.sh`，保留 `web/docker-compose.yml`、`web/.env` 和 `web/.env.example` 的目录布局，然后运行 `bash deploy.sh --no-build`。默认不带参数会从源码重建。数据/数据库挂载仍需配置正确；网页仍可选择自定义 Barcode CSV。
+仅有镜像、没有 Git 仓库的服务器请直接使用上面的 Docker Compose 命令。新版 `deploy.sh` 要求 Git 克隆目录，默认先拉取再从源码重建；`--no-build` 只适用于已有 Git 仓库且明确使用现有镜像的情况。数据/数据库挂载仍需配置正确；网页仍可选择自定义 Barcode CSV。
 
 镜像打包不是代码加密：普通网页用户看不到源码，但有 Docker/服务器管理权限的人仍可从镜像提取脚本。

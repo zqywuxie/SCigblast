@@ -197,6 +197,79 @@ class WorkflowTests(unittest.TestCase):
         web.update_job(jid,status='RUNNING')
         self.assertEqual(self.client.post(url,json={'revision':revision,'row_keys':['150'],'label':''}).status_code,409)
 
+    def test_unique_default_output_names(self):
+        body = {'pipeline':'igblast_base', 'operator':'郑钦云', 'input_path':str(self.raw), 'submission_revision':self.view['revision']}
+        first = self.client.post('/api/jobs', json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        path = Path(first.json()['output_root'])
+        self.assertEqual(path.parent, self.out)
+        self.assertRegex(path.name, r'^郑钦云_igblast_base_\d{8}_\d{6}$')
+        with patch.object(web, 'default_job_output', return_value=path):
+            second = self.client.post('/api/jobs', json=body)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()['output_root'], str(path.with_name(path.name+'_02')))
+        self.assertFalse(path.exists(), 'validation/creation must not create analysis files')
+        with patch.object(web, 'default_job_output', return_value=self.out/'whitespace'):
+            body['output_root'] = '  '
+            self.assertEqual(self.client.post('/api/jobs', json=body).json()['output_root'], str(self.out/'whitespace'))
+
+    def test_delete_exclusive_results_and_record(self):
+        body = {'pipeline':'igblast_base', 'operator':'test', 'input_path':str(self.raw), 'submission_revision':self.view['revision']}
+        result = self.client.post('/api/jobs', json=body).json()
+        jid, output = result['id'], Path(result['output_root'])
+        folder = output/'01.match'/result['dataset']; folder.mkdir(parents=True)
+        (folder/'sample_manifest.csv').write_text('sample_id,status\nA,OK\n')
+        (output/'result.txt').write_text('test result')
+        confirm = {'confirm':jid, 'output_root':str(output)}
+        self.assertEqual(self.client.post(f'/api/jobs/{jid}/delete',json=confirm).status_code,409)
+        web.update_job(jid,status='STOPPED')
+        self.assertEqual(self.client.post(f'/api/jobs/{jid}/delete',json={}).status_code,400)
+        result = self.client.post(f'/api/jobs/{jid}/delete',json=confirm)
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertFalse(output.exists());self.assertTrue(self.raw.exists());self.assertTrue(self.source.exists())
+        self.assertEqual(self.client.get(f'/api/jobs/{jid}').status_code,404)
+        with web.db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM actions WHERE job_id=?',(jid,)).fetchone()[0],0)
+
+    def test_delete_rejects_shared_protected_and_failed_cleanup(self):
+        jid=self.create();web.update_job(jid,status='STOPPED')
+        def delete():
+            return self.client.post(f'/api/jobs/{jid}/delete',json={'confirm':jid,'output_root':web.get_job_row(jid)['output_root']})
+        self.assertEqual(delete().status_code,409)  # common default output root
+        output=self.out/'exclusive';folder=output/'01.match'/'batch';folder.mkdir(parents=True)
+        web.update_job(jid,output_root=str(output))
+        sibling=self.create('other');web.update_job(sibling,status='STOPPED',output_root=str(output/'nested'))
+        self.assertEqual(delete().status_code,409)
+        web.update_job(sibling,output_root=str(self.out/'other'))
+        with patch.object(web.shutil,'rmtree',side_effect=PermissionError('test denial')):
+            self.assertEqual(delete().status_code,500)
+        self.assertEqual(self.client.get(f'/api/jobs/{jid}').status_code,200)
+        web.update_job(jid,output_root=str(self.raw))
+        self.assertEqual(delete().status_code,409);self.assertTrue(self.raw.exists())
+        unknown=self.root/'unowned';unknown.mkdir();(unknown/'keep').write_text('do not delete')
+        web.update_job(jid,output_root=str(unknown))
+        self.assertEqual(delete().status_code,409);self.assertTrue((unknown/'keep').exists())
+
+    def test_stage_reports_pagination_download_and_isolation(self):
+        jid=self.create(pipeline='ir_split')
+        path=self.out/'03.IR_split_output'/'batch'/'ir_split_summary.csv';path.parent.mkdir(parents=True)
+        path.write_text('sample_id,total_reads,matched_reads,matched_pct\nA,100,80,80.00\nB,100,0,0.00\n',encoding='utf-8')
+        panda=self.out/'05.pandaseq'/'batch'/'pandaseq_summary.csv';panda.parent.mkdir(parents=True)
+        panda.write_text('Sample,Total_Reads,OK_Reads,Merged_Percent\nA,80,70,87.50\n')
+        reports=self.client.get(f'/api/jobs/{jid}/artifacts').json()['reports']
+        self.assertTrue(next(r for r in reports if r['kind']=='split')['exists'])
+        data=self.client.get(f'/api/jobs/{jid}/stage-summary',params={'kind':'split','limit':1,'offset':1}).json()
+        self.assertEqual(data['total'],2);self.assertEqual(data['rows'][0]['sample_id'],'B')
+        download=self.client.get(f'/api/jobs/{jid}/download?kind=pandaseq')
+        self.assertEqual(download.status_code,200);self.assertIn('87.50',download.text)
+        self.assertEqual(self.client.get(f'/api/jobs/{jid}/download?kind=../../raw').status_code,404)
+        ten=self.create('ten',pipeline='10x_split')
+        pre=self.out/'03.prefilter_data'/'ten'/'r1_r2_prefilter_summary.csv';pre.parent.mkdir(parents=True)
+        pre.write_text('sample,total_pairs\nT,123\n')
+        data=self.client.get(f'/api/jobs/{ten}/stage-summary?kind=prefilter').json()
+        self.assertEqual(data['rows'][0]['total_pairs'],'123')
+        self.assertEqual(self.client.get(f'/api/jobs/{ten}/stage-summary?kind=split').json()['total'],0)
+
     def test_project_relative_barcode_defaults(self):
         project=self.root/'project';reference=project/'reference';reference.mkdir(parents=True)
         barcode=reference/'8bp_barcodes.csv';barcode.write_text('name,sequence\n1,ACGTACGT\n')

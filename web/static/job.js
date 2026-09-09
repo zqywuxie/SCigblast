@@ -2,6 +2,17 @@
   const $=s=>document.querySelector(s),id=window.SCIGBLAST_JOB_ID,{api,esc}=Submission;
   let job,tab='overview',revision='',attempt=-1,matchPage=0,resultPage=0,offset=0,source='',paused=false,busy=false,logBusy=false;
   const fmt=v=>v?new Date(v).toLocaleString('zh-CN'):'—',fail=e=>alert(e.message||e);
+  const actionLabels = {create:'创建任务', 'confirm-match':'确认 Match 并继续', review:'审核标注', rematch:'更新资料并重新匹配', resume:'断点续跑', stop:'停止任务'};
+  function actionDetail(a) {
+    if(a.action==='confirm-match') { const attempt = String(a.details||'').split(':')[0]; return /^\d+$/.test(attempt) ? `已确认第 ${attempt} 次匹配结果，仅匹配成功的记录进入下游。` : '已确认匹配结果。'; }
+    if(a.action==='review') { try { const r=JSON.parse(a.details); return `${r.row_keys ? new Set(r.row_keys).size : 1} 条记录 · ${r.label || '清除标注'}`; } catch { return '已保存审核标注'; } }
+    return {create:'已提交配置，首先执行样本匹配。', rematch:'已更新 Submission 工作副本。', resume:'保留已有结果，继续执行。',stop:'已请求停止，保留中间结果。'}[a.action] || '';
+  }
+  function visibleOptions(options) {
+    const items = [['数据集',job.dataset],['输出目录',job.output_root]];
+    if(job.pipeline==='ir_split') items.push(['输入模式',options.ir_input_mode==='presplit'?'已拆分（presplit）':'未拆分（raw）'],['代表序列',options.ir_variant==='merged'?'不提取，使用全部合并序列':'提取代表序列'],['结果整理',({'auto':'自动','1':'启用','0':'关闭'})[options.run_preprocessing]||'自动']);
+    return items;
+  }
   document.querySelector('.detail-tabs').insertAdjacentHTML('beforeend','<button class="detail-tab" data-tab="results" role="tab">IgBLAST 统计</button>');
   $('#tab-match .match-filter').insertAdjacentHTML('beforeend',`<input id="match-search" placeholder="搜索样本 / 原因" aria-label="搜索 Match"><button id="match-refresh" class="button button-ghost">刷新</button><a href="/api/jobs/${id}/download?kind=match">下载清单</a>`);
   $('#tab-match').insertAdjacentHTML('beforeend','<div class="pagination"><button id="match-prev" class="button button-ghost">上一页</button><button id="match-next" class="button button-ghost">下一页</button></div><p>标注不改变匹配状态。补齐资料后请重新 Match。</p>');
@@ -16,7 +27,8 @@
     $('#meta-cards').innerHTML=[['操作者',job.operator],['创建时间',fmt(job.created_at)],['阶段内进度',`${job.stage_progress}%（日志报告）`],['尝试次数',job.attempt_no]].map(([k,v])=>`<div class="meta-card"><span>${k}</span><strong>${esc(v)}</strong></div>`).join('');
     $('#progress-total').textContent=`${job.completed_stages.length} / ${job.stages.length} 已完成`;$('#stages').innerHTML=job.stages.map(s=>{const done=job.completed_stages.includes(s),current=s===job.current_stage;return `<div class="stage-row ${done?'done':''} ${current?'current':''}"><span class="stage-check">${done?'✓':current?'●':'○'}</span><span><strong>${esc(job.stage_labels[s]||s)}</strong><small>${s}</small></span><span class="stage-state">${done?'DONE':current?job.status:'PENDING'}</span></div>`;}).join('');
     $('#overview-content').innerHTML=`<dl>${[['输入',job.input_path],['Submission 副本',job.submission_path],['Barcode',job.barcode_csv||'不需要'],['输出',job.output_root],['开始',fmt(job.started_at)],['结束',fmt(job.ended_at)],['退出码',job.exit_code??'—'],['错误',job.last_error||'无']].map(([k,v])=>`<dt>${k}</dt><dd class="mono">${esc(v)}</dd>`).join('')}</dl>`;
-    $('#options-list').innerHTML=Object.entries(data.options||{}).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');$('#audit-timeline').innerHTML=(data.actions||[]).map(a=>`<div class="audit-item"><div><strong>${esc(a.action)}</strong><small>${esc(a.operator)} · ${fmt(a.created_at)}</small><p>${esc(a.details)}</p></div></div>`).join('');
+    if(!['QUEUED','RUNNING','MATCHING','STOPPING'].includes(job.status)) $('#head-actions').insertAdjacentHTML('beforeend','<button class="button button-danger-ghost" data-action="delete">删除任务</button>');
+    $('#options-list').innerHTML=visibleOptions(data.options||{}).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');$('#audit-timeline').innerHTML=(data.actions||[]).map(a=>`<div class="audit-item"><div><strong>${esc(actionLabels[a.action]||'操作记录')}</strong><small>${esc(a.operator)} · ${fmt(a.created_at)}</small><p>${esc(actionDetail(a))}</p></div></div>`).join('');
     syncSelection();
   }
   let matchRequest=0, matchLoading=false, batchBusy=false, pageRows=[], selected=new Set();
@@ -62,9 +74,34 @@
   };
   async function loadResults(){const data=await api(`/api/jobs/${id}/results?${new URLSearchParams({offset:resultPage*50,limit:50,query:$('#result-search').value})}`);$('#result-info').textContent=data.path?`${data.path} · ${data.total} 行 · 第 ${resultPage+1} 页`:'尚未生成 Summary';$('#result-prev').disabled=!resultPage;$('#result-next').disabled=(resultPage+1)*50>=data.total;$('#result-head').innerHTML=`<tr>${data.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>`;$('#result-body').innerHTML=data.rows.map(r=>`<tr class="${Number(r.input_sequences)===0&&Number(r.mapped_seqs)>0?'error-row':''}">${data.columns.map(c=>`<td>${esc(r[c])}</td>`).join('')}</tr>`).join('');}
   async function loadLog(){if(paused||logBusy)return;logBusy=true;try{const data=await api(`/api/jobs/${id}/log?${new URLSearchParams({offset,source})}`);if(data.reset)$('#log-view').textContent='';source=data.source||'';offset=data.next_offset;$('#log-view').textContent=($('#log-view').textContent+data.content).slice(-500000);if($('#auto-scroll').checked)$('#log-view').scrollTop=$('#log-view').scrollHeight;}finally{logBusy=false;}}
-  async function loadArtifacts(){const data=await api(`/api/jobs/${id}/artifacts`);$('#artifacts-list').innerHTML=data.files.map(f=>`<div class="artifact-row"><code>${esc(f.path)}</code><b>${f.exists?'存在':'未生成'}</b></div>`).join('');}
+  let summaryKind='', summaryPage=0, summaryRequest=0;
+  $('#artifacts-refresh').onclick=()=>loadArtifacts().catch(fail);
+  const columnLabels = {sample:'样本',sample_id:'样本',sample_key:'样本',total_reads:'输入 reads',matched_reads:'匹配 reads',matched_pct:'匹配比例 %',mismatch_reads:'未匹配 reads',mismatch_pct:'未匹配比例 %',discarded_pct:'丢弃比例 %',short_reads:'过短 reads',processed_reads:'处理 reads',Total_Reads:'输入 reads',OK_Reads:'合并成功',Merged_Percent:'合并比例 %',Merged_FASTA_Records:'合并序列数',Unaligned_FASTA_Records:'未合并序列数',before_reads:'过滤前 reads',after_reads:'过滤后 reads',reads_retained_pct:'保留比例 %',status:'状态',error:'原因'};
+  async function loadArtifacts(){
+    const data=await api(`/api/jobs/${id}/artifacts`);
+    $('#artifacts-list').innerHTML=`<div class="report-cards">${(data.reports||[]).map(r=>`<section class="report-card ${r.exists?'':'pending'}"><span class="report-status">${r.exists?'可查看':'尚未生成'}</span><h4>${esc(r.label)}</h4><p>${esc(r.description)}</p><div><button class="button button-ghost button-small" data-summary="${r.kind}" ${r.exists?'':'disabled'}>查看统计</button>${r.exists?`<a class="button button-ghost button-small" href="/api/jobs/${id}/download?kind=${r.kind}">下载 CSV / TSV</a>`:''}</div></section>`).join('')}</div><section id="stage-summary-panel" class="hidden"><div class="tab-toolbar"><h3 id="stage-summary-title"></h3><button id="summary-refresh" class="button button-ghost button-small">刷新统计</button></div><div class="summary-filter"><input id="summary-query" placeholder="搜索样本 / 状态" aria-label="搜索阶段统计"><label><input id="summary-all-columns" type="checkbox">显示路径等全部字段</label></div><p id="stage-summary-info" class="muted"></p><div class="table-wrap"><table><thead id="stage-summary-head"></thead><tbody id="stage-summary-body"></tbody></table></div><div class="pagination"><button id="summary-prev" class="button button-ghost">上一页</button><button id="summary-next" class="button button-ghost">下一页</button></div></section><details class="technical-paths"><summary>查看关键文件路径</summary>${data.files.map(f=>`<div class="artifact-row"><code>${esc(f.path)}</code><b>${f.exists?'存在':'未生成'}</b></div>`).join('')}</details>`;
+    const reports=data.reports||[];
+    const choose = kind => {summaryKind=kind;summaryPage=0;$('#stage-summary-title').textContent=reports.find(r=>r.kind===kind)?.label||'阶段统计';$('#stage-summary-panel').classList.remove('hidden');loadStageSummary().catch(fail);};
+    document.querySelectorAll('[data-summary]').forEach(b=>b.onclick=()=>choose(b.dataset.summary));
+    $('#summary-query').onchange=()=>{summaryPage=0;loadStageSummary().catch(fail);};
+    $('#summary-all-columns').onchange=$('#summary-refresh').onclick=()=>loadStageSummary().catch(fail);
+    $('#summary-prev').onclick=()=>{summaryPage--;loadStageSummary().catch(fail);};$('#summary-next').onclick=()=>{summaryPage++;loadStageSummary().catch(fail);};
+    const preferred=[summaryKind,'split','prefilter','pandaseq','fastp','results'].find(k=>reports.some(r=>r.kind===k&&r.exists));
+    if(preferred)choose(preferred);
+  }
+  async function loadStageSummary(){
+    const token=++summaryRequest;
+    const data=await api(`/api/jobs/${id}/stage-summary?${new URLSearchParams({kind:summaryKind,offset:summaryPage*50,limit:50,query:$('#summary-query').value})}`);
+    if(token!==summaryRequest)return;
+    const hidden=/^(r1|r2|output_r1|output_r2|umi_sidecar|json_path|note)$|_path$/;
+    const columns=data.columns.filter(c=>$('#summary-all-columns').checked||!hidden.test(c));
+    $('#stage-summary-info').textContent=data.path?`${data.total} 条记录 · 第 ${summaryPage+1} 页 · 按脚本原始计数展示；不会重新计算。`:'尚未生成统计';
+    $('#stage-summary-head').innerHTML=`<tr>${columns.map(c=>`<th>${esc(columnLabels[c]||c)}${columnLabels[c]?`<small class="column-code">${esc(c)}</small>`:''}</th>`).join('')}</tr>`;
+    $('#stage-summary-body').innerHTML=data.rows.map(r=>`<tr class="${r.status==='ERROR'||(Number(r.total_reads)>0&&r.matched_reads!==undefined&&Number(r.matched_reads)===0)?'error-row':''}">${columns.map(c=>`<td title="${esc(r[c])}">${esc(r[c])}</td>`).join('')}</tr>`).join('');
+    $('#summary-prev').disabled=summaryPage===0;$('#summary-next').disabled=(summaryPage+1)*50>=data.total;
+  }
   async function action(name){if(busy)return;busy=true;try{if(name==='edit'){const data=await api(`/api/submissions?revision=${encodeURIComponent(job.submission_revision)}`);Submission.open(data,async updated=>{await api(`/api/jobs/${id}/rematch`,{revision:updated.revision});revision='';await refresh();});return;}if(name==='confirm-match'){if(!revision||tab!=='match'){setTab('match');return;}if(!confirm('确认本版清单？仅 OK 记录进入下游，ERROR 保留待补。'))return;}if(name==='stop'&&!confirm('停止任务并保留中间产物？'))return;await api(`/api/jobs/${id}/${name}`,name==='confirm-match'?{revision}:{});await refresh();}catch(e){fail(e);}finally{busy=false;}}
-  $('#head-actions').onclick=e=>{const b=e.target.closest('[data-action]');if(b)action(b.dataset.action);};document.querySelectorAll('.detail-tab').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
+  $('#head-actions').onclick=async e=>{const b=e.target.closest('[data-action]');if(!b)return;if(b.dataset.action==='delete'){if(busy)return;busy=true;try{if(await Submission.deleteJob(job))location.href='/';}catch(error){fail(error);}finally{busy=false;}}else action(b.dataset.action);};document.querySelectorAll('.detail-tab').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   $('#match-body').onchange=async e=>{if(e.target.dataset.selectRow!==undefined){e.target.checked?selected.add(e.target.dataset.selectRow):selected.delete(e.target.dataset.selectRow);syncSelection();return;}if(!e.target.dataset.review)return;e.target.disabled=true;try{await api(`/api/jobs/${id}/review`,{revision,row_key:e.target.dataset.review,label:e.target.value});}catch(error){fail(error);await loadMatch();}finally{syncSelection();}};
   $('#errors-only').onchange=$('#match-search').onchange=()=>{selected.clear();syncSelection();matchPage=0;loadMatch().catch(fail);};$('#match-refresh').onclick=()=>loadMatch().catch(fail);$('#match-prev').onclick=()=>{matchPage--;loadMatch().catch(fail);};$('#match-next').onclick=()=>{matchPage++;loadMatch().catch(fail);};
   $('#result-search').onchange=()=>{resultPage=0;loadResults().catch(fail);};$('#result-refresh').onclick=()=>loadResults().catch(fail);$('#result-prev').onclick=()=>{resultPage--;loadResults().catch(fail);};$('#result-next').onclick=()=>{resultPage++;loadResults().catch(fail);};$('#pause-log').onclick=()=>{paused=!paused;$('#pause-log').textContent=paused?'继续刷新':'暂停刷新';};$('#copy-log').onclick=()=>navigator.clipboard.writeText($('#log-view').textContent).catch(fail);

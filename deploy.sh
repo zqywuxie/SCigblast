@@ -10,6 +10,7 @@ COMPOSE_FILE="${WEB_DIR}/docker-compose.yml"
 ENV_FILE="${SCIGBLAST_ENV_FILE:-${WEB_DIR}/.env}"
 SERVICE="scigblast-web"
 BUILD_IMAGE=1
+ORIGINAL_ARGS=("$@")
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy][ERROR] %s\n' "$*" >&2; exit 1; }
@@ -17,8 +18,8 @@ die() { printf '[deploy][ERROR] %s\n' "$*" >&2; exit 1; }
 usage() {
   printf '%s\n' \
     '用法：bash deploy.sh [--no-build]' \
-    '默认：构建 Web + 四条 pipeline + 分析环境，然后启动。' \
-    '--no-build：使用已构建或 docker load 导入的镜像。' \
+    '默认：git pull --ff-only 拉取当前分支上游，再构建镜像并部署。' \
+    '--no-build：仍先拉取代码，但使用现有镜像（不包含本次拉取的新代码）。' \
     '配置：web/.env；可通过 SCIGBLAST_ENV_FILE 指定其他配置文件。'
 }
 case "${1:-}" in
@@ -28,6 +29,22 @@ case "${1:-}" in
   *) usage >&2; die "未知参数：$1" ;;
 esac
 (( $# == 0 )) || die "存在多余参数；运行 bash deploy.sh --help 查看用法。"
+
+# Re-enter the updated script after pulling; never discard local edits.
+if [[ "${SCIGBLAST_DEPLOY_PULL_DONE:-}" != "1" ]]; then
+  command -v git >/dev/null 2>&1 || die "未找到 git，无法更新仓库。"
+  git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "请在 Git 克隆仓库中运行 deploy.sh。"
+  git -C "$SCRIPT_DIR" symbolic-ref -q HEAD >/dev/null || die "当前是 detached HEAD，请切换到部署分支。"
+  git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1 || die "当前分支未配置远端上游。"
+  if ! git -C "$SCRIPT_DIR" diff --quiet || ! git -C "$SCRIPT_DIR" diff --cached --quiet; then
+    die "仓库有未提交的修改。请先备份并处理 git status 中的改动后重试；不会覆盖服务器配置。web/.env 不受拉取影响。"
+  fi
+  log "拉取当前分支远端更新（仅允许 fast-forward）"
+  git -C "$SCRIPT_DIR" pull --ff-only || die "远端拉取失败，未执行构建或替换容器。"
+  export SCIGBLAST_DEPLOY_PULL_DONE=1
+  exec bash "$SCRIPT_DIR/deploy.sh" "${ORIGINAL_ARGS[@]}"
+fi
+unset SCIGBLAST_DEPLOY_PULL_DONE
 
 command -v docker >/dev/null 2>&1 || die "未找到 docker，请先安装 Docker Engine。"
 docker compose version >/dev/null 2>&1 || die "当前 Docker 不支持 compose 子命令，请安装 Docker Compose v2。"

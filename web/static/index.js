@@ -9,9 +9,18 @@
   const statusText = (value) => statusLabel[value] || value;
   const isActive = (job) => activeStates.has(job.status);
   const isDone = (job) => doneStates.has(job.status);
-  const rememberedFields = ['operator', 'input_path', 'submission_path', 'barcode_csv', 'output_root'];
-  function restoreForm() { rememberedFields.forEach((name) => { const value = localStorage.getItem(`scigblast.${name}`); const input = document.querySelector(`[name="${name}"]`); if (value && input) input.value = value; }); }
-  function rememberForm(body) { rememberedFields.forEach((name) => { if (body[name]) localStorage.setItem(`scigblast.${name}`, body[name]); }); }
+  let formDefaults = {};
+  function resetForm() {
+    $('#new-job-form').reset();
+    resetSubmission();
+    $('[name="barcode_csv"]').value = formDefaults.barcode_csv || '';
+    $('#submission-status').textContent = '选择 .xlsx 文件或目录后，可检查和修改 Note；原文件不变。';
+    $('#validation-summary').textContent = '填写路径后可验证任务配置';
+    $('#form-message').textContent = '';
+    clearTimeout(showMessage.timer);
+    document.querySelectorAll('.path-state').forEach(n => n.classList.remove('ok', 'bad'));
+    updatePipelineFields();
+  }
   const browseLabels = { input: '原始数据目录', submission: 'Submission 文件或目录', barcode: 'Barcode CSV', output: '输出根目录' };
   let pickerKind = '', pickerTarget = '', pickerPath = '', pickerBusy = false;
 
@@ -53,7 +62,7 @@
   function openPicker(kind, target) { pickerKind = kind; pickerTarget = target; $('#file-picker-title').textContent = `选择${browseLabels[kind] || '路径'}`; $('#file-picker-shell').classList.add('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'false'); loadPicker(); }
   function choosePickerPath(path) { const input = document.querySelector(`[name="${pickerTarget}"]`); if (input) { input.value = path; input.dispatchEvent(new Event('input', { bubbles: true })); } closePicker(); }
 
-  function openDrawer() { document.body.classList.add('task-dialog-open'); $('#drawer-shell').classList.add('open'); $('#drawer-shell').setAttribute('aria-hidden', 'false'); setTimeout(() => $('#drawer-shell input[name="operator"]')?.focus(), 120); }
+  function openDrawer() { resetForm(); document.body.classList.add('task-dialog-open'); $('#drawer-shell').classList.add('open'); $('#drawer-shell').setAttribute('aria-hidden', 'false'); setTimeout(() => { $('#pipeline-cards .selected')?.focus({preventScroll:true}); $('#drawer-shell .drawer-body').scrollTop=0; }, 120); }
   function closeDrawer() { document.body.classList.remove('task-dialog-open'); $('#drawer-shell').classList.remove('open'); $('#drawer-shell').setAttribute('aria-hidden', 'true'); $('#open-drawer').focus(); }
   function selectedPipeline() { return $('#pipeline').value; }
   async function loadPipelines() {
@@ -61,7 +70,9 @@
     if (!response.ok) throw new Error('无法读取 Pipeline');
     pipelineInfo = await response.json();
     const defaults = await Submission.api('/api/defaults');
+    formDefaults = defaults;
     $('[name="barcode_csv"]').value = defaults.barcode_csv;
+    $('#output-hint').textContent = `留空自动创建 ${defaults.output_base}/执行人_pipeline_日期时间（北京时间）。填写路径时使用该路径本身。`;
     $('#pipeline-cards').insertAdjacentHTML('beforebegin', '<p id="pipeline-root-hint" class="field-hint"></p>');
     $('#pipeline-root-hint').textContent = `项目目录：${defaults.pipeline_root}`;
     $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
@@ -104,6 +115,7 @@
       <td><span class="status-badge ${job.status.toLowerCase()}"><i></i>${esc(statusText(job.status))}</span>${job.last_error ? `<small class="error-text" title="${esc(job.last_error)}">${esc(job.last_error)}</small>` : ''}</td>
       <td class="row-actions">${job.status === 'WAITING_REVIEW' ? `<button class="button button-review button-small" data-action="confirm" data-id="${job.id}">审核 Match</button>` : ''}${isActive(job) ? `<button class="button button-danger-ghost button-small" data-action="stop" data-id="${job.id}">停止</button>` : ''}<a class="button button-ghost button-small" href="/jobs/${job.id}">详情</a></td>
     </tr>`).join('');
+    visible.forEach((job, i) => { if (!isActive(job)) $('#jobs').children[i].querySelector('.row-actions').insertAdjacentHTML('beforeend', `<button class="button button-danger-ghost button-small" data-action="delete" data-id="${job.id}">删除</button>`); });
     $('#empty-state').classList.toggle('hidden', visible.length !== 0);
     const counts = data.counts || {}; $('#stat-active').textContent = counts.active ?? data.active_jobs ?? jobs.filter(isActive).length; $('#stat-review').textContent = counts.review ?? jobs.filter((job) => job.status === 'WAITING_REVIEW').length; $('#stat-done').textContent = counts.done ?? jobs.filter(isDone).length; $('#stat-total').textContent = counts.total ?? data.total ?? jobs.length; $('#stat-capacity').textContent = `并行上限 ${data.max_active_jobs ?? '—'}`;
     $('#count-all').textContent = counts.total ?? data.total ?? jobs.length; $('#count-active').textContent = counts.active ?? jobs.filter(isActive).length; $('#count-review').textContent = counts.review ?? jobs.filter((job) => job.status === 'WAITING_REVIEW').length; $('#count-done').textContent = counts.done ?? jobs.filter(isDone).length;
@@ -113,7 +125,7 @@
 
   async function refreshJobs() { if (busy) return; busy = true; const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (filter === 'active') params.set('status', 'QUEUED,RUNNING,MATCHING,STOPPING'); if (filter === 'review') params.set('status', 'WAITING_REVIEW'); if (filter === 'done') params.set('status', 'SUCCEEDED,FAILED,STOPPED,INTERRUPTED,COMPLETED_WITHOUT_MARKER'); if ($('#pipeline-filter').value) params.set('pipeline', $('#pipeline-filter').value); if ($('#job-search').value.trim()) params.set('query', $('#job-search').value.trim()); try { const data = await (await fetch(`/api/jobs?${params}`)).json(); allJobs = data.jobs || []; renderJobs(data); } finally { busy = false; } }
 
-  async function runAction(id, action) { if (action === 'confirm') { location.href = `/jobs/${id}#match`; return; } if (action === 'stop' && !window.confirm('停止这个任务？中间产物会保留，可稍后续跑。')) return; try { await Submission.api(`/api/jobs/${id}/${action}`, {}); await refreshJobs(); } catch(error) { showMessage(error.message, true); } }
+  async function runAction(id, action) { if (action === 'confirm') { location.href = `/jobs/${id}#match`; return; } if (action === 'stop' && !window.confirm('停止这个任务？中间产物会保留，可稍后续跑。')) return; try { if(action === 'delete') { const job = allJobs.find(j => j.id === id); if(!job || !await Submission.deleteJob(job)) return; } else await Submission.api(`/api/jobs/${id}/${action}`, {}); await refreshJobs(); } catch(error) { alert(error.message); } }
   function showMessage(message, error = false) { const node = $('#form-message'); node.textContent = message; node.classList.toggle('error', error); clearTimeout(showMessage.timer); showMessage.timer = setTimeout(() => { node.textContent = ''; node.classList.remove('error'); }, 4500); }
 
   async function validatePaths() {
@@ -128,7 +140,7 @@
     }catch(error){$('#validation-summary').textContent=error.message;}finally{button.disabled=false;}
   }
 
-  $('#new-job-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.classList.add('loading'); try { const body = Object.fromEntries(new FormData(event.target).entries()); if (!body.barcode_csv) body.barcode_csv = null; const result = await Submission.api('/api/jobs', body); rememberForm(body); location.href = `/jobs/${result.id}`; } catch(error) { showMessage(error.message, true); } finally { button.disabled = false; button.classList.remove('loading'); } });
+  $('#new-job-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.classList.add('loading'); try { const body = Object.fromEntries(new FormData(event.target).entries()); if (!body.barcode_csv) body.barcode_csv = null; const result = await Submission.api('/api/jobs', body); resetForm(); closeDrawer(); location.href = `/jobs/${result.id}`; } catch(error) { showMessage(error.message, true); } finally { button.disabled = false; button.classList.remove('loading'); } });
   $('#open-drawer').addEventListener('click', openDrawer); $('#close-drawer').addEventListener('click', closeDrawer); $('#drawer-backdrop').addEventListener('click', closeDrawer); $('#validate-button').addEventListener('click', validatePaths); $('#pipeline').addEventListener('change', updatePipelineFields); $('#refresh-jobs').addEventListener('click', refreshJobs); $('#job-search').addEventListener('input', () => { page = 0; refreshJobs(); }); $('#pipeline-filter').addEventListener('change', () => { page = 0; refreshJobs(); }); $('#page-prev').addEventListener('click', () => { if (page > 0) { page -= 1; refreshJobs(); } }); $('#page-next').addEventListener('click', () => { page += 1; refreshJobs(); }); document.querySelectorAll('.field input').forEach((input) => input.addEventListener('input', () => { const state = document.querySelector(`.path-state[data-for="${input.name}"]`); if (state) state.classList.remove('ok', 'bad'); }));
   document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', () => openPicker(button.dataset.browseKind, button.dataset.browseTarget)));
   $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });
@@ -140,7 +152,7 @@
   function resetSubmission() { submissionGeneration++; submissionDraft = null; $('[name="submission_revision"]').value = ''; $('[name="submission_path"]').required = true; }
   async function loadSubmission(load) {
     const generation = submissionGeneration;
-    $('#submission-edit').disabled = true; $('#submission-upload').disabled = true;
+    $('#submission-edit').disabled = true;
     $('#submission-status').textContent = '正在读取 Submission…';
     try {
       const data = await load();
@@ -150,30 +162,19 @@
       Submission.open(data, acceptSubmission);
     } catch(error) {
       if (generation === submissionGeneration) $('#submission-status').textContent = `读取失败：${error.message}`;
-    } finally { $('#submission-edit').disabled = false; $('#submission-upload').disabled = false; }
+    } finally { $('#submission-edit').disabled = false; }
   }
   $('#submission-edit').onclick = () => loadSubmission(async () => {
     if (submissionDraft) return submissionDraft;
     const token = $('[name="submission_revision"]').value;
     if (token) return Submission.api(`/api/submissions?revision=${encodeURIComponent(token)}`);
     const path = $('[name="submission_path"]').value.trim();
-    if (!path) throw new Error('请先上传 XLSX，或选择服务器上的 Submission 文件 / 目录');
+    if (!path) throw new Error('请先选择服务器上的 Submission 文件 / 目录');
     return Submission.api('/api/submissions/import', {path});
   });
-  $('#submission-upload').onchange = (event) => {
-    const file = event.target.files[0]; if (!file) return;
-    resetSubmission();
-    $('[name="submission_path"]').value = '';
-    loadSubmission(async () => {
-      const response = await fetch(`/api/submissions/upload?filename=${encodeURIComponent(file.name)}`, {method: 'POST', body: file});
-      const data = await response.json();
-      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
-      return data;
-    });
-    event.target.value = ''; // Allow retrying the same file after an upload error.
-  };
-  $('[name="submission_path"]').addEventListener('input', () => { resetSubmission(); $('#submission-upload').value = ''; $('#submission-status').textContent = '路径已变更，请重新查看工作副本'; });
+  $('[name="submission_path"]').addEventListener('input', () => { resetSubmission(); $('#submission-status').textContent = '路径已变更，可查看 / 编辑新选择的 Submission'; });
   $('[name="ir_variant"]').addEventListener('change', updatePipelineFields);
-  loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); restoreForm(); refreshJobs(); }).catch(error => showMessage(error.message, true));
+  loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); resetForm(); refreshJobs(); }).catch(error => showMessage(error.message, true));
+  window.addEventListener('pageshow', event => { if(event.persisted) { resetForm(); closeDrawer(); refreshJobs(); } });
   setInterval(refreshJobs, 5000);
 })();

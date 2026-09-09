@@ -18,7 +18,7 @@ services:
     environment:
       SCIGBLAST_PIPELINE_ROOT: /opt/scigblast
       SCIGBLAST_STATE_DIR: /var/lib/scigblast-web
-      SCIGBLAST_DEFAULT_OUTPUT_ROOT: ${SCIGBLAST_DEFAULT_OUTPUT_ROOT:-/colddata/zqy/SCigblast/results/web_output}
+      SCIGBLAST_DEFAULT_OUTPUT_ROOT: ${SCIGBLAST_DEFAULT_OUTPUT_ROOT:-/colddata/zqy/SCigblast/results}
       SCIGBLAST_ALLOWED_INPUT_ROOTS: ${SCIGBLAST_ALLOWED_INPUT_ROOTS:-/colddata}
       SCIGBLAST_ALLOWED_SUBMISSION_ROOTS: ${SCIGBLAST_ALLOWED_SUBMISSION_ROOTS:-/colddata}
       SCIGBLAST_ALLOWED_BARCODE_ROOTS: ${SCIGBLAST_ALLOWED_BARCODE_ROOTS:-/colddata}
@@ -26,6 +26,7 @@ services:
       SCIGBLAST_MAX_ACTIVE_JOBS: ${SCIGBLAST_MAX_ACTIVE_JOBS:-2}
     volumes:
       - ${SCIGBLAST_HOST_COLD_DATA:-/colddata}:/colddata:ro
+      - /data/scAnalyis/Scigblast/igblast:/data/scAnalyis/Scigblast/igblast:ro
       - ${SCIGBLAST_HOST_RESULTS_ROOT:-/colddata/zqy/SCigblast/results}:/colddata/zqy/SCigblast/results:rw
       - ./runtime:/var/lib/scigblast-web
     mem_limit: 300g
