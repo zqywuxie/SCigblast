@@ -203,7 +203,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200, first.text)
         path = Path(first.json()['output_root'])
         self.assertEqual(path.parent, self.out)
-        self.assertRegex(path.name, r'^郑钦云_igblast_base_\d{8}_\d{6}$')
+        self.assertRegex(path.name, r'^zqy_igblast_base_\d{8}_\d{6}$')
+        self.assertEqual(first.json()['operator'], '郑钦云')
+        self.assertTrue(web.default_job_output('张三', 'ir_split').name.startswith('zs_ir_split_'))
+        self.assertTrue(web.default_job_output('ZQY', 'ir_split').name.startswith('zqy_ir_split_'))
         with patch.object(web, 'default_job_output', return_value=path):
             second = self.client.post('/api/jobs', json=body)
         self.assertEqual(second.status_code, 200, second.text)
@@ -256,6 +259,13 @@ class WorkflowTests(unittest.TestCase):
         path.write_text('sample_id,total_reads,matched_reads,matched_pct\nA,100,80,80.00\nB,100,0,0.00\n',encoding='utf-8')
         panda=self.out/'05.pandaseq'/'batch'/'pandaseq_summary.csv';panda.parent.mkdir(parents=True)
         panda.write_text('Sample,Total_Reads,OK_Reads,Merged_Percent\nA,80,70,87.50\n')
+        representative=self.out/'06.representative'/'batch'/'representative_summary.csv'
+        representative.parent.mkdir(parents=True)
+        representative.write_text('sample,umi_count\nA,30\n')
+        rep=self.client.get(f'/api/jobs/{jid}/stage-summary?kind=representative').json()
+        self.assertEqual(rep['rows'][0]['umi_count'],'30')
+        html=self.client.get(f'/jobs/{jid}').text
+        self.assertIn('/static/job.js?v='+web.templates.env.globals['asset_version'],html)
         reports=self.client.get(f'/api/jobs/{jid}/artifacts').json()['reports']
         self.assertTrue(next(r for r in reports if r['kind']=='split')['exists'])
         data=self.client.get(f'/api/jobs/{jid}/stage-summary',params={'kind':'split','limit':1,'offset':1}).json()

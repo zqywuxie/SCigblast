@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>任务详情 · SCigblast</title><link rel="stylesheet" href="/static/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>任务详情 · SCigblast</title><link rel="stylesheet" href="/static/style.css?v={{ asset_version }}"></head>
 <body><main class="app-shell detail-shell">
   <header class="topbar"><a class="brand" href="/"><span class="brand-mark"><i></i><i></i><i></i></span><span>SCIGBLAST</span></a><div class="topbar-right"><span class="server-state"><b></b> 服务器在线</span><span class="topbar-divider"></span><a class="back-link" href="/">← 返回任务列表</a></div></header>
   <section class="page-head detail-head"><div><p class="eyebrow">JOB DETAIL / <span id="job-id">—</span></p><h1 id="dataset-title">任务详情</h1><p id="job-subtitle" class="page-subtitle">正在读取任务信息…</p></div><div class="detail-head-actions"><div id="hero-status" class="hero-status">加载中…</div><div id="head-actions"></div></div></section>
@@ -13,4 +13,4 @@
     <div id="tab-artifacts" class="tab-content"><div class="tab-toolbar"><div><h3>阶段统计与输出</h3><p class="muted">查看拆分、序列合并与质量过滤的 Summary，支持搜索和下载。不加载大型 FASTQ / FASTA。</p></div><button id="artifacts-refresh" class="button button-ghost">刷新文件</button></div><div id="artifacts-list" class="artifact-list"></div></div>
     <div id="tab-audit" class="tab-content"><div class="tab-toolbar"><div><h3>参数与操作记录</h3><p class="muted">用于复核本次任务的实际配置和操作过程</p></div></div><div class="audit-layout"><div><h4>提交参数</h4><dl id="options-list" class="options-list"></dl></div><div><h4>操作时间线</h4><div id="audit-timeline" class="audit-timeline"></div></div></div></div>
   </section>
-</main><script>window.SCIGBLAST_JOB_ID={{ job_id|tojson }};</script><script src="/static/submission.js"></script><script src="/static/job.js"></script></body></html>
+</main><script>window.SCIGBLAST_JOB_ID={{ job_id|tojson }};</script><script src="/static/submission.js?v={{ asset_version }}"></script><script src="/static/job.js?v={{ asset_version }}"></script></body></html>

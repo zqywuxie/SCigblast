@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import signal
@@ -22,6 +23,7 @@ from contextlib import contextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from pypinyin import Style, lazy_pinyin
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -220,8 +222,9 @@ def validate_output(value: str | None) -> Path:
 
 
 def default_job_output(operator: str, pipeline: str) -> Path:
-    # Preserve Chinese names, but never interpret a name as a filesystem path.
-    name = re.sub(r"[^\w.-]+", "_", operator.strip(), flags=re.UNICODE).strip("._")[:60] or "operator"
+    # Only directory names use initials; job/operator audit records retain the full name.
+    initials = ''.join(lazy_pinyin(operator.strip(), style=Style.FIRST_LETTER)).lower()
+    name = re.sub(r"[^a-z0-9.-]+", "_", initials).strip("._")[:60] or "operator"
     stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
     return DEFAULT_OUTPUT_ROOT / f"{name}_{pipeline}_{stamp}"
 
@@ -684,6 +687,8 @@ def stage_reports(row):
     if row['pipeline'] == 'ir_split':
         entries.append(('split', 'IR Barcode / UMI 拆分', '匹配、丢弃与保留序列数及百分比',
                         [root / '03.IR_split_output' / dataset / 'ir_split_summary.csv']))
+        entries.append(('representative', 'IR 代表序列', '样本内 UMI 分组与代表序列统计',
+                        [root / '06.representative' / dataset / 'representative_summary.csv']))
     if row['pipeline'] == '10x_split':
         entries.extend([
             ('prefilter', '10X R1 / R2 预筛选', 'TSO 与 Barcode 筛选结果',
@@ -746,6 +751,9 @@ def read_table(path: Path, offset=0, limit=50, query="", errors_only=False):
 
 app = FastAPI(title="SCigblast Pipeline Runner", version="0.1.0")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
+templates.env.globals['asset_version'] = hashlib.sha256(b''.join(
+    p.read_bytes() for p in sorted((APP_DIR / 'static').glob('*')) if p.is_file()
+)).hexdigest()[:12]
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
 
