@@ -106,11 +106,13 @@ class WorkflowTests(unittest.TestCase):
         saved['SCIGBLAST_RUNTIME_BIN_DIR'] = '/old/runtime/bin'
         web.update_job(jid, status='QUEUED', env_json=json.dumps(saved))
         runtime = str(Path('/opt/conda/bin'))
-        with patch.dict(os.environ, {'SCIGBLAST_RUNTIME_BIN_DIR': runtime, 'PATH': '/opt/conda/bin:/usr/bin'}), \
+        with patch.dict(os.environ, {'SCIGBLAST_RUNTIME_BIN_DIR': runtime, 'PATH': '/opt/conda/bin:/usr/bin',
+                                    'SCIGBLAST_ADMIN_PASSWORD': 'deployment-secret-123'}), \
                 patch.object(web.subprocess, 'Popen') as spawn, patch.object(web.threading, 'Thread'):
             spawn.return_value.pid = 12345
             self.assertTrue(web.launch_job(jid))
             actual = spawn.call_args.kwargs['env']
+            self.assertNotIn('SCIGBLAST_ADMIN_PASSWORD', actual)
             self.assertEqual(actual['PATH'], '/opt/conda/bin:/usr/bin')
             self.assertEqual(actual['SCIGBLAST_RUNTIME_BIN_DIR'], runtime)
             with patch.object(web.shutil, 'which', side_effect=lambda command: command), \

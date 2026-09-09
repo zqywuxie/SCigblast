@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # One-command deployment for the SCigblast web runner on Linux.
-# Configure host paths in web/.env before running this script.
+# Configure host paths and the initial administrator in web/.env before running this script.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="${SCRIPT_DIR}/web"
@@ -54,7 +54,7 @@ docker info >/dev/null 2>&1 || die "无法连接 Docker 服务，请检查服务
 if [[ ! -f "${ENV_FILE}" ]]; then
   [[ -f "${WEB_DIR}/.env.example" ]] || die "缺少 ${WEB_DIR}/.env.example"
   cp -- "${WEB_DIR}/.env.example" "${ENV_FILE}"
-  log "已创建 ${ENV_FILE}，请先修改宿主机路径后重新运行。"
+  log "已创建 ${ENV_FILE}，请先填写宿主机路径和初始管理员账号、密码后重新运行。"
   exit 2
 fi
 

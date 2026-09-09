@@ -121,6 +121,34 @@ class Credentials(BaseModel):
     password: str = Field(min_length=12, max_length=128)
 
 
+def bootstrap_admin(db):
+    """Create the first administrator from deployment settings, once only."""
+    username = os.environ.get('SCIGBLAST_ADMIN_USERNAME', '').strip().lower()
+    password = os.environ.get('SCIGBLAST_ADMIN_PASSWORD', '')
+    name = os.environ.get('SCIGBLAST_ADMIN_DISPLAY_NAME', '').strip() or username
+    if not any((username, password, name)):
+        return
+    with db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        # Disabled admins also count: deployment must not undo account management.
+        if connection.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone():
+            return
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{2,31}', username):
+            raise RuntimeError('SCIGBLAST_ADMIN_USERNAME must be 3–32 ASCII letters/digits/_.-')
+        if not 12 <= len(password) <= 128:
+            raise RuntimeError('SCIGBLAST_ADMIN_PASSWORD must contain 12–128 characters')
+        if not 1 <= len(name) <= 60 or not re.fullmatch(r'[A-Za-z][A-Za-z0-9 ._-]*', name):
+            raise RuntimeError('SCIGBLAST_ADMIN_DISPLAY_NAME must be 1–60 characters, start with an English '
+                               'letter and contain only ASCII letters/digits/spaces/._-')
+        if connection.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+            raise RuntimeError('SCIGBLAST_ADMIN_USERNAME already belongs to a non-admin account')
+        user_id = secrets.token_hex(16)
+        connection.execute("INSERT INTO users(id,username,display_name,password_hash,role,created_at) "
+                           "VALUES(?,?,?,?,'admin',?)",
+                           (user_id, username, name, password_hash(password), int(time.time())))
+        event(connection, None, 'bootstrap-admin', user_id)
+
+
 class Registration(Credentials):
     display_name: str = Field(min_length=1, max_length=60)
     invitation: str = Field(min_length=10, max_length=128)

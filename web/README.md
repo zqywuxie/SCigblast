@@ -9,12 +9,16 @@
 
 ## Linux Docker 部署
 
-本版启用登录与管理员注册码注册。首次部署后需通过服务器命令行创建管理员；没有默认密码。
+本版启用登录与管理员注册码注册。在 `web/.env` 中配置初始管理员，部署启动时自动创建；没有内置默认密码。
 完整设置与升级说明见 [ACCOUNTS.md](ACCOUNTS.md)。
 
-```bash
-docker exec -it scigblast-web python /app/manage_users.py create-admin zqy --name 郑钦云
+```dotenv
+SCIGBLAST_ADMIN_USERNAME=zqy
+SCIGBLAST_ADMIN_PASSWORD='请替换为你自己的至少12位密码'
+SCIGBLAST_ADMIN_DISPLAY_NAME=ZQY
 ```
+
+`SCIGBLAST_ADMIN_DISPLAY_NAME` 为可选英文显示名称，留空使用用户名。仅在数据库没有任何管理员时创建；重复部署不覆盖密码、姓名或启用状态。全部留空时仍可使用命令行创建管理员。
 
 默认目录布局：`web/`、`reference/`、`IR_split/`、`10X_split/`、`Igblast_base/`、`PigIgblast/` 位于同一个项目根目录。
 Docker 构建上下文是项目根目录，使用 `web/Dockerfile`。四条 pipeline（包括 tools/models）复制到镜像 `/opt/scigblast`，默认 Barcode CSV 复制到 `/opt/scigblast/reference/8bp_barcodes.csv`；运行时不再挂载宿主机源码。非 Docker 启动仍默认使用 `web` 的上一级。
@@ -45,7 +49,7 @@ docker compose logs -f scigblast-web
 bash deploy.sh
 ```
 
-首次缺少 `web/.env` 时会生成配置模板并退出，请填写路径后重新执行。已有镜像时使用 `bash deploy.sh --no-build`；查看帮助使用 `bash deploy.sh --help`。无需先激活 Conda。
+首次缺少 `web/.env` 时会生成配置模板并退出，请填写路径和初始管理员账号、密码后重新执行。已有镜像时使用 `bash deploy.sh --no-build`；查看帮助使用 `bash deploy.sh --help`。无需先激活 Conda。
 
 脚本先执行当前分支的 `git pull --ff-only`，然后重新加载更新后的 deploy.sh，再检查 Docker Compose、构建并重建容器，最后轮询 `/health`。有未提交的受版本管理文件改动、无上游、分支分叉或网络错误时停止，不自动 stash/reset。未跟踪文件若阻挡拉取，Git 也会报错停止。`web/.env` 不被覆盖。服务器此前手动修改过 Dockerfile 或 pipeline 配置时，先备份并整理这些改动再拉取。`--no-build` 也会拉取仓库，但现有镜像不会包含新拉取的代码；发布代码更新应使用默认模式。也可以通过 `SCIGBLAST_ENV_FILE=/path/to/.env bash deploy.sh` 指定配置文件。
 

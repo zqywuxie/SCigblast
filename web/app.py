@@ -583,6 +583,7 @@ def launch_job(job_id: str) -> bool:
     env = json.loads(row["env_json"])
     env = {str(key): str(value) for key, value in env.items()}
     env.update({key: value for key, value in os.environ.items() if key not in env})
+    env.pop('SCIGBLAST_ADMIN_PASSWORD', None)
     # Resumed jobs may have saved PATH from an older, host-mounted runtime.
     # Image-owned tools always follow the currently deployed image.
     if os.environ.get("SCIGBLAST_RUNTIME_BIN_DIR"):
@@ -832,6 +833,7 @@ app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="stati
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    auth.bootstrap_admin(db)
     mark_interrupted_jobs()
     schedule()
 
