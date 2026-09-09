@@ -28,7 +28,9 @@ def calculate_csr(df) -> pd.DataFrame:
                 "c_call_2": c2,
                 "umi_sum": u1 + u2
             })
-    df_CSR_cdr3 = pd.DataFrame(results)
+    # A sample may have no same-CDR3 isotype pairs. Keep the empty schema
+    # so the existing grouping/ratio formulas still work without a KeyError.
+    df_CSR_cdr3 = pd.DataFrame(results, columns=["cdr3_aa", "c_call_1", "c_call_2", "umi_sum"])
     df_CSR_cdr3.drop(columns=['cdr3_aa'], inplace=True)
     CSR_matrix = (df_CSR_cdr3.groupby(["c_call_1","c_call_2"]).sum()/df_sub["umi_counts"].sum()).reset_index()
     CSR_matrix = CSR_matrix.rename(columns={"umi_sum":"ratio"})
