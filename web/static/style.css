@@ -98,6 +98,9 @@ input,select,textarea { font-size:var(--text-control); line-height:1.5; }
 .overview-grid dt,.options-list dt,.overview-grid dd,.options-list dd { font-size:var(--text-control); line-height:1.7; }
 .mono { font-size:var(--text-small); line-height:1.7; }
 .count-pill,.match-filter,.check-label { font-size:var(--text-small); }
+.metadata-review-section { margin-top:24px; padding-top:20px; border-top:1px solid var(--line); }
+.metadata-review-section .table-wrap { max-height:460px; border:1px solid var(--line); border-radius:7px; }
+.metadata-review-section td { max-width:320px; overflow-wrap:anywhere; }
 .count-pill b { font:600 var(--text-control)/1.4 var(--font); font-variant-numeric:tabular-nums; }
 .log-view { font-size:var(--text-small); line-height:1.75; }
 .artifact-row,.artifact-row code,.artifact-row b { font-size:var(--text-small); }

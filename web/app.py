@@ -1296,10 +1296,18 @@ def metadata_review(job_id: str):
     if not token:
         return {'rows': []}
     files = summary_files(row)
-    known = set()
+    known = []
     if files:
         with Path(files[0]).open(encoding='utf-8-sig', newline='') as handle:
-            known = {r.get('sample_id') for r in csv.DictReader(handle) if r.get('sample_id')}
+            current_note = ''
+            for item in csv.DictReader(handle):
+                if not any(str(v or '').strip() for v in item.values()):
+                    current_note = ''
+                    continue
+                current_note = item.get('note') or current_note
+                if item.get('sample_id'):
+                    known.append((item['sample_id'], current_note,
+                                  item.get('r1_path') or item.get('file_path') or ''))
     missing = []
     raw = row['input_path'].replace('\\', '/').rstrip('/')
     for sheet in submission.inspect(STATE_ROOT, token)['sheets']:
@@ -1309,8 +1317,20 @@ def metadata_review(job_id: str):
             if notes and not any(raw == p or raw.startswith(p + '/') or p.startswith(raw + '/') for p in notes):
                 continue
             sample = fields.get('sample_id', '')
-            if sample and sample not in known:
-                missing.append({'sample_id': sample, 'note': fields.get('note', ''), 'file': sheet['file'], 'sheet': sheet['sheet'], 'row': record['row'], 'reason': '提交表已登记，但匹配清单未识别该样本；请核对原文件是否存在以及文件名/索引'})
+            def recorded(entry):
+                name, note, path = entry
+                if name != sample:
+                    return False
+                if not notes:
+                    return True
+                note = note.replace('\\', '/').rstrip('/')
+                path = path.replace('\\', '/')
+                return any(note == p or path.startswith(p + '/') for p in notes)
+            if sample and not any(recorded(entry) for entry in known):
+                missing.append({'sample_id': sample, 'note': fields.get('note', ''),
+                                'dual_index': fields.get('dual_index', ''), 'status': 'UNMATCHED',
+                                'file': sheet['file'], 'sheet': sheet['sheet'], 'row': record['row'],
+                                'reason': '提交表已登记，但本批次匹配清单未识别该样本；请核对文件、文件名/索引及 Note。不等同于已确认缺失原文件。'})
     return {'rows': missing}
 
 

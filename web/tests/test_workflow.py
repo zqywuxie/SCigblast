@@ -57,6 +57,30 @@ class WorkflowTests(unittest.TestCase):
         web.update_job(jid,status='WAITING_REVIEW',attempt_no=1)
         return path
 
+    def test_match_review_includes_ok_errors_and_unrecognized_registration(self):
+        jid = self.create()
+        path = self.match(jid, rows=0)
+        with path.open('w', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=['sample_id', 'note', 'status', 'error', 'r1_path'])
+            writer.writeheader()
+            writer.writerow({'sample_id': 'A', 'note': str(self.raw), 'status': 'OK', 'r1_path': str(self.raw/'A_R1.fq')})
+            writer.writerow({'status': 'ERROR', 'error': 'no Dual Index match', 'r1_path': str(self.raw/'unknown_R1.fq')})
+        result = self.client.get(f'/api/jobs/{jid}/match-preview').json()
+        self.assertEqual([r['status'] for r in result['rows']], ['OK', 'ERROR'])
+        missing = self.client.get(f'/api/jobs/{jid}/metadata-review').json()['rows']
+        self.assertEqual([r['sample_id'] for r in missing], ['B'])
+        self.assertEqual(missing[0]['status'], 'UNMATCHED')
+        self.assertEqual(missing[0]['dual_index'], 'A02')
+        self.assertEqual(missing[0]['note'], str(self.raw))
+        # A same-name record from another batch must not hide this registration.
+        with path.open('a', newline='', encoding='utf-8') as handle:
+            csv.writer(handle).writerow(['B', str(self.root/'other'), 'OK', '', str(self.root/'other/B_R1.fq')])
+        missing = self.client.get(f'/api/jobs/{jid}/metadata-review').json()['rows']
+        self.assertEqual([r['sample_id'] for r in missing], ['B'])
+        with path.open('a', newline='', encoding='utf-8') as handle:
+            csv.writer(handle).writerow(['B', str(self.raw), 'ERROR', 'missing barcode', str(self.raw/'B_R1.fq')])
+        self.assertEqual(self.client.get(f'/api/jobs/{jid}/metadata-review').json()['rows'], [])
+
     def test_merged_note_revision_preserves_original(self):
         rows=self.view['sheets'][0]['rows'];self.assertEqual(rows[0]['values'][3],rows[1]['values'][3]);self.assertEqual(rows[1]['editable'][3]['cell'],'D2')
         dest=self.root/'new';dest.mkdir()

@@ -15,8 +15,18 @@
   }
   $('#tab-match .match-filter').insertAdjacentHTML('beforeend',`<input id="match-search" placeholder="搜索样本 / 原因" aria-label="搜索 Match"><button id="match-refresh" class="button button-ghost">刷新</button><a href="/api/jobs/${id}/download?kind=match">下载清单</a>`);
   $('#tab-match').insertAdjacentHTML('beforeend','<div class="pagination"><button id="match-prev" class="button button-ghost">上一页</button><button id="match-next" class="button button-ghost">下一页</button></div><p>标注不改变匹配状态。补齐资料后请重新 Match。</p>');
-  $('#tab-match').insertAdjacentHTML('beforeend','<button id="metadata-review" class="button button-ghost">检查登记样本 / 本次变化</button><div id="metadata-report" class="table-wrap"></div>');
-  $('#metadata-review').onclick=async()=>{try{const [metadata,match]=await Promise.all([api(`/api/jobs/${id}/metadata-review`),api(`/api/jobs/${id}/match-preview`)]);$('#metadata-report').innerHTML=`<p>相比上次确认：新增 OK 记录 ${match.changes?.new_ok_records??0}；消失或改变的 OK 记录 ${match.changes?.removed_or_changed_ok_records??0}。以下 ${metadata.rows.length} 条登记未在清单识别（不等同于物理文件缺失）：</p><table><thead><tr><th>样本</th><th>Note</th><th>来源</th><th>说明</th></tr></thead><tbody>${metadata.rows.map(r=>`<tr><td>${esc(r.sample_id)}</td><td>${esc(r.note)}</td><td>${esc(r.file)} / ${esc(r.sheet)}:${r.row}</td><td>${esc(r.reason)}</td></tr>`).join('')}</tbody></table>`;}catch(e){fail(e);}};
+  $('#tab-match').insertAdjacentHTML('beforeend','<section class="metadata-review-section"><div class="tab-toolbar"><h3>登记但未识别的样本</h3><span id="metadata-count" class="muted"></span></div><p class="muted">自动核对当前输入路径对应的 Submission 登记。下列样本尚未进入匹配清单，不会进入下游；清单中的 ERROR 记录在上表审阅。</p><p id="match-changes" class="muted"></p><div id="metadata-report" class="table-wrap" aria-live="polite">正在读取登记信息…</div></section>');
+  async function loadMetadata(token){
+    $('#metadata-report').textContent='正在读取登记信息…';$('#metadata-count').textContent='';
+    try{
+      const metadata=await api(`/api/jobs/${id}/metadata-review`);
+      if(token!==matchRequest)return;
+      const query=$('#match-search').value.trim().toLocaleLowerCase();
+      const rows=metadata.rows.filter(r=>!query||Object.values(r).join(' ').toLocaleLowerCase().includes(query));
+      $('#metadata-count').textContent=`未识别 ${metadata.rows.length} 条登记 · 当前显示 ${rows.length} 条`;
+      $('#metadata-report').innerHTML=rows.length?`<table><thead><tr><th>状态</th><th>样本</th><th>Dual Index</th><th>Note</th><th>来源</th><th>说明</th></tr></thead><tbody>${rows.map(r=>`<tr class="error-row"><td>未识别</td><td>${esc(r.sample_id)}</td><td>${esc(r.dual_index)}</td><td>${esc(r.note)}</td><td>${esc(r.file)} / ${esc(r.sheet)}:${r.row}</td><td>${esc(r.reason)}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">当前筛选下没有未识别的登记样本。</p>';
+    }catch(e){if(token===matchRequest)$('#metadata-report').textContent=`登记信息读取失败：${e.message}。请刷新重试。`;}
+  }
   function setTab(name){tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));});document.querySelectorAll('.tab-content').forEach(p=>p.classList.toggle('active',p.id===`tab-${name}`));if(name==='match')loadMatch().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);}
   async function refresh(){const data=await api(`/api/jobs/${id}`);job=data.job;if(attempt!==job.attempt_no){attempt=job.attempt_no;revision='';offset=0;source='';$('#log-view').textContent='';if(tab==='match')loadMatch().catch(fail);}
     $('#job-id').textContent=id;$('#dataset-title').textContent=job.dataset;$('#job-subtitle').textContent=`${job.pipeline_label} · ${job.input_path}`;
@@ -43,11 +53,13 @@
   }
   async function loadMatch(){
     const token=++matchRequest;matchLoading=true;syncSelection();
+    loadMetadata(token);
     try{
       const data=await api(`/api/jobs/${id}/match-preview?${new URLSearchParams({offset:matchPage*50,limit:50,query:$('#match-search').value,errors_only:$('#errors-only').checked})}`);
       if(token!==matchRequest)return;
       if(revision!==(data.revision||'')){selected.clear();$('#batch-message').textContent='';}
       revision=data.revision||'';pageRows=data.rows;
+      $('#match-changes').textContent=`相比上次确认：新增 OK 记录 ${data.changes?.new_ok_records??0}；消失或改变的 OK 记录 ${data.changes?.removed_or_changed_ok_records??0}。`;
       $('#match-path').textContent=data.path||'尚未生成清单';
       const names={total:'记录',ok:'匹配成功',error:'匹配失败',file_pairs:'文件对',matched_samples:'匹配样本'};
       $('#match-counts').innerHTML=Object.entries(data.counts||{}).map(([k,v])=>`<span class="count-pill ${k}"><b>${v}</b>${esc(names[k]||k)}</span>`).join('');
