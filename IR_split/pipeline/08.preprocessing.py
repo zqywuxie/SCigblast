@@ -44,7 +44,8 @@ def _text(value: object) -> str:
 
 
 def _umi_from_header(value: object) -> str:
-    token = _text(value).lstrip("@>").split(None, 1)[0]
+    parts = _text(value).lstrip("@>").split(None, 1)
+    token = parts[0] if parts else ""
     match = re.search(r"#(?:UMI:)?([ACGTN]+)$", token, re.IGNORECASE)
     return match.group(1).upper() if match else ""
 
@@ -59,7 +60,8 @@ def _normalise_umi(value: object, header: object = "") -> str:
 
 
 def _canonical_id(value: object) -> str:
-    token = _text(value).lstrip("@>").split(None, 1)[0]
+    parts = _text(value).lstrip("@>").split(None, 1)
+    token = parts[0] if parts else ""
     token = token.split("#", 1)[0]
     token = re.sub(r"/[12]$", "", token)
     fields = token.split(":")
@@ -82,7 +84,10 @@ def _aliases(value: object) -> set[str]:
     raw = _text(value)
     if not raw:
         return set()
-    token = raw.lstrip("@>").split(None, 1)[0]
+    parts = raw.lstrip("@>").split(None, 1)
+    if not parts:
+        return set()
+    token = parts[0]
     result = {raw, token, _canonical_id(token), token.split("#", 1)[0]}
     result.discard("")
     return result
@@ -143,9 +148,17 @@ def build_representative_index(state_paths: list[Path], database: str | Path) ->
         state_files = 0
         for state_path in state_paths:
             state_files += 1
-            delimiter = "," if state_path.name.endswith((".csv", ".csv.gz")) else "\t"
             with _open_state(state_path) as handle:
+                # Legacy IR snapshots have a .tsv.gz name but CSV contents.
+                # Inspect the small header, never infer the delimiter from the suffix.
+                header = handle.readline().lstrip("\ufeff")
+                delimiter = "\t" if "\t" in header else ","
+                handle.seek(0)
                 reader = csv.DictReader(handle, delimiter=delimiter)
+                reader.fieldnames = [name.lstrip("\ufeff") for name in (reader.fieldnames or [])]
+                fields = set(reader.fieldnames)
+                if not fields.intersection({"sample", "sample_id"}) or not fields.intersection(_READ_ID_COLUMNS):
+                    raise ValueError(f"{state_path}: representative state missing sample/read ID columns")
                 for row in reader:
                     sample = _text(row.get("sample_id") or row.get("sample"))
                     umi = _normalise_umi(row.get("umi"), row.get("header"))

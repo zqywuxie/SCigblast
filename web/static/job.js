@@ -72,8 +72,30 @@
     }catch(e){$('#batch-message').textContent=e.message;await loadMatch().catch(console.error);}
     finally{batchBusy=false;syncSelection();}
   };
-  async function loadResults(){const data=await api(`/api/jobs/${id}/results?${new URLSearchParams({offset:resultPage*50,limit:50,query:$('#result-search').value})}`);$('#result-info').textContent=data.path?`${data.path} · ${data.total} 行 · 第 ${resultPage+1} 页`:'尚未生成 Summary';$('#result-prev').disabled=!resultPage;$('#result-next').disabled=(resultPage+1)*50>=data.total;$('#result-head').innerHTML=`<tr>${data.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>`;$('#result-body').innerHTML=data.rows.map(r=>`<tr class="${Number(r.input_sequences)===0&&Number(r.mapped_seqs)>0?'error-row':''}">${data.columns.map(c=>`<td>${esc(r[c])}</td>`).join('')}</tr>`).join('');}
+  let resultRequest=0;
+  async function loadResults(){
+    const token=++resultRequest, page=resultPage;
+    const data=await api(`/api/jobs/${id}/results?${new URLSearchParams({offset:page*50,limit:50,query:$('#result-search').value})}`);
+    if(token!==resultRequest)return;
+    $('#result-info').textContent=data.path?`${data.total} 条记录 · 第 ${page+1} 页`:'尚未生成 Summary';
+    $('#result-prev').disabled=!page;$('#result-next').disabled=(page+1)*50>=data.total;
+    $('#result-head').innerHTML=`<tr>${data.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>`;
+    $('#result-body').innerHTML=data.rows.map(r=>`<tr class="${Number(r.input_sequences)===0&&Number(r.mapped_seqs)>0?'error-row':''}">${data.columns.map(c=>`<td>${esc(r[c])}</td>`).join('')}</tr>`).join('');
+  }
   async function loadLog(){if(paused||logBusy)return;logBusy=true;try{const data=await api(`/api/jobs/${id}/log?${new URLSearchParams({offset,source})}`);if(data.reset)$('#log-view').textContent='';source=data.source||'';offset=data.next_offset;$('#log-view').textContent=($('#log-view').textContent+data.content).slice(-500000);if($('#auto-scroll').checked)$('#log-view').scrollTop=$('#log-view').scrollHeight;}finally{logBusy=false;}}
+  // Reuse the existing results API and controls, but group them into a clear search bar.
+  const resultTools=document.createElement('div'); resultTools.className='result-search-toolbar';
+  $('#result-search').before(resultTools);
+  const resultLabel=document.createElement('label'); resultLabel.className='result-search-field';
+  resultLabel.innerHTML='<span>查找比对结果</span>';
+  resultLabel.append($('#result-search')); resultTools.append(resultLabel,$('#result-refresh'));
+  $('#result-search').placeholder='输入样本名、TRA / TRB / IGH 等关键词';
+  $('#result-refresh').className='button button-primary button-small';
+  $('#result-refresh').textContent='搜索 / 刷新';
+  const clearResults=document.createElement('button'); clearResults.className='button button-ghost button-small';
+  clearResults.textContent='清空'; clearResults.onclick=()=>{$('#result-search').value='';resultPage=0;loadResults().catch(fail);};
+  resultTools.append(clearResults);
+  $('#result-search').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();resultPage=0;loadResults().catch(fail);}};
   let summaryKind='', summaryPage=0, summaryRequest=0;
   $('#artifacts-refresh').onclick=()=>loadArtifacts().catch(fail);
   const columnLabels = {sample:'样本',sample_id:'样本',sample_key:'样本',total_reads:'输入 reads',matched_reads:'匹配 reads',matched_pct:'匹配比例 %',mismatch_reads:'未匹配 reads',mismatch_pct:'未匹配比例 %',discarded_pct:'丢弃比例 %',short_reads:'过短 reads',processed_reads:'处理 reads',Total_Reads:'输入 reads',OK_Reads:'合并成功',Merged_Percent:'合并比例 %',Merged_FASTA_Records:'合并序列数',Unaligned_FASTA_Records:'未合并序列数',before_reads:'过滤前 reads',after_reads:'过滤后 reads',reads_retained_pct:'保留比例 %',status:'状态',error:'原因'};
@@ -81,13 +103,19 @@
     const data=await api(`/api/jobs/${id}/artifacts`);
     $('#artifacts-list').innerHTML=`<div class="report-cards">${(data.reports||[]).map(r=>`<section class="report-card ${r.exists?'':'pending'}"><span class="report-status">${r.exists?'可查看':'尚未生成'}</span><h4>${esc(r.label)}</h4><p>${esc(r.description)}</p><div><button class="button button-ghost button-small" data-summary="${r.kind}" ${r.exists?'':'disabled'}>查看统计</button>${r.exists?`<a class="button button-ghost button-small" href="/api/jobs/${id}/download?kind=${r.kind}">下载 CSV / TSV</a>`:''}</div></section>`).join('')}</div><section id="stage-summary-panel" class="hidden"><div class="tab-toolbar"><h3 id="stage-summary-title"></h3><button id="summary-refresh" class="button button-ghost button-small">刷新统计</button></div><div class="summary-filter"><input id="summary-query" placeholder="搜索样本 / 状态" aria-label="搜索阶段统计"><label><input id="summary-all-columns" type="checkbox">显示路径等全部字段</label></div><p id="stage-summary-info" class="muted"></p><div class="table-wrap"><table><thead id="stage-summary-head"></thead><tbody id="stage-summary-body"></tbody></table></div><div class="pagination"><button id="summary-prev" class="button button-ghost">上一页</button><button id="summary-next" class="button button-ghost">下一页</button></div></section><details class="technical-paths"><summary>查看关键文件路径</summary>${data.files.map(f=>`<div class="artifact-row"><code>${esc(f.path)}</code><b>${f.exists?'存在':'未生成'}</b></div>`).join('')}</details>`;
     const reports=data.reports||[];
+    document.querySelectorAll('.report-card').forEach((card,index)=>{
+      const number=document.createElement('span'); number.className='report-number'; number.textContent=`报告 ${index+1}`; card.prepend(number);
+    });
+    const originalChoose = kind => document.querySelectorAll('[data-summary]').forEach(b=>{
+      const active=b.dataset.summary===kind; b.closest('.report-card').classList.toggle('selected',active); b.setAttribute('aria-pressed',String(active));
+    });
     const choose = kind => {summaryKind=kind;summaryPage=0;$('#stage-summary-title').textContent=reports.find(r=>r.kind===kind)?.label||'阶段统计';$('#stage-summary-panel').classList.remove('hidden');loadStageSummary().catch(fail);};
-    document.querySelectorAll('[data-summary]').forEach(b=>b.onclick=()=>choose(b.dataset.summary));
+    document.querySelectorAll('[data-summary]').forEach(b=>b.onclick=()=>{originalChoose(b.dataset.summary);choose(b.dataset.summary);});
     $('#summary-query').onchange=()=>{summaryPage=0;loadStageSummary().catch(fail);};
     $('#summary-all-columns').onchange=$('#summary-refresh').onclick=()=>loadStageSummary().catch(fail);
     $('#summary-prev').onclick=()=>{summaryPage--;loadStageSummary().catch(fail);};$('#summary-next').onclick=()=>{summaryPage++;loadStageSummary().catch(fail);};
     const preferred=[summaryKind,'split','prefilter','pandaseq','fastp','results'].find(k=>reports.some(r=>r.kind===k&&r.exists));
-    if(preferred)choose(preferred);
+    if(preferred){originalChoose(preferred);choose(preferred);}
   }
   async function loadStageSummary(){
     const token=++summaryRequest;
