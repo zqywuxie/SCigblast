@@ -8,7 +8,7 @@ import secrets
 import sqlite3
 import time
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -52,7 +52,7 @@ def init_schema(connection):
         CREATE TABLE IF NOT EXISTS invitations (
             id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL,
             created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-            used_by TEXT, revoked INTEGER NOT NULL DEFAULT 0
+            used_by TEXT, revoked INTEGER NOT NULL DEFAULT 0, deleted_at INTEGER
         );
         CREATE TABLE IF NOT EXISTS auth_limits (
             bucket TEXT PRIMARY KEY, started INTEGER NOT NULL, attempts INTEGER NOT NULL
@@ -65,6 +65,9 @@ def init_schema(connection):
             target_id TEXT, created_at INTEGER NOT NULL
         );
     ''')
+    invitation_columns = {row[1] for row in connection.execute('PRAGMA table_info(invitations)')}
+    if 'deleted_at' not in invitation_columns:
+        connection.execute('ALTER TABLE invitations ADD COLUMN deleted_at INTEGER')
     columns = {row[1] for row in connection.execute('PRAGMA table_info(jobs)')}
     if 'owner_id' not in columns:
         connection.execute('ALTER TABLE jobs ADD COLUMN owner_id TEXT')
@@ -185,7 +188,7 @@ def router(db):
             with db() as connection:
                 connection.execute('BEGIN IMMEDIATE')
                 invite = connection.execute('SELECT i.* FROM invitations i JOIN users u ON u.id=i.created_by '
-                    'WHERE i.code_hash=? AND i.used_by IS NULL AND i.revoked=0 AND i.expires_at>? '
+                    'WHERE i.code_hash=? AND i.used_by IS NULL AND i.revoked=0 AND i.deleted_at IS NULL AND i.expires_at>? '
                     'AND u.active=1 AND u.role=\'admin\'', (digest(body.invitation.strip()), timestamp)).fetchone()
                 if not invite:
                     raise HTTPException(400, '注册码无效、已使用、已撤销或已过期')
@@ -257,7 +260,10 @@ def router(db):
     def users():
         require_admin()
         with db() as connection:
-            return {'users': [public_user(u) for u in connection.execute('SELECT * FROM users ORDER BY created_at,id')]}
+            rows = connection.execute('SELECT u.*, i.id AS invitation_id,i.deleted_at AS invitation_deleted_at FROM users u '
+                                      'LEFT JOIN invitations i ON i.used_by=u.id ORDER BY u.created_at,u.id')
+            return {'users': [{**public_user(u), 'invitation_id': u['invitation_id'],
+                               'invitation_deleted_at': u['invitation_deleted_at']} for u in rows]}
 
     @routes.post('/api/admin/users/{user_id}/active')
     def set_active(user_id: str, body: ActiveRequest):
@@ -274,13 +280,41 @@ def router(db):
         return {'ok': True}
 
     @routes.get('/api/admin/invitations')
-    def invitations():
+    def invitations(status: str = '', q: str = Query('', max_length=200),
+                    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
         require_admin()
         timestamp = int(time.time())
+        conditions = {
+            '': '1=1',
+            'available': 'i.used_by IS NULL AND i.revoked=0 AND i.expires_at>?',
+            'used': 'i.used_by IS NOT NULL',
+            'revoked': 'i.used_by IS NULL AND i.revoked=1',
+            'expired': 'i.used_by IS NULL AND i.revoked=0 AND i.expires_at<=?',
+            'deleted': 'i.deleted_at IS NOT NULL',
+        }
+        if status not in conditions:
+            raise HTTPException(400, '未知注册码状态')
+        where = conditions[status]
+        if status != 'deleted':
+            where += ' AND i.deleted_at IS NULL'
+        params = [timestamp] if status in {'available', 'expired'} else []
+        if q.strip():
+            where += (' AND (instr(lower(i.id),lower(?))>0 OR instr(lower(u.username),lower(?))>0 '
+                      'OR instr(lower(u.display_name),lower(?))>0 OR instr(lower(c.username),lower(?))>0 '
+                      'OR instr(lower(c.display_name),lower(?))>0)')
+            params.extend([q.strip()] * 5)
+        source = (' FROM invitations i LEFT JOIN users u ON u.id=i.used_by '
+                  'LEFT JOIN users c ON c.id=i.created_by WHERE ' + where)
         with db() as connection:
-            rows = connection.execute('SELECT i.id,i.created_at,i.expires_at,i.revoked,i.used_by,u.username AS used_username '
-                                      'FROM invitations i LEFT JOIN users u ON u.id=i.used_by ORDER BY i.created_at DESC,i.id DESC LIMIT 200').fetchall()
-        return {'invitations': [{**dict(r), 'status': '已使用' if r['used_by'] else '已撤销' if r['revoked'] else '已过期' if r['expires_at'] <= timestamp else '可使用'} for r in rows]}
+            total = connection.execute('SELECT COUNT(*)' + source, params).fetchone()[0]
+            rows = connection.execute(
+                'SELECT i.id,i.created_at,i.expires_at,i.revoked,i.used_by,i.created_by,i.deleted_at, '
+                'u.username AS used_username,u.display_name AS used_display_name,u.active AS used_active, '
+                'u.created_at AS used_at,c.username AS created_username,c.display_name AS created_display_name'
+                + source + ' ORDER BY i.created_at DESC,i.id DESC LIMIT ? OFFSET ?',
+                [*params, limit, offset]).fetchall()
+        return {'invitations': [{**dict(r), 'status': '已删除' if r['deleted_at'] is not None else '已使用' if r['used_by'] else '已撤销' if r['revoked'] else '已过期' if r['expires_at'] <= timestamp else '可使用'} for r in rows],
+                'total': total, 'limit': limit, 'offset': offset}
 
     @routes.post('/api/admin/invitations')
     def create_invitation(body: InvitationRequest):
@@ -297,9 +331,21 @@ def router(db):
     def revoke(invitation_id: str):
         admin = require_admin()
         with db() as connection:
-            if not connection.execute('UPDATE invitations SET revoked=1 WHERE id=? AND used_by IS NULL', (invitation_id,)).rowcount:
-                raise HTTPException(409, '注册码不存在或已使用')
+            if not connection.execute('UPDATE invitations SET revoked=1 WHERE id=? AND used_by IS NULL AND revoked=0 AND deleted_at IS NULL', (invitation_id,)).rowcount:
+                raise HTTPException(409, '注册码不存在、已使用或已撤销')
             event(connection, admin['id'], 'revoke-invitation', invitation_id)
+        return {'ok': True}
+
+    @routes.post('/api/admin/invitations/{invitation_id}/delete')
+    def delete_invitation(invitation_id: str):
+        admin = require_admin()
+        with db() as connection:
+            updated = connection.execute('UPDATE invitations SET deleted_at=?,revoked=1 '
+                                         'WHERE id=? AND deleted_at IS NULL',
+                                         (int(time.time()), invitation_id))
+            if not updated.rowcount:
+                raise HTTPException(404, '注册码记录不存在或已删除')
+            event(connection, admin['id'], 'delete-invitation', invitation_id)
         return {'ok': True}
 
     return routes

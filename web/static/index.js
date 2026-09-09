@@ -72,11 +72,13 @@
     $('#pipeline-cards').insertAdjacentHTML('beforebegin', '<p id="pipeline-root-hint" class="field-hint"></p>');
     $('#pipeline-root-hint').textContent = `项目目录：${defaults.pipeline_root}`;
     $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
+    $('#help-pipeline').innerHTML = $('#pipeline').innerHTML;
+    $('#pipeline-help-open').disabled = false;
     updatePipelineFields();
   }
 
   function renderPipelineCards() {
-    const cards = Object.entries(pipelineInfo).map(([key, info]) => `<button type="button" class="pipeline-card ${key === selectedPipeline() ? 'selected' : ''}" data-pipeline="${key}"><span class="pipeline-dot ${info.accent || 'teal'}"></span><span class="pipeline-card-copy"><strong>${esc(info.label)}</strong><small>${esc(info.description || '')}</small></span><span class="pipeline-card-check">✓</span></button>`).join('');
+    const cards = Object.entries(pipelineInfo).map(([key, info]) => `<button type="button" class="pipeline-card ${key === selectedPipeline() ? 'selected' : ''}" data-pipeline="${key}" aria-pressed="${key === selectedPipeline()}"><span class="pipeline-dot ${info.accent || 'teal'}"></span><span class="pipeline-card-copy"><strong>${esc(info.label)}</strong></span><span class="pipeline-card-check" aria-hidden="true">✓</span></button>`).join('');
     $('#pipeline-cards').innerHTML = cards;
     document.querySelectorAll('.pipeline-card').forEach((card) => card.addEventListener('click', () => { $('#pipeline').value = card.dataset.pipeline; updatePipelineFields(); }));
   }
@@ -86,11 +88,46 @@
     $('#barcode-row').classList.toggle('hidden', !info.requires_barcode);
     $('#ir-options').classList.toggle('hidden', !info.ir_options);
     $('[name="barcode_csv"]').disabled = !info.requires_barcode;
-    let stages = info.stages || [];
-    if (info.ir_options && $('[name="ir_variant"]').value === 'merged') stages = stages.filter(s => !['06.representative', '08.preprocessing'].includes(s));
-    $('#pipeline-guide').innerHTML = `<p>${esc(info.description)}</p><div class="flow-nodes">${stages.map(s => `<span>${esc(info.stage_labels?.[s] || s)}</span>`).join('<b>→</b>')}</div><small>脚本负责分析；网页负责配置、审核和启动。内部并发参数保持脚本设置。</small>`;
-    document.querySelectorAll('.pipeline-card').forEach((card) => card.classList.toggle('selected', card.dataset.pipeline === selectedPipeline()));
+    document.querySelectorAll('.pipeline-card').forEach((card) => {
+      const selected = card.dataset.pipeline === selectedPipeline();
+      card.classList.toggle('selected', selected);
+      card.setAttribute('aria-pressed', String(selected));
+    });
   }
+
+  function renderHelp() {
+    const key = $('#help-pipeline').value, info = pipelineInfo[key] || {};
+    const details = {
+      ir_split: '用于 Bulk IR 数据，barcode 用于定位样本。支持原始数据和带 UMI 标签的已拆分数据；先进行 fastp 质量过滤，已拆分数据保留原有 barcode 信息。代表序列流程在样本内按 UMI 选择代表序列，再完成 IgBLAST 比对。',
+      '10x_split': '用于单细胞数据，barcode 标识细胞。R1 检查 TSO、R2 检查 barcode 后进行序列合并，再按样本内的 barcode + UMI 选择代表序列，完成 IgBLAST 比对。',
+      igblast_base: '不进行 barcode 拆分或 UMI 代表序列提取。按 Submission 的 Note 匹配样本，并按 Chain 选择数据库。',
+      pig_igblast: '核对 Submission 中的 Pig 物种、样本与 Chain，使用猪专用链数据库比对，不进行 IR/10X 拆分。'
+    };
+    const finalStages = {
+      ir_split: {
+        title: '结果整理 · Preprocessing',
+        input: 'IgBLAST 的 AIRR 注释结果，以及前序 UMI 代表序列记录。',
+        processing: '校验序列的样本归属，过滤并计算 UMI 支持数，按样本汇总链表达与多样性；有 BCR 数据时，还计算抗体类别比例、类别转换（CSR）、体细胞高频突变（SHM）和 B 细胞多样性。',
+        output: 'Datapoint.csv 样本指标总表，以及按样本和链整理的 junction 序列结果。',
+        note: '结果整理用于代表序列流程，以样本为单位汇总；不同来源的样本分别保留，这里的 barcode 不代表单个细胞。'
+      },
+      '10x_split': {
+        title: '链聚类 · Chain clustering',
+        input: 'IgBLAST 的 AIRR 注释结果，以及每条代表序列已有的 UMI 支持数。',
+        processing: '在同一样本、同一细胞 barcode 和同一链类型内，按 V、J 与 CDR3 归组并累加 UMI 支持。默认最多保留两个独立链候选，次要候选需满足支持比例条件；候选内再选择序列变体和代表注释。',
+        output: '按原样本目录保存的链结果表，包含 barcode、AIRR 注释与 umi_counts；另输出筛选明细和 stage8_summary.csv 汇总表。',
+        note: '“最多两个”针对每个细胞的每种链类型；该步骤整理已有代表序列，不重新构建共识序列。'
+      }
+    };
+    const finalStage = finalStages[key];
+    const finalSection = finalStage ? `<section class="pipeline-final-stage" aria-labelledby="pipeline-final-title"><span class="pipeline-final-label">最后一步</span><h3 id="pipeline-final-title">${esc(finalStage.title)}</h3><dl><dt>输入</dt><dd>${esc(finalStage.input)}</dd><dt>处理</dt><dd>${esc(finalStage.processing)}</dd><dt>输出</dt><dd>${esc(finalStage.output)}</dd></dl><p class="pipeline-final-note">${esc(finalStage.note)}</p></section>` : '';
+    const representative = ['ir_split', '10x_split'].includes(key) ? '<p><strong>代表序列：</strong>reads 数最高者优先；仅在并列时按平均期望错误数更低、平均质量更高排序。质量缺失或仍并列时采用确定性规则，并记录混淆和备选序列。</p>' : '';
+    $('#pipeline-help-content').innerHTML = `<p class="pipeline-help-summary">${esc(info.description)}</p><div class="flow-nodes" aria-label="分析步骤">${(info.stages || []).map((s, i) => `<span${finalStage && i === info.stages.length - 1 ? ' class="final-node"' : ''}>${esc(info.stage_labels?.[s] || s)}</span>`).join('<b aria-hidden="true">→</b>')}</div><p>${esc(details[key] || info.description)}</p>${finalSection}${representative}<p class="pipeline-help-review">首次运行完成 Match 后，请先审核样本匹配结果，再继续后续分析。</p>`;
+  }
+  $('#pipeline-help-open').addEventListener('click', () => { $('#help-pipeline').value = selectedPipeline(); renderHelp(); $('#pipeline-help').showModal(); });
+  $('#pipeline-help-close').addEventListener('click', () => $('#pipeline-help').close());
+  $('#pipeline-help').addEventListener('close', () => $('#pipeline-help-open').focus());
+  $('#help-pipeline').addEventListener('change', renderHelp);
 
   function formatTime(value) { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
   function renderJobs(data) {

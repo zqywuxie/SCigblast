@@ -1,5 +1,7 @@
 """Authentication, ownership and invitation regression tests (no pipelines started)."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+import sqlite3
 import time
 import unittest
 
@@ -78,6 +80,117 @@ class AuthTests(unittest.TestCase):
         fresh = self.invite()
         self.assertEqual(self.register(code=fresh['code']).status_code, 409)
         self.assertEqual(self.register('bobby', fresh['code']).status_code, 200)
+
+    def test_invitation_registration_provenance_survives_disable_and_restart(self):
+        invitation = self.invite()
+        self.assertEqual(self.register('alice', invitation['code']).status_code, 200)
+        user = next(u for u in self.client.get('/api/admin/users').json()['users'] if u['username'] == 'alice')
+        self.assertEqual(user['invitation_id'], invitation['id'])
+        response = self.client.get('/api/admin/invitations', params={'q': invitation['id']})
+        record, = response.json()['invitations']
+        self.assertEqual((record['created_by'], record['created_username']), ('test-admin', 'admin'))
+        self.assertEqual((record['used_by'], record['used_username'], record['used_display_name']),
+                         (user['id'], 'alice', '测试用户'))
+        self.assertEqual(record['used_at'], user['created_at'])
+        self.assertEqual(record['used_active'], 1)
+        self.assertNotIn(invitation['code'], response.text)
+        self.assertNotIn('code_hash', response.text)
+        self.assertEqual(self.client.post(f"/api/admin/invitations/{invitation['id']}/revoke", json={}).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/admin/users/{user['id']}/active", json={'active': False}).status_code, 200)
+        web.startup()
+        record, = self.client.get('/api/admin/invitations', params={'q': 'ALICE'}).json()['invitations']
+        self.assertEqual((record['id'], record['status'], record['used_active'], record['used_at']),
+                         (invitation['id'], '已使用', 0, user['created_at']))
+        self.assertEqual(record['used_by'], user['id'])
+
+    def test_invitation_filters_and_pagination(self):
+        available, used, revoked, expired = [self.invite() for _ in range(4)]
+        self.assertEqual(self.register('alice', used['code']).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/admin/invitations/{revoked['id']}/revoke", json={}).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/admin/invitations/{revoked['id']}/revoke", json={}).status_code, 409)
+        with web.db() as connection:
+            connection.execute('UPDATE invitations SET expires_at=0 WHERE id=?', (expired['id'],))
+        for status, invitation in [('available', available), ('used', used), ('revoked', revoked), ('expired', expired)]:
+            response = self.client.get('/api/admin/invitations', params={'status': status})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['total'], 1)
+            self.assertEqual(response.json()['invitations'][0]['id'], invitation['id'])
+        for query in ('alice', '测试用户', used['id']):
+            result = self.client.get('/api/admin/invitations', params={'q': query}).json()
+            self.assertEqual(result['total'], 1)
+            self.assertEqual(result['invitations'][0]['id'], used['id'])
+        self.assertEqual(self.client.get('/api/admin/invitations', params={'q': 'admin'}).json()['total'], 4)
+        self.assertEqual(self.client.get('/api/admin/invitations', params={'q': "' OR 1=1 --"}).json()['total'], 0)
+        page1 = self.client.get('/api/admin/invitations', params={'limit': 2}).json()
+        page2 = self.client.get('/api/admin/invitations', params={'limit': 2, 'offset': 2}).json()
+        self.assertEqual(page1['total'], 4)
+        self.assertEqual(len({r['id'] for p in [page1, page2] for r in p['invitations']}), 4)
+        self.assertEqual(self.client.get('/api/admin/invitations', params={'status': 'bad'}).status_code, 400)
+        for params in ({'limit': 0}, {'limit': 201}, {'offset': -1}):
+            self.assertEqual(self.client.get('/api/admin/invitations', params=params).status_code, 422)
+        ordinary_user = self.login('alice')
+        self.assertEqual(ordinary_user.get('/api/admin/invitations', params={'q': 'admin'}).status_code, 403)
+        self.assertEqual(ordinary_user.get('/api/admin/users').status_code, 403)
+
+    def test_invitation_history_beyond_first_two_hundred_records(self):
+        with web.db() as connection:
+            connection.executemany('INSERT INTO invitations(id,code_hash,created_by,created_at,expires_at) '
+                                   'VALUES(?,?,?, ?,0)',
+                                   [(f'old-{i:03}', f'digest-{i}', 'test-admin', i) for i in range(205)])
+        last_page = self.client.get('/api/admin/invitations', params={'status': 'expired', 'offset': 200}).json()
+        self.assertEqual(last_page['total'], 205)
+        self.assertEqual(len(last_page['invitations']), 5)
+        self.assertEqual(last_page['invitations'][-1]['id'], 'old-000')
+
+    def test_delete_unused_invitation_invalidates_code_and_preserves_audit(self):
+        invitation = self.invite()
+        endpoint = f"/api/admin/invitations/{invitation['id']}/delete"
+        with TestClient(web.app) as public:
+            self.assertEqual(public.post(endpoint, headers=HEADERS, json={}).status_code, 401)
+        self.assertEqual(self.client.post(endpoint, json={}).status_code, 200)
+        self.assertEqual(self.register('alice', invitation['code']).status_code, 400)
+        for status in ('', 'available', 'revoked'):
+            result = self.client.get('/api/admin/invitations', params={'status': status}).json()
+            self.assertEqual(result['total'], 0)
+        deleted, = self.client.get('/api/admin/invitations', params={'status': 'deleted'}).json()['invitations']
+        self.assertEqual((deleted['id'], deleted['status'], deleted['created_username']),
+                         (invitation['id'], '已删除', 'admin'))
+        self.assertIsNotNone(deleted['deleted_at'])
+        self.assertEqual(self.client.post(endpoint, json={}).status_code, 404)
+        self.assertEqual(self.client.post(f"/api/admin/invitations/{invitation['id']}/revoke", json={}).status_code, 409)
+        with web.db() as connection:
+            rows = connection.execute("SELECT actor_id,target_id FROM auth_events WHERE action='delete-invitation'").fetchall()
+            self.assertEqual([tuple(r) for r in rows], [('test-admin', invitation['id'])])
+
+    def test_delete_used_invitation_keeps_user_session_and_registration_source(self):
+        invitation = self.invite()
+        self.assertEqual(self.register('alice', invitation['code']).status_code, 200)
+        user_client = self.login('alice')
+        user = user_client.get('/api/auth/me').json()['user']
+        endpoint = f"/api/admin/invitations/{invitation['id']}/delete"
+        self.assertEqual(user_client.post(endpoint, json={}).status_code, 403)
+        self.assertEqual(self.client.post(endpoint, json={}).status_code, 200)
+        web.startup()
+        self.assertEqual(user_client.get('/api/auth/me').json()['user'], user)
+        registered = next(u for u in self.client.get('/api/admin/users').json()['users'] if u['id'] == user['id'])
+        self.assertEqual(registered['invitation_id'], invitation['id'])
+        self.assertIsNotNone(registered['invitation_deleted_at'])
+        history = self.client.get('/api/admin/invitations', params={'status': 'deleted', 'q': 'alice'}).json()
+        self.assertEqual(history['total'], 1)
+        self.assertEqual(history['invitations'][0]['used_by'], user['id'])
+        self.assertEqual(history['invitations'][0]['used_at'], user['created_at'])
+
+    def test_deleted_invitation_schema_migration_preserves_existing_records(self):
+        with closing(sqlite3.connect(':memory:')) as connection:
+            connection.executescript('CREATE TABLE jobs(id TEXT PRIMARY KEY); '
+                'CREATE TABLE invitations(id TEXT PRIMARY KEY,code_hash TEXT NOT NULL UNIQUE, '
+                'created_by TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL, '
+                'used_by TEXT,revoked INTEGER NOT NULL DEFAULT 0); '
+                "INSERT INTO invitations VALUES('old','hash','creator',1,2,'registered',0);")
+            web.auth.init_schema(connection)
+            web.auth.init_schema(connection)
+            self.assertEqual(connection.execute('SELECT id,created_by,used_by,deleted_at FROM invitations').fetchone(),
+                             ('old', 'creator', 'registered', None))
 
     def test_account_role_and_revocation(self):
         self.assertEqual(self.register().status_code, 200)

@@ -15,7 +15,7 @@
 
     <section class="page-head">
       <div><p class="eyebrow">PIPELINE OPERATIONS / 01</p><h1>任务控制台</h1><p class="page-subtitle">在这里提交、审核和追踪所有分析任务。第一次运行只生成 Match 清单，确认后才进入重型阶段。</p></div>
-      <button id="open-drawer" class="button button-primary button-large"><span>＋</span> 新建任务</button>
+      <div class="page-actions"><button id="open-drawer" class="button button-primary button-large"><span>＋</span> 新建任务</button><button id="pipeline-help-open" type="button" class="button button-ghost help-button" aria-label="查看 Pipeline 介绍" aria-haspopup="dialog" aria-controls="pipeline-help" title="Pipeline 介绍" disabled>?</button></div>
     </section>
 
     <section class="stat-grid" aria-label="任务概览">
@@ -43,7 +43,6 @@
       <div class="drawer-step"><span class="step-number">1</span><div><strong>选择 Pipeline</strong><small>根据数据类型选择分析流程</small></div></div>
       <div id="pipeline-cards" class="pipeline-cards"></div>
       <select name="pipeline" id="pipeline" form="new-job-form" class="visually-hidden" required></select>
-      <div id="pipeline-guide" class="pipeline-guide"></div>
       <div class="drawer-step"><span class="step-number">2</span><div><strong>设置路径</strong><small>只接受服务器上的绝对路径</small></div></div>
       <form id="new-job-form">
         <input type="hidden" name="submission_revision">
@@ -72,6 +71,11 @@
       <footer class="file-picker-footer"><button id="file-picker-cancel" type="button" class="button button-ghost">取消</button><button id="file-picker-select" type="button" class="button button-primary" disabled>选择当前目录</button></footer>
     </section>
   </div>
+  <dialog id="pipeline-help" class="pipeline-help" aria-labelledby="pipeline-help-title">
+    <header><h2 id="pipeline-help-title">Pipeline 介绍</h2><button id="pipeline-help-close" type="button" class="close-button" aria-label="关闭流程说明">×</button></header>
+    <label class="field"><span class="field-label">Pipeline</span><select id="help-pipeline"></select></label>
+    <div id="pipeline-help-content"></div>
+  </dialog>
 <script src="/static/submission.js?v={{ asset_version }}"></script><script src="/static/index.js?v={{ asset_version }}"></script>
 </body>
 </html>
