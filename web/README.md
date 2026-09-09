@@ -38,6 +38,8 @@ docker compose logs -f scigblast-web
 bash deploy.sh
 ```
 
+首次缺少 `web/.env` 时会生成配置模板并退出，请填写路径后重新执行。已有镜像时使用 `bash deploy.sh --no-build`；查看帮助使用 `bash deploy.sh --help`。无需先激活 Conda。
+
 脚本会检查 Docker Compose、构建并重建容器，最后轮询 `/health` 健康检查。也可以通过 `SCIGBLAST_ENV_FILE=/path/to/.env bash deploy.sh` 指定配置文件。
 
 浏览器访问 `http://服务器地址:8000`。
@@ -119,6 +121,6 @@ docker load -i /path/to/scigblast-web.tar
 docker compose up -d --no-build
 ```
 
-仅有镜像的服务器不要使用 `deploy.sh`（它会要求从源码重建）。数据/数据库挂载仍需配置正确；网页仍可选择自定义 Barcode CSV。
+仅有镜像的服务器也可复制根目录 `deploy.sh`，保留 `web/docker-compose.yml`、`web/.env` 和 `web/.env.example` 的目录布局，然后运行 `bash deploy.sh --no-build`。默认不带参数会从源码重建。数据/数据库挂载仍需配置正确；网页仍可选择自定义 Barcode CSV。
 
 镜像打包不是代码加密：普通网页用户看不到源码，但有 Docker/服务器管理权限的人仍可从镜像提取脚本。
