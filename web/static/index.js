@@ -47,9 +47,7 @@
     try {
       const params = new URLSearchParams({ kind: pickerKind });
       if (path) params.set('path', path);
-      const response = await fetch(`/api/browse?${params}`);
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || '无法读取目录');
+      const data = await Submission.api(`/api/browse?${params}`);
       renderPicker(data);
       $('#file-picker-message').textContent = `${browseLabels[pickerKind]} · 只显示允许根目录下的内容`;
     } catch (error) {
@@ -66,9 +64,7 @@
   function closeDrawer() { document.body.classList.remove('task-dialog-open'); $('#drawer-shell').classList.remove('open'); $('#drawer-shell').setAttribute('aria-hidden', 'true'); $('#open-drawer').focus(); }
   function selectedPipeline() { return $('#pipeline').value; }
   async function loadPipelines() {
-    const response = await fetch('/api/pipelines');
-    if (!response.ok) throw new Error('无法读取 Pipeline');
-    pipelineInfo = await response.json();
+    pipelineInfo = await Submission.api('/api/pipelines');
     const defaults = await Submission.api('/api/defaults');
     formDefaults = defaults;
     $('[name="barcode_csv"]').value = defaults.barcode_csv;
@@ -123,7 +119,7 @@
     document.querySelectorAll('[data-action]').forEach((button) => button.addEventListener('click', () => runAction(button.dataset.id, button.dataset.action)));
   }
 
-  async function refreshJobs() { if (busy) return; busy = true; const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (filter === 'active') params.set('status', 'QUEUED,RUNNING,MATCHING,STOPPING'); if (filter === 'review') params.set('status', 'WAITING_REVIEW'); if (filter === 'done') params.set('status', 'SUCCEEDED,FAILED,STOPPED,INTERRUPTED,COMPLETED_WITHOUT_MARKER'); if ($('#pipeline-filter').value) params.set('pipeline', $('#pipeline-filter').value); if ($('#job-search').value.trim()) params.set('query', $('#job-search').value.trim()); try { const data = await (await fetch(`/api/jobs?${params}`)).json(); allJobs = data.jobs || []; renderJobs(data); } finally { busy = false; } }
+  async function refreshJobs() { if (busy) return; busy = true; const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (filter === 'active') params.set('status', 'QUEUED,RUNNING,MATCHING,STOPPING'); if (filter === 'review') params.set('status', 'WAITING_REVIEW'); if (filter === 'done') params.set('status', 'SUCCEEDED,FAILED,STOPPED,INTERRUPTED,COMPLETED_WITHOUT_MARKER'); if ($('#pipeline-filter').value) params.set('pipeline', $('#pipeline-filter').value); if ($('#job-search').value.trim()) params.set('query', $('#job-search').value.trim()); try { const data = await Submission.api(`/api/jobs?${params}`); allJobs = data.jobs || []; renderJobs(data); } catch(error) { showMessage(error.message,true); } finally { busy = false; } }
 
   async function runAction(id, action) { if (action === 'confirm') { location.href = `/jobs/${id}#match`; return; } if (action === 'stop' && !window.confirm('停止这个任务？中间产物会保留，可稍后续跑。')) return; try { if(action === 'delete') { const job = allJobs.find(j => j.id === id); if(!job || !await Submission.deleteJob(job)) return; } else await Submission.api(`/api/jobs/${id}/${action}`, {}); await refreshJobs(); } catch(error) { alert(error.message); } }
   function showMessage(message, error = false) { const node = $('#form-message'); node.textContent = message; node.classList.toggle('error', error); clearTimeout(showMessage.timer); showMessage.timer = setTimeout(() => { node.textContent = ''; node.classList.remove('error'); }, 4500); }

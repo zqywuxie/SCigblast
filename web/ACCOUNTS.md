@@ -1,0 +1,59 @@
+# 账户、注册码与任务归属
+
+## 首次启用
+
+镜像不包含默认密码，不提供公开的管理员注册入口。部署后在服务器执行：
+
+```bash
+docker exec -it scigblast-web python /app/manage_users.py create-admin zqy --name 郑钦云
+```
+
+密码通过隐藏提示输入两次（12–128 字符），不要写在命令行或提交进 Git。
+创建管理员后打开网站登录，在“用户管理”生成注册码，通过可信渠道交给新用户。
+用户名为 3–32 位英文、数字、点、短横线或下划线；姓名用于任务展示。
+
+管理员账户已存在时，重复创建会报错，不覆盖密码。如忘记密码：
+
+```bash
+docker exec -it scigblast-web python /app/manage_users.py reset-password zqy
+```
+
+重置不会改变角色或启用状态，会撤销该用户的全部登录会话。
+
+## 注册码
+
+- 每个注册码只能注册一个普通用户；注册时用数据库事务原子消费，并发使用只能成功一次。
+- 有效期可选 1 小时、24 小时、3 天或 7 天。
+- 管理员可随时生成新码、撤销未使用代码，后端立即生效，管理列表每 10 秒刷新。
+- 不采用定时自动轮换。完整代码只显示一次，数据库仅保存散列；失去代码后撤销并新建。
+- 注册后的角色不能由注册请求指定。停用管理员也会撤销其尚未使用的注册码。
+
+## 登录与权限
+
+- 登录会话有效 12 小时；退出、修改密码、服务器重置密码或停用账户会撤销相应会话。
+- 普通用户仅能查看和操作自己的任务；管理员可以查看和操作全部任务。
+- 任务创建、路径验证的操作者强制使用当前登录姓名，即使直接调用 API 提交其他名字也不会冒用。
+- 操作日志记录实际操作人的姓名及用户名，管理员代为操作时不冒记为任务创建者。
+- Submission 工作副本按用户归属保护；管理员可访问全部副本。
+- 历史任务的 owner_id 留空，仅管理员可见，不根据同名姓名自动认领，不移动或重算旧结果。
+- 停用账户不会删除或自动终止其已运行的分析；需要时管理员在任务页停止。
+- 任务级权限不等于 Linux 文件权限隔离。允许浏览的输入 / Submission 路径仍是共享工作区，
+  请将 SCIGBLAST_ALLOWED_* 配置为最小必要目录；不要开放存放私人资料的整个磁盘。
+
+## 部署说明
+
+账户、会话和注册码保存在原有 web/runtime/scigblast.sqlite3 中，与任务共用持久卷。
+升级会新增表及 nullable owner_id 字段，保留旧任务；升级前备份整个 runtime。
+部署健康检查仍使用不含任务内容的 /health，无需保存管理员密码到 deploy.sh。
+后台仍只允许两个 pipeline 同时运行，不改变生物学计算或资源配置。
+
+生产环境应通过 HTTPS 访问，并将 web/.env 中 SCIGBLAST_COOKIE_SECURE=1。
+当前 HTTP 内网测试可设为 0，但 HTTP 无法保护传输中的密码和会话，请勿直接暴露到公网。
+会话 Cookie 使用 HttpOnly、SameSite=Strict；写请求要求同源及自定义请求头。
+登录和注册有 15 分钟窗口的尝试次数限制，不信任客户端传入的 X-Forwarded-For。
+若使用反向代理，需正确传递外部 Host / scheme，并仅信任实际代理来源。
+
+实现参考：[OWASP 密码存储](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+的 PBKDF2-HMAC-SHA256 600,000 次迭代建议，以及
+[OWASP CSRF 防护](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)
+的自定义请求头与 SameSite 防护。无需新增第三方认证服务。

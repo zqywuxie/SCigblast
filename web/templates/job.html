@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>任务详情 · SCigblast</title><link rel="stylesheet" href="/static/style.css?v={{ asset_version }}"></head>
 <body><main class="app-shell detail-shell">
-  <header class="topbar"><a class="brand" href="/"><span class="brand-mark"><i></i><i></i><i></i></span><span>SCIGBLAST</span></a><div class="topbar-right"><span class="server-state"><b></b> 服务器在线</span><span class="topbar-divider"></span><a class="back-link" href="/">← 返回任务列表</a></div></header>
+  <header class="topbar"><a class="brand" href="/"><span class="brand-mark"><i></i><i></i><i></i></span><span>SCIGBLAST</span></a>{% include 'user_nav.html' %}</header>
   <section class="page-head detail-head"><div><p class="eyebrow">JOB DETAIL / <span id="job-id">—</span></p><h1 id="dataset-title">任务详情</h1><p id="job-subtitle" class="page-subtitle">正在读取任务信息…</p></div><div class="detail-head-actions"><div id="hero-status" class="hero-status">加载中…</div><div id="head-actions"></div></div></section>
   <section class="detail-meta" id="meta-cards"></section>
   <section class="stage-panel panel"><div class="panel-heading"><div><p class="eyebrow">PIPELINE PROGRESS</p><h2>执行阶段</h2></div><span id="progress-total" class="progress-total">—</span></div><div id="stages" class="stage-list"></div></section>

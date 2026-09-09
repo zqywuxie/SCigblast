@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -36,7 +37,13 @@ class WorkflowTests(unittest.TestCase):
                         patch.dict(os.environ, {k: str(self.root) for k in ('SCIGBLAST_ALLOWED_INPUT_ROOTS', 'SCIGBLAST_ALLOWED_SUBMISSION_ROOTS', 'SCIGBLAST_ALLOWED_OUTPUT_ROOTS')}),
                         patch.object(web, 'schedule')]
         for p in self.patches: p.start()
-        web.PROCESSES.clear(); web.init_db(); self.client = TestClient(web.app)
+        web.PROCESSES.clear(); web.init_db()
+        with web.db() as connection:
+            connection.execute('INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)',
+                               ('test-admin', 'admin', '郑钦云', web.auth.password_hash('test-password-123'), 'admin', int(time.time())))
+            connection.execute('INSERT INTO sessions VALUES(?,?,?)', (web.auth.digest('fixture-session'), 'test-admin', int(time.time()) + 3600))
+        self.client = TestClient(web.app, headers={'X-SCIGBLAST-Request': '1'})
+        self.client.cookies.set(web.auth.COOKIE, 'fixture-session')
         self.view = submission.create(web.STATE_ROOT, [self.source], str(self.source))
 
     def tearDown(self):

@@ -15,13 +15,14 @@ import tempfile
 import shutil
 import shlex
 import submission
+import auth
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pypinyin import Style, lazy_pinyin
 from fastapi.templating import Jinja2Templates
@@ -113,6 +114,7 @@ def init_db() -> None:
             );
             """
         )
+        auth.init_schema(connection)
 
 
 def update_job(job_id: str, **values: Any) -> None:
@@ -126,6 +128,9 @@ def update_job(job_id: str, **values: Any) -> None:
 
 
 def add_action(job_id: str, operator: str, action: str, details: str = "") -> None:
+    actor = auth.CURRENT_USER.get()
+    if actor:
+        operator = f"{actor['display_name']} ({actor['username']})"
     with db() as connection:
         connection.execute(
             "INSERT INTO actions(job_id, operator, action, details, created_at) VALUES(?,?,?,?,?)",
@@ -336,7 +341,7 @@ def sha256_file(path: Path) -> str:
 
 class CreateJob(BaseModel):
     pipeline: str
-    operator: str
+    operator: str = ""  # Compatibility only: HTTP handlers overwrite this from the session.
     input_path: str
     submission_path: str = ""
     submission_revision: str = ""
@@ -420,6 +425,28 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
         "created_at": now(),
     }
     return job, env
+
+
+def own_submission(view):
+    user = auth.require_user()
+    with db() as connection:
+        connection.execute('INSERT INTO submission_owners VALUES(?,?)', (view['revision'], user['id']))
+    return view
+
+
+def check_submission_owner(revision):
+    if not revision:
+        return
+    user = auth.require_user()
+    if user['role'] == 'admin':
+        return
+    with db() as connection:
+        allowed = connection.execute('SELECT 1 FROM submission_owners WHERE revision=? AND user_id=?', (revision, user['id'])).fetchone()
+        if not allowed:
+            # An administrator may attach an edited copy to this user's task.
+            allowed = connection.execute("SELECT 1 FROM jobs WHERE owner_id=? AND json_extract(options_json,'$.submission_revision')=?", (user['id'], revision)).fetchone()
+    if not allowed:
+        raise HTTPException(404, 'Submission 不存在或无权访问')
 
 
 def insert_job(job: dict[str, Any]) -> None:
@@ -753,6 +780,48 @@ def read_table(path: Path, offset=0, limit=50, query="", errors_only=False):
 
 
 app = FastAPI(title="SCigblast Pipeline Runner", version="0.1.0")
+app.include_router(auth.router(db))
+
+
+@app.middleware('http')
+async def authenticate(request: Request, call_next):
+    path = request.url.path
+    public = path in {'/health', '/login', '/api/auth/login', '/api/auth/register'} or path.startswith('/static/')
+    if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+        origin = request.headers.get('origin')
+        expected_origin = str(request.base_url).rstrip('/')
+        if request.headers.get('X-SCIGBLAST-Request') != '1' or (origin and origin != expected_origin):
+            return JSONResponse({'detail': '请求来源无效，请刷新页面后重试'}, status_code=403)
+        if path in {'/api/auth/login', '/api/auth/register'}:
+            payload = bytearray()
+            async for chunk in request.stream():
+                payload.extend(chunk)
+                if len(payload) > 4096:
+                    return JSONResponse({'detail': '请求过大'}, status_code=413)
+            request._body = bytes(payload)
+    user = auth.resolve_session(db, request.cookies.get(auth.COOKIE))
+    if not public and not user:
+        return JSONResponse({'detail': '请先登录'}, status_code=401) if path.startswith('/api/') else RedirectResponse('/login', status_code=303)
+    if path == '/admin' or path.startswith('/api/admin/'):
+        if not user or user['role'] != 'admin':
+            return JSONResponse({'detail': '仅管理员可访问'}, status_code=403)
+    job_match = re.match(r'^/(?:api/)?jobs/([^/]+)(?:/|$)', path)
+    if job_match and user and user['role'] != 'admin':
+        with db() as connection:
+            allowed = connection.execute('SELECT 1 FROM jobs WHERE id=? AND owner_id=?', (job_match[1], user['id'])).fetchone()
+        if not allowed:
+            return JSONResponse({'detail': '任务不存在或无权访问'}, status_code=404)
+    request.state.user = user
+    context = auth.CURRENT_USER.set(user)
+    try:
+        response = await call_next(request)
+        if not path.startswith('/static/'):
+            response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        return response
+    finally:
+        auth.CURRENT_USER.reset(context)
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 templates.env.globals['asset_version'] = hashlib.sha256(b''.join(
     p.read_bytes() for p in sorted((APP_DIR / 'static').glob('*')) if p.is_file()
@@ -770,6 +839,19 @@ def startup() -> None:
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get('/login', response_class=HTMLResponse)
+def login_page(request: Request):
+    if request.state.user:
+        return RedirectResponse('/', status_code=303)
+    return templates.TemplateResponse('login.html', {'request': request})
+
+
+@app.get('/account', response_class=HTMLResponse)
+@app.get('/admin', response_class=HTMLResponse)
+def account_page(request: Request):
+    return templates.TemplateResponse('account.html', {'request': request})
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -859,7 +941,7 @@ def import_submission(request: dict):
     if len(files) > 50:
         raise HTTPException(400, "Select at most 50 workbooks")
     try:
-        return submission.create(STATE_ROOT, files, str(path))
+        return own_submission(submission.create(STATE_ROOT, files, str(path)))
     except Exception as exc:
         raise HTTPException(400, f"Cannot read workbook: {exc}") from exc
 
@@ -878,13 +960,14 @@ async def upload_submission(request: Request, filename: str = "submission.xlsx")
                     raise HTTPException(413, "XLSX exceeds 20 MB")
                 handle.write(chunk)
         try:
-            return submission.create(STATE_ROOT, [path], filename)
+            return own_submission(submission.create(STATE_ROOT, [path], filename))
         except Exception as exc:
             raise HTTPException(400, f"Invalid XLSX: {exc}") from exc
 
 
 @app.get("/api/submissions")
 def get_submission(revision: str):
+    check_submission_owner(revision)
     try:
         return submission.inspect(STATE_ROOT, revision)
     except (ValueError, OSError) as exc:
@@ -893,6 +976,7 @@ def get_submission(revision: str):
 
 @app.post("/api/submissions/revise")
 def revise_submission(request: dict):
+    check_submission_owner(request.get('revision', ''))
     try:
         changes = request.get("changes", [])
         old = submission.inspect(STATE_ROOT, request["revision"])
@@ -903,13 +987,14 @@ def revise_submission(request: dict):
                 for value in re.split(r"[\r\n;,]+", change["value"]):
                     if value.strip():
                         validate_input_path(value.strip(), "Note")
-        return submission.revise(STATE_ROOT, request["revision"], changes)
+        return own_submission(submission.revise(STATE_ROOT, request["revision"], changes))
     except (KeyError, ValueError, OSError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/submissions/download")
 def download_submission(revision: str, filename: str, original: bool = False):
+    check_submission_owner(revision)
     try:
         folder = submission.resolve(STATE_ROOT, revision)
         if original:
@@ -931,6 +1016,7 @@ def rematch(job_id: str, request: dict):
         if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING"}:
             raise HTTPException(409, "Wait for this attempt to finish")
         token = request.get("revision", "")
+        check_submission_owner(token)
         try:
             folder = submission.resolve(STATE_ROOT, token)
         except ValueError as exc:
@@ -1000,14 +1086,18 @@ def download_result(job_id: str, kind: str = "results"):
 
 @app.post("/api/jobs")
 def create_job(request: CreateJob) -> dict[str, Any]:
+    user = auth.require_user()
+    request.operator = user['display_name']
+    check_submission_owner(request.submission_revision)
     if not request.submission_revision:
         source = validate_submission(request.submission_path)
         files = sorted(source.glob("*.xlsx")) if source.is_dir() else [source]
         try:
-            request.submission_revision = submission.create(STATE_ROOT, files, str(source))["revision"]
+            request.submission_revision = own_submission(submission.create(STATE_ROOT, files, str(source)))["revision"]
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
     job, _ = build_job(request)
+    job['owner_id'] = user['id']
     with PROCESS_LOCK:
         if not request.output_root:
             base = Path(job['output_root'])
@@ -1021,6 +1111,10 @@ def create_job(request: CreateJob) -> dict[str, Any]:
             env.update(SCIGBLAST_OUTPUT_ROOT=str(candidate), SCIGBLAST_RUN_OUTPUT_ROOT=str(candidate))
             job['env_json'] = json.dumps(env)
         with db() as connection:
+            other_outputs = connection.execute('SELECT output_root,owner_id FROM jobs').fetchall()
+            for other in other_outputs:
+                if other['owner_id'] != user['id'] and (is_under(Path(job['output_root']), [Path(other['output_root'])]) or is_under(Path(other['output_root']), [Path(job['output_root'])])):
+                    raise HTTPException(409, '输出目录与其他用户或历史任务重叠，请选择独立目录')
             collision = connection.execute("SELECT id FROM jobs WHERE output_root=? AND dataset=?", (job["output_root"], job["dataset"])).fetchone()
         if collision:
             raise HTTPException(409, f"Output/dataset already belongs to job {collision['id']}; use its rematch/resume or choose another output")
@@ -1096,6 +1190,8 @@ def delete_job(job_id: str, request: dict):
 @app.post("/api/validate")
 def validate_job(request: CreateJob) -> dict[str, Any]:
     """Validate form paths without creating a job or starting a runner."""
+    request.operator = auth.require_user()['display_name']
+    check_submission_owner(request.submission_revision)
     job, _ = build_job(request)
     return {
         "valid": True,
@@ -1122,6 +1218,12 @@ def list_jobs(
     offset = max(0, offset)
     clauses: list[str] = []
     params: list[Any] = []
+    user = auth.require_user()
+    owner_where, owner_params = '', ()
+    if user['role'] != 'admin':
+        clauses.append('owner_id = ?')
+        params.append(user['id'])
+        owner_where, owner_params = ' WHERE owner_id=?', (user['id'],)
     if status:
         values = [item.strip().upper() for item in status.split(",") if item.strip()]
         if values:
@@ -1148,7 +1250,7 @@ def list_jobs(
             "SUM(CASE WHEN status IN ('QUEUED','RUNNING','MATCHING','STOPPING') THEN 1 ELSE 0 END) AS active, "
             "SUM(CASE WHEN status = 'WAITING_REVIEW' THEN 1 ELSE 0 END) AS review, "
             "SUM(CASE WHEN status IN ('SUCCEEDED','FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER') THEN 1 ELSE 0 END) AS done "
-            "FROM jobs"
+            "FROM jobs" + owner_where, owner_params
         ).fetchone()
     counts = {key: int(stats[key] or 0) for key in ("total", "active", "review", "done")}
     return {"jobs": [snapshot(row) for row in rows], "total": total, "limit": limit, "offset": offset, "counts": counts, "active_jobs": active_count(), "max_active_jobs": MAX_ACTIVE_JOBS}

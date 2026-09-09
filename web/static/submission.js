@@ -1,7 +1,7 @@
 /* Immutable workbook editor, shared by job creation and rematching. */
 window.Submission = (() => {
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  async function api(url, body) { const r = await fetch(url, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); const data = await r.json(); if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)); return data; }
+  async function api(url, body) { const r = await fetch(url, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-SCIGBLAST-Request':'1'}, body:JSON.stringify(body)}); const data = await r.json(); if (r.status===401) location.href='/login'; if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)); return data; }
   function open(initial, accept) {
     let data = initial, sheetIndex = 0, page = 0; const edits = new Map();
     const modal = document.createElement('dialog'); modal.className = 'submission-dialog';
@@ -15,7 +15,7 @@ window.Submission = (() => {
     modal.querySelector('[data-browse]').onclick=()=>browse();
     const replacement=document.createElement('label');replacement.textContent='用补齐后的 XLSX 替换工作副本：';
     const upload=document.createElement('input');upload.type='file';upload.accept='.xlsx';replacement.append(upload);modal.querySelector('[data-sheet]').parentElement.append(replacement);
-    upload.onchange=async()=>{const file=upload.files[0];if(!file)return;try{const response=await fetch(`/api/submissions/upload?filename=${encodeURIComponent(file.name)}`,{method:'POST',body:file});const result=await response.json();if(!response.ok)throw new Error(result.detail);data=result;sheetIndex=0;page=0;edits.clear();render();}catch(error){modal.querySelector('[data-message]').textContent=error.message;}};
+    upload.onchange=async()=>{const file=upload.files[0];if(!file)return;try{const response=await fetch(`/api/submissions/upload?filename=${encodeURIComponent(file.name)}`,{method:'POST',headers:{'X-SCIGBLAST-Request':'1'},body:file});const result=await response.json();if(response.status===401)location.href='/login';if(!response.ok)throw new Error(result.detail);data=result;sheetIndex=0;page=0;edits.clear();render();}catch(error){modal.querySelector('[data-message]').textContent=error.message;}};
     const $ = q => modal.querySelector(q);
     const close = () => {modal.close(); modal.remove();}; $('[data-close]').onclick = close;
     modal.addEventListener('cancel', event => {event.preventDefault(); close();});

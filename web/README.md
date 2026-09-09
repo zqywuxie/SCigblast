@@ -9,6 +9,13 @@
 
 ## Linux Docker 部署
 
+本版启用登录与管理员注册码注册。首次部署后需通过服务器命令行创建管理员；没有默认密码。
+完整设置与升级说明见 [ACCOUNTS.md](ACCOUNTS.md)。
+
+```bash
+docker exec -it scigblast-web python /app/manage_users.py create-admin zqy --name 郑钦云
+```
+
 默认目录布局：`web/`、`reference/`、`IR_split/`、`10X_split/`、`Igblast_base/`、`PigIgblast/` 位于同一个项目根目录。
 Docker 构建上下文是项目根目录，使用 `web/Dockerfile`。四条 pipeline（包括 tools/models）复制到镜像 `/opt/scigblast`，默认 Barcode CSV 复制到 `/opt/scigblast/reference/8bp_barcodes.csv`；运行时不再挂载宿主机源码。非 Docker 启动仍默认使用 `web` 的上一级。
 
@@ -67,14 +74,14 @@ docker compose exec scigblast-web python /app/check_runtime.py
 
 ## 使用流程
 
-1. 选择 Pipeline，页面展示对应流程图；填写操作者、输入/输出和需要的 Barcode CSV。点击“验证路径”检查入口工具与 Python 库缺项。
+1. 登录后选择 Pipeline，页面展示对应流程图；填写输入/输出和需要的 Barcode CSV。操作者由后端绑定登录用户，无需填写。点击“验证路径”检查入口工具与 Python 库缺项。
 2. 统一在“Submission 文件或目录”中选择路径，再点击同一处“查看 / 编辑”。按工作表分页查看；支持修改样本、Dual Index、Chain、Barcode、Species 和 Note。Note 合并/继承区域一起修改；前缀替换先显示影响行数，目标目录可浏览选择。编辑器仍支持用补齐后的 XLSX 替换工作副本。
 3. 保存工作副本，原始 XLSX 不变。每次编辑生成新版本，当前版本和原始副本均可下载；副本与任务记录保存在 `web/runtime`。
 4. 创建任务首次只做 Match，进入 `WAITING_REVIEW`。按样本/原因搜索、只看 ERROR、分页查看全部记录。支持逐行勾选、全选当前页、跨页保留选择，再批量“已核对 / 待补资料 / 清除标注”；更改筛选或清单版本会清空选择。标注不改变系统 OK/ERROR 状态。
 5. 在 Match 页检查后“审核并继续”。确认绑定当前清单版本，至少一条 OK 才能继续；ERROR 保留，不进入下游。
 6. 补齐资料时点击“编辑资料 / 重新 Match”，再次确认后复用既有样本级断点。若先前确认的样本归属/Barcode/Chain 被改变，禁止复用旧输出，需建立新任务和新输出目录。
 7. 中途失败或停止后点击“断点续跑”。未完成审核的任务不能通过该按钮跳过审核。
-8. “IgBLAST 统计”分页展示原始 chain_summary 列，可搜索样本/链并下载；不跨链相加、不重算分析指标。input=0 但 mapped>0 的行标红。
+8. “输出文件”中的 IgBLAST 报告展示原始 chain_summary 列，可搜索样本/链并下载；不跨链相加、不重算分析指标。IR 还可预览 preprocessing 的 Datapoint。
 9. “输出文件”优先提供 IR 拆分、10X 预筛选/拆分、PANDAseq、fastp 等阶段统计卡片，可分页、搜索及下载原始 CSV/TSV。默认折叠路径字段，不修改计数定义。参数与记录展示中文操作名和第几次 Match，不显示内部哈希；后台仍保留版本校验。
 10. 非运行任务可在列表或详情点击“删除”，输入 `DELETE` 确认。删除任务记录及其独占的服务器结果目录，不删除原始数据、Submission 或共享工作副本。公共根目录、与其他任务共享/嵌套的输出、符号链接或无法验证归属的目录会被拒绝；不会自动删除任何历史任务。删除不可恢复，需保留的结果请事先备份。
 
@@ -99,7 +106,8 @@ python -m unittest discover -s web/tests -v
 - 输入、submission、barcode 和输出必须位于 `SCIGBLAST_ALLOWED_*_ROOTS`。
 - 输入和数据库只读挂载，结果目录可写。
 - Web 停止任务时按该任务自己的进程组发送 TERM，不扫描或终止其他用户任务。
-- 当前版本面向受信任的 Linux 内网；如果需要公网或跨网段访问，应在前面增加 Nginx/Basic Auth，不要直接暴露 8000 端口。
+- 普通用户只能查看和操作自己创建的任务，管理员可管理全部；旧任务仅管理员可见。
+- 当前版本面向受信任的 Linux 工作区。正式使用应在前面配置 HTTPS，并启用 `SCIGBLAST_COOKIE_SECURE=1`；不要明文公网传输登录密码。
 
 ## 更新 pipeline
 

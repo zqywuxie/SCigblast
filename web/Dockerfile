@@ -26,7 +26,7 @@ RUN apt-get update \
 COPY web/check_runtime.py /app/check_runtime.py
 RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
 
-COPY web/app.py web/submission.py web/pipeline_registry.json /app/
+COPY web/app.py web/submission.py web/auth.py web/manage_users.py web/pipeline_registry.json /app/
 COPY web/templates /app/templates
 COPY web/static /app/static
 

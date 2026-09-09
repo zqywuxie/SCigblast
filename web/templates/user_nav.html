@@ -1,0 +1,6 @@
+<nav class="user-nav" aria-label="用户菜单">
+  <a href="/account">{{ request.state.user.display_name }} <small>@{{ request.state.user.username }}</small></a>
+  {% if request.state.user.role == 'admin' %}<a href="/admin">用户管理</a>{% endif %}
+  <button type="button" class="button button-ghost button-small" data-logout>退出</button>
+</nav>
+<script src="/static/auth.js?v={{ asset_version }}" defer></script>
