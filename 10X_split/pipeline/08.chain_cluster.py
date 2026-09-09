@@ -729,7 +729,7 @@ def main() -> int:
         total_output += output_rows
         summary_paths.append(summary_path)
         print(
-            f"[stage8] file={source.name} input_rows={input_rows:,} "
+            f"[stage8] file={output_path.name} input_rows={input_rows:,} "
             f"airr_filtered_rows={filtered_rows:,} output_rows={output_rows:,} "
             f"output={output_path} summary={summary_path}"
         )
