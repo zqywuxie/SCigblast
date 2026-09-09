@@ -958,6 +958,16 @@ else
     else echo "[IR] reusing completed representative stage"; fi
 
     echo "[IR 7/8] IgBLAST"
+    if [[ -f "${REPRESENTATIVE_DIR}/.layout_migrated" ]]; then
+        # Flat results must not coexist with the new source-scoped sample paths.
+        for old_output in "$IGBLAST_OUTPUT_DIR" "$PREPROCESSING_DIR"; do
+            if [[ -d "$old_output" ]]; then
+                mv -- "$old_output" "${old_output}.legacy_flat.$(date +%Y%m%d%H%M%S).${BASHPID:-$$}"
+            fi
+        done
+        rm -f "${STATE_DIR}/.pipeline_stage_07.igblast.DONE" "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
+        rm -f "${REPRESENTATIVE_DIR}/.layout_migrated"
+    fi
     if (( REPRESENTATIVE_RERAN )); then
         rm -f "${STATE_DIR}/.pipeline_stage_07.igblast.DONE"
         rm -f "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"

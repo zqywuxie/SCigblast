@@ -20,6 +20,9 @@ for stage, filename, content in (
     report = fixture.out / stage / 'ir_test' / filename
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(content, encoding='utf-8')
+datapoint = fixture.out / '08.preprocessing' / 'ir_test' / 'Datapoint.csv'
+datapoint.parent.mkdir(parents=True, exist_ok=True)
+datapoint.write_text('sample,batch,TRA_umi_counts\nA,ir_test/pair_A,30\nA,ir_test/pair_B,40\n', encoding='utf-8')
 web.add_action(ir_id, '测试人员', 'confirm-match', '1:' + 'a'*64)
 
 @web.app.get('/fixture')

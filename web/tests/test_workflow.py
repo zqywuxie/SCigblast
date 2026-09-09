@@ -264,6 +264,12 @@ class WorkflowTests(unittest.TestCase):
         representative.write_text('sample,umi_count\nA,30\n')
         rep=self.client.get(f'/api/jobs/{jid}/stage-summary?kind=representative').json()
         self.assertEqual(rep['rows'][0]['umi_count'],'30')
+        datapoint=self.out/'08.preprocessing'/'batch'/'Datapoint.csv'
+        datapoint.parent.mkdir(parents=True)
+        datapoint.write_text('sample,batch,TRA_umi_counts\nA,batch/pair,30\n')
+        preview=self.client.get(f'/api/jobs/{jid}/stage-summary?kind=datapoint').json()
+        self.assertEqual(preview['rows'][0]['batch'],'batch/pair')
+        self.assertEqual(self.client.get(f'/api/jobs/{jid}/download?kind=datapoint').status_code,200)
         html=self.client.get(f'/jobs/{jid}').text
         self.assertIn('/static/job.js?v='+web.templates.env.globals['asset_version'],html)
         reports=self.client.get(f'/api/jobs/{jid}/artifacts').json()['reports']

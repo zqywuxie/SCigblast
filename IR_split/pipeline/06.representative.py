@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -51,7 +52,7 @@ PROGRESS_EVERY = max(1, int(os.environ.get("SCIGBLAST_IR_REP_PROGRESS_EVERY", "1
 # Version 2 changes the biological identity from sample+barcode+UMI to
 # sample+UMI.  A schema marker prevents an old barcode-keyed checkpoint from
 # being reported as complete after its source FASTA has been cleaned up.
-REPRESENTATIVE_SCHEMA_VERSION = "3"
+REPRESENTATIVE_SCHEMA_VERSION = "4"
 SCHEMA_MARKER_NAME = ".representative_schema"
 
 
@@ -199,7 +200,7 @@ def atomic_text(path: Path, mode: str = "w"):
 
 
 STATE_FIELDS = [
-    "representative_id", "sample_id", "barcode", "umi", "total_reads",
+    "representative_id", "sample_id", "sample_key", "barcode", "umi", "total_reads",
     "representative_reads", "representative_percent", "unique_sequence_count",
     "top_candidate_count", "ambiguity_status", "alternative_top_sequences", "source_barcodes",
     "sequence", "header", "mean_quality", "expected_errors", "selection_method",
@@ -208,7 +209,7 @@ STATE_FIELDS = [
 
 def _state_key(row: dict[str, str]) -> tuple[str, str]:
     """Bulk molecule identity: an UMI is scoped to the biological sample."""
-    return (str(row.get("sample_id", "")), str(row.get("umi", "")))
+    return (str(row.get("sample_key") or row.get("sample_id", "")), str(row.get("umi", "")))
 
 
 def _int_or_zero(value: object) -> int:
@@ -493,6 +494,7 @@ def main() -> int:
     # with the number of samples.  Here only one sample's aggregate is live at
     # a time; completed sample counters are released before the next sample.
     sample_files: dict[str, list[Path]] = defaultdict(list)
+    sample_ids: dict[str, str] = {}
     sample_barcodes: dict[str, set[str]] = defaultdict(set)
     source_meta: dict[Path, tuple[Path, str]] = {}
     for fasta in sequence_files:
@@ -501,21 +503,37 @@ def main() -> int:
         sample_id, source_barcode = sources.get(
             str(split_sample_dir.resolve()), (rel_sample.name, "")
         )
-        sample_files[sample_id].append(fasta)
+        namespace = rel_sample.as_posix()
+        sample_files[namespace].append(fasta)
+        sample_ids[namespace] = sample_id
         source_meta[fasta] = (rel_sample, source_barcode)
         if source_barcode:
-            sample_barcodes[sample_id].update(
+            sample_barcodes[namespace].update(
                 value for value in source_barcode.split(";") if value
             )
+
+    if any(not row.get("sample_key") for row in previous_rows):
+        missing = {row['sample_id'] for row in previous_rows} - set(sample_ids.values())
+        if missing:
+            raise ValueError(f"Cannot migrate flat representative state: missing PANDAseq sources for {sorted(missing)}")
+        if FASTA_OUTPUT_DIR != OUTPUT_DIR / "representative_fasta":
+            raise ValueError("Legacy layout migration requires the default representative_fasta directory")
+        backup = OUTPUT_DIR.with_name(OUTPUT_DIR.name + f".legacy_flat.{time.time_ns()}")
+        OUTPUT_DIR.rename(backup)
+        OUTPUT_DIR.mkdir(parents=True)
+        (OUTPUT_DIR / '.layout_migrated').write_text(str(backup), encoding='utf-8')
+        print(f"[IR representative] archived legacy flat outputs: {backup}", flush=True)
+        previous_rows = []
 
     print(f"[IR representative] workers={WORKERS} samples={len(sample_files)} "
           f"sequence_files={len(sequence_files)}", flush=True)
     processed_sources = 0
-    for sample_id in sorted(sample_files):
+    for namespace in sorted(sample_files):
+        sample_id = sample_ids[namespace]
         sample_groups: dict[str, Counter[str]] = defaultdict(Counter)
         sample_headers: dict[tuple[str, str], str] = {}
         sample_quality: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
-        files = sorted(sample_files[sample_id])
+        files = sorted(sample_files[namespace])
 
         # Build one sidecar index per split sample directory.  The index is
         # read-only and safely shared by file workers for this sample.
@@ -555,12 +573,14 @@ def main() -> int:
 
         rows = representative_rows(
             sample_id, sample_groups, sample_headers, sample_quality,
-            sample_barcodes[sample_id]
+            sample_barcodes[namespace]
         )
+        for row in rows:
+            row['sample_key'] = namespace
         current_rows.extend(rows)
         # A single sample-local FASTA prevents a second barcode-level
         # partition from reaching IgBLAST.
-        out_fasta = FASTA_OUTPUT_DIR / sample_id / "representative.fasta"
+        out_fasta = FASTA_OUTPUT_DIR / namespace / "representative.fasta"
         handle, temp = atomic_text(out_fasta)
         try:
             seen_headers: set[str] = set()
@@ -576,7 +596,7 @@ def main() -> int:
         finally:
             temp.unlink(missing_ok=True)
         print(f"[IR representative sample] sample_id={sample_id} UMI={len(rows)} "
-              f"source_barcodes={len(sample_barcodes[sample_id])} "
+              f"source_barcodes={len(sample_barcodes[namespace])} "
               f"sources={len(files)}", flush=True)
 
         # Make the release point explicit.  This matters for large samples
@@ -587,7 +607,7 @@ def main() -> int:
     # Replace only samples observed in this run; completed samples retained in
     # the hidden state remain part of the next global snapshot.
     refreshed_samples = set(sample_files)
-    all_rows = [row for row in previous_rows if row.get("sample_id", "") not in refreshed_samples]
+    all_rows = [row for row in previous_rows if row.get("sample_key", "") not in refreshed_samples]
     all_rows.extend(current_rows)
 
     # An empty representative set is not a successful stage: it usually
@@ -610,7 +630,7 @@ def main() -> int:
 
     map_path = OUTPUT_DIR / "representative_map.tsv.gz"
     print(f"[IR representative map] writing rows={len(all_rows):,}", flush=True)
-    map_fields = ["representative_id", "sample_id", "barcode", "source_barcodes", "umi", "total_reads",
+    map_fields = ["representative_id", "sample_id", "sample_key", "barcode", "source_barcodes", "umi", "total_reads",
                   "representative_reads", "representative_percent", "unique_sequence_count",
                   "top_candidate_count", "ambiguity_status", "alternative_top_sequences",
                   "mean_quality", "expected_errors", "selection_method"]
@@ -627,11 +647,11 @@ def main() -> int:
     summary_path = OUTPUT_DIR / "representative_summary.csv"
     by_sample = defaultdict(list)
     for row in all_rows:
-        by_sample[row["sample_id"]].append(row)
+        by_sample[row["sample_key"]].append(row)
     print(f"[IR representative summary] writing samples={len(by_sample):,} rows={len(all_rows):,}", flush=True)
     handle, temp = atomic_text(summary_path)
     try:
-        fields = ["sample_id", "barcode", "input_reads", "matched_reads", "umi_count",
+        fields = ["sample_id", "sample_key", "barcode", "input_reads", "matched_reads", "umi_count",
                   "representative_count", "ambiguous_umi_count", "ambiguous_umi_percent",
                   "status", "error"]
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader()
@@ -641,7 +661,7 @@ def main() -> int:
                 r.get("ambiguity_status") in {"TIED_TOP", "TIED_NO_QUALITY", "TIED_AFTER_QUALITY"}
                 for r in rows
             )
-            writer.writerow({"sample_id": sample, "barcode": barcode,
+            writer.writerow({"sample_id": rows[0]['sample_id'], "sample_key": sample, "barcode": barcode,
                 "input_reads": sum(int(r["total_reads"]) for r in rows),
                 "matched_reads": sum(int(r["total_reads"]) for r in rows),
                 "umi_count": n, "representative_count": n,

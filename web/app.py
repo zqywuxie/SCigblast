@@ -701,6 +701,9 @@ def stage_reports(row):
     entries.append(('pandaseq', 'PANDAseq 序列合并', '输入、合并成功数及合并比例',
                     [root / panda / dataset / 'pandaseq_summary.csv']))
     entries.append(('results', 'IgBLAST 比对与筛选', '匹配统计与 productive 筛选后统计', [result_file(row)]))
+    if row['pipeline'] == 'ir_split':
+        entries.append(('datapoint', 'IR Datapoint', 'Preprocessing 后的样本指标，支持按 sample / batch 检索',
+                        [root / '08.preprocessing' / dataset / 'Datapoint.csv']))
     reports = []
     for kind, label, description, candidates in entries:
         path = next((p for p in candidates if p and p.is_file() and is_under(p, [root])), None)

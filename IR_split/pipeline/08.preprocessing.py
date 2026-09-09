@@ -141,7 +141,7 @@ class RepresentativeIndex:
         pass
 
 
-def build_representative_index(state_paths: list[Path], database: str | Path) -> dict[str, int]:
+def build_representative_index(state_paths: list[Path], database: str | Path, prefixes: dict[str, str] | None = None) -> dict[str, int]:
     """Build an alias index atomically without retaining state rows in RAM."""
     database = Path(database)
     database.parent.mkdir(parents=True, exist_ok=True)
@@ -168,7 +168,10 @@ def build_representative_index(state_paths: list[Path], database: str | Path) ->
                 if not fields.intersection({"sample", "sample_id"}) or not fields.intersection(_READ_ID_COLUMNS):
                     raise ValueError(f"{state_path}: representative state missing sample/read ID columns")
                 for row in reader:
-                    sample = _text(row.get("sample_id") or row.get("sample"))
+                    sample = _text(row.get("sample_key") or row.get("sample_id") or row.get("sample"))
+                    prefix = (prefixes or {}).get(str(state_path), '')
+                    if prefix and sample:
+                        sample = prefix + '/' + sample
                     umi = _normalise_umi(row.get("umi"), row.get("header"))
                     if not sample or not umi or not re.fullmatch(r"[ACGTN]+", umi):
                         continue
@@ -352,7 +355,7 @@ def discover_inputs(roots: list[Path]) -> list[dict[str, str]]:
         if root == output:
             raise ValueError("preprocessing input and output directories must differ")
         for dirname, dirs, filenames in os.walk(root):
-            dirs[:] = sorted(directory for directory in dirs if directory not in IGNORED_DIRS and not canonical(Path(dirname) / directory).is_relative_to(output))
+            dirs[:] = sorted(directory for directory in dirs if directory not in IGNORED_DIRS and '.legacy_flat.' not in directory and not canonical(Path(dirname) / directory).is_relative_to(output))
             current = canonical(Path(dirname))
             for filename in sorted(filenames):
                 if filename not in FINAL_FILES:
@@ -396,7 +399,7 @@ def find_state_paths(root: Path) -> list[Path]:
     result: list[Path] = []
     for path in candidates:
         key = str(path)
-        if path.is_file() and key not in seen:
+        if path.is_file() and key not in seen and not any('.legacy_flat.' in part for part in path.parts):
             seen.add(key)
             result.append(path)
     return result
@@ -444,13 +447,22 @@ def build_index_for_inputs(roots: list[Path]) -> tuple[dict[str, RepresentativeI
             cached = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             cached = None
-        if index_path.is_file() and isinstance(cached, dict) and cached.get("signature") == signature:
+        if index_path.is_file() and isinstance(cached, dict) and cached.get('index_schema') == 2 and cached.get("signature") == signature:
             meta = {key: value for key, value in cached.items() if key != "signature"}
             print(f"[STATE] reusing representative SQLite index root={root.name} files={len(unique)}", flush=True)
         else:
             print(f"[STATE] indexing representative state root={root.name} files={len(unique)}", flush=True)
-            meta = build_representative_index(unique, index_path)
-            atomic_json({**meta, "state_paths": ";".join(str(path) for path in unique), "signature": signature}, meta_path)
+            prefixes = {}
+            if root.name == '07.igblastn_out':
+                for state in unique:
+                    try:
+                        relative = state.relative_to(root.parent / '06.representative')
+                        if len(relative.parts) > 1:
+                            prefixes[str(state)] = relative.parts[0]
+                    except ValueError:
+                        pass
+            meta = build_representative_index(unique, index_path, prefixes)
+            atomic_json({**meta, 'index_schema': 2, "state_paths": ";".join(str(path) for path in unique), "signature": signature}, meta_path)
         if int(meta.get("state_conflicts", 0)):
             # Conflicting aliases are isolated by lookup_many (marked as
             # __CONFLICT__) and excluded for the affected rows only.  Do not
@@ -480,13 +492,15 @@ def sample_key(task: dict[str, str]) -> tuple[str, str]:
 
 def sample_and_batch(key: tuple[str, str]) -> tuple[str, str]:
     relative = Path(key[1])
-    return relative.name or Path(key[0]).name, relative.parent.name
+    root = Path(key[0])
+    batch = relative.parent if root.name == '07.igblastn_out' else Path(root.name) / relative.parent
+    return relative.name or root.name, batch.as_posix() if batch != Path('.') else root.name
 
 
 def read_one(task: dict[str, str], umi_index: RepresentativeIndex | None, umi_mode: str) -> tuple[dict[str, str], pd.DataFrame | None, dict[str, int | str], str]:
     try:
         frame = pd.read_csv(task["source"], sep="\t", dtype=str, keep_default_na=False, comment="#")
-        filtered, stats = filter_and_count(frame, sample_id=task["sample"], representative_index=umi_index if umi_mode == "state" else None, allow_row_contract=ALLOW_ROW_CONTRACT)
+        filtered, stats = filter_and_count(frame, sample_id=task.get("relative_sample", task["sample"]), representative_index=umi_index if umi_mode == "state" else None, allow_row_contract=ALLOW_ROW_CONTRACT)
         return task, filtered, stats, ""
     except Exception as exc:
         return task, None, {}, f"{type(exc).__name__}: {exc}"

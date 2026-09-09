@@ -21,7 +21,7 @@ class Stage8Tests(unittest.TestCase):
             with self.subTest(workers=workers), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 source, output = root / '07.igblastn_out', root / '08.cluster'
-                for name in ('sample_a', 'sample_b'):
+                for name in ('batchA/pair/S', 'batchB/pair/S'):
                     folder = source / name
                     folder.mkdir(parents=True)
                     pd.DataFrame([dict(
@@ -39,7 +39,7 @@ class Stage8Tests(unittest.TestCase):
                             self.assertEqual(stage.main(), 0)
                         self.assertIn('completed files=2', log.getvalue())
                         self.assertEqual(len(pd.read_csv(output / 'stage8_summary.csv')), 2)
-                        for name in ('sample_a', 'sample_b'):
+                        for name in ('batchA/pair/S', 'batchB/pair/S'):
                             table = pd.read_csv(output / name / 'TCR.tsv', sep='\t')
                             self.assertEqual(table['umi_counts'].tolist(), [1])
                             self.assertTrue((output / name / 'TCR.stage8_summary.csv').is_file())

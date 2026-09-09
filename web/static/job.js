@@ -1,6 +1,6 @@
 (() => {
   const $=s=>document.querySelector(s),id=window.SCIGBLAST_JOB_ID,{api,esc}=Submission;
-  let job,tab='overview',revision='',attempt=-1,matchPage=0,resultPage=0,offset=0,source='',paused=false,busy=false,logBusy=false;
+  let job,tab='overview',revision='',attempt=-1,matchPage=0,offset=0,source='',paused=false,busy=false,logBusy=false;
   const fmt=v=>v?new Date(v).toLocaleString('zh-CN'):'—',fail=e=>alert(e.message||e);
   const actionLabels = {create:'创建任务', 'confirm-match':'确认 Match 并继续', review:'审核标注', rematch:'更新资料并重新匹配', resume:'断点续跑', stop:'停止任务'};
   function actionDetail(a) {
@@ -13,13 +13,11 @@
     if(job.pipeline==='ir_split') items.push(['输入模式',options.ir_input_mode==='presplit'?'已拆分（presplit）':'未拆分（raw）'],['代表序列',options.ir_variant==='merged'?'不提取，使用全部合并序列':'提取代表序列'],['结果整理',({'auto':'自动','1':'启用','0':'关闭'})[options.run_preprocessing]||'自动']);
     return items;
   }
-  document.querySelector('.detail-tabs').insertAdjacentHTML('beforeend','<button class="detail-tab" data-tab="results" role="tab">IgBLAST 统计</button>');
   $('#tab-match .match-filter').insertAdjacentHTML('beforeend',`<input id="match-search" placeholder="搜索样本 / 原因" aria-label="搜索 Match"><button id="match-refresh" class="button button-ghost">刷新</button><a href="/api/jobs/${id}/download?kind=match">下载清单</a>`);
   $('#tab-match').insertAdjacentHTML('beforeend','<div class="pagination"><button id="match-prev" class="button button-ghost">上一页</button><button id="match-next" class="button button-ghost">下一页</button></div><p>标注不改变匹配状态。补齐资料后请重新 Match。</p>');
   $('#tab-match').insertAdjacentHTML('beforeend','<button id="metadata-review" class="button button-ghost">检查登记样本 / 本次变化</button><div id="metadata-report" class="table-wrap"></div>');
   $('#metadata-review').onclick=async()=>{try{const [metadata,match]=await Promise.all([api(`/api/jobs/${id}/metadata-review`),api(`/api/jobs/${id}/match-preview`)]);$('#metadata-report').innerHTML=`<p>相比上次确认：新增 OK 记录 ${match.changes?.new_ok_records??0}；消失或改变的 OK 记录 ${match.changes?.removed_or_changed_ok_records??0}。以下 ${metadata.rows.length} 条登记未在清单识别（不等同于物理文件缺失）：</p><table><thead><tr><th>样本</th><th>Note</th><th>来源</th><th>说明</th></tr></thead><tbody>${metadata.rows.map(r=>`<tr><td>${esc(r.sample_id)}</td><td>${esc(r.note)}</td><td>${esc(r.file)} / ${esc(r.sheet)}:${r.row}</td><td>${esc(r.reason)}</td></tr>`).join('')}</tbody></table>`;}catch(e){fail(e);}};
-  document.querySelector('.tab-panel').insertAdjacentHTML('beforeend',`<div id="tab-results" class="tab-content"><div class="tab-toolbar"><h3>IgBLAST mapping / 筛选统计</h3><a href="/api/jobs/${id}/download?kind=results">下载 Summary</a></div><p>mapped / mapping_percent 为匹配统计；filtered / filtered_percent 为筛选后统计。按脚本原始列展示。</p><input id="result-search" placeholder="搜索样本或链" aria-label="搜索结果"><button id="result-refresh" class="button button-ghost">刷新</button><p id="result-info"></p><div class="table-wrap"><table><thead id="result-head"></thead><tbody id="result-body"></tbody></table></div><div class="pagination"><button id="result-prev" class="button button-ghost">上一页</button><button id="result-next" class="button button-ghost">下一页</button></div></div>`);
-  function setTab(name){tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));});document.querySelectorAll('.tab-content').forEach(p=>p.classList.toggle('active',p.id===`tab-${name}`));if(name==='match')loadMatch().catch(fail);if(name==='results')loadResults().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);}
+  function setTab(name){tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));});document.querySelectorAll('.tab-content').forEach(p=>p.classList.toggle('active',p.id===`tab-${name}`));if(name==='match')loadMatch().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);}
   async function refresh(){const data=await api(`/api/jobs/${id}`);job=data.job;if(attempt!==job.attempt_no){attempt=job.attempt_no;revision='';offset=0;source='';$('#log-view').textContent='';if(tab==='match')loadMatch().catch(fail);}
     $('#job-id').textContent=id;$('#dataset-title').textContent=job.dataset;$('#job-subtitle').textContent=`${job.pipeline_label} · ${job.input_path}`;
     $('#hero-status').innerHTML=`<span class="status-badge ${job.status.toLowerCase()}">${esc(job.status)}</span><strong>${job.progress}%</strong><small>阶段完成比例</small>`;
@@ -72,30 +70,7 @@
     }catch(e){$('#batch-message').textContent=e.message;await loadMatch().catch(console.error);}
     finally{batchBusy=false;syncSelection();}
   };
-  let resultRequest=0;
-  async function loadResults(){
-    const token=++resultRequest, page=resultPage;
-    const data=await api(`/api/jobs/${id}/results?${new URLSearchParams({offset:page*50,limit:50,query:$('#result-search').value})}`);
-    if(token!==resultRequest)return;
-    $('#result-info').textContent=data.path?`${data.total} 条记录 · 第 ${page+1} 页`:'尚未生成 Summary';
-    $('#result-prev').disabled=!page;$('#result-next').disabled=(page+1)*50>=data.total;
-    $('#result-head').innerHTML=`<tr>${data.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>`;
-    $('#result-body').innerHTML=data.rows.map(r=>`<tr class="${Number(r.input_sequences)===0&&Number(r.mapped_seqs)>0?'error-row':''}">${data.columns.map(c=>`<td>${esc(r[c])}</td>`).join('')}</tr>`).join('');
-  }
   async function loadLog(){if(paused||logBusy)return;logBusy=true;try{const data=await api(`/api/jobs/${id}/log?${new URLSearchParams({offset,source})}`);if(data.reset)$('#log-view').textContent='';source=data.source||'';offset=data.next_offset;$('#log-view').textContent=($('#log-view').textContent+data.content).slice(-500000);if($('#auto-scroll').checked)$('#log-view').scrollTop=$('#log-view').scrollHeight;}finally{logBusy=false;}}
-  // Reuse the existing results API and controls, but group them into a clear search bar.
-  const resultTools=document.createElement('div'); resultTools.className='result-search-toolbar';
-  $('#result-search').before(resultTools);
-  const resultLabel=document.createElement('label'); resultLabel.className='result-search-field';
-  resultLabel.innerHTML='<span>查找比对结果</span>';
-  resultLabel.append($('#result-search')); resultTools.append(resultLabel,$('#result-refresh'));
-  $('#result-search').placeholder='输入样本名、TRA / TRB / IGH 等关键词';
-  $('#result-refresh').className='button button-primary button-small';
-  $('#result-refresh').textContent='搜索 / 刷新';
-  const clearResults=document.createElement('button'); clearResults.className='button button-ghost button-small';
-  clearResults.textContent='清空'; clearResults.onclick=()=>{$('#result-search').value='';resultPage=0;loadResults().catch(fail);};
-  resultTools.append(clearResults);
-  $('#result-search').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();resultPage=0;loadResults().catch(fail);}};
   let summaryKind='', summaryPage=0, summaryRequest=0;
   $('#artifacts-refresh').onclick=()=>loadArtifacts().catch(fail);
   const columnLabels = {sample:'样本',sample_id:'样本',sample_key:'样本',total_reads:'输入 reads',matched_reads:'匹配 reads',matched_pct:'匹配比例 %',mismatch_reads:'未匹配 reads',mismatch_pct:'未匹配比例 %',discarded_pct:'丢弃比例 %',short_reads:'过短 reads',processed_reads:'处理 reads',Total_Reads:'输入 reads',OK_Reads:'合并成功',Merged_Percent:'合并比例 %',Merged_FASTA_Records:'合并序列数',Unaligned_FASTA_Records:'未合并序列数',before_reads:'过滤前 reads',after_reads:'过滤后 reads',reads_retained_pct:'保留比例 %',status:'状态',error:'原因'};
@@ -119,6 +94,8 @@
   }
   async function loadStageSummary(){
     const token=++summaryRequest;
+    $('#stage-summary-info').textContent='正在读取统计…';
+    $('#stage-summary-head').textContent='';$('#stage-summary-body').textContent='';
     const data=await api(`/api/jobs/${id}/stage-summary?${new URLSearchParams({kind:summaryKind,offset:summaryPage*50,limit:50,query:$('#summary-query').value})}`);
     if(token!==summaryRequest)return;
     const hidden=/^(r1|r2|output_r1|output_r2|umi_sidecar|json_path|note)$|_path$/;
@@ -132,6 +109,6 @@
   $('#head-actions').onclick=async e=>{const b=e.target.closest('[data-action]');if(!b)return;if(b.dataset.action==='delete'){if(busy)return;busy=true;try{if(await Submission.deleteJob(job))location.href='/';}catch(error){fail(error);}finally{busy=false;}}else action(b.dataset.action);};document.querySelectorAll('.detail-tab').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   $('#match-body').onchange=async e=>{if(e.target.dataset.selectRow!==undefined){e.target.checked?selected.add(e.target.dataset.selectRow):selected.delete(e.target.dataset.selectRow);syncSelection();return;}if(!e.target.dataset.review)return;e.target.disabled=true;try{await api(`/api/jobs/${id}/review`,{revision,row_key:e.target.dataset.review,label:e.target.value});}catch(error){fail(error);await loadMatch();}finally{syncSelection();}};
   $('#errors-only').onchange=$('#match-search').onchange=()=>{selected.clear();syncSelection();matchPage=0;loadMatch().catch(fail);};$('#match-refresh').onclick=()=>loadMatch().catch(fail);$('#match-prev').onclick=()=>{matchPage--;loadMatch().catch(fail);};$('#match-next').onclick=()=>{matchPage++;loadMatch().catch(fail);};
-  $('#result-search').onchange=()=>{resultPage=0;loadResults().catch(fail);};$('#result-refresh').onclick=()=>loadResults().catch(fail);$('#result-prev').onclick=()=>{resultPage--;loadResults().catch(fail);};$('#result-next').onclick=()=>{resultPage++;loadResults().catch(fail);};$('#pause-log').onclick=()=>{paused=!paused;$('#pause-log').textContent=paused?'继续刷新':'暂停刷新';};$('#copy-log').onclick=()=>navigator.clipboard.writeText($('#log-view').textContent).catch(fail);
+  $('#pause-log').onclick=()=>{paused=!paused;$('#pause-log').textContent=paused?'继续刷新':'暂停刷新';};$('#copy-log').onclick=()=>navigator.clipboard.writeText($('#log-view').textContent).catch(fail);
   refresh().then(()=>{if(location.hash==='#match')setTab('match');}).catch(fail);setInterval(()=>refresh().catch(console.error),5000);setInterval(()=>{if(tab==='log')loadLog().catch(console.error);},2000);
 })();

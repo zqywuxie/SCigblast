@@ -15,6 +15,17 @@ spec.loader.exec_module(stage)
 
 
 class RepresentativeStateTests(unittest.TestCase):
+    def test_source_namespaces_and_batch_labels(self):
+        self.assertEqual(stage.sample_and_batch(('/output/07.igblastn_out/dataset','batchA/pair/S')),('S','dataset/batchA/pair'))
+        self.assertEqual(stage.sample_and_batch(('/output/07.igblastn_out/dataset','S')),('S','dataset'))
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'state.csv'
+            source.write_text('sample_id,sample_key,umi,header\nS,batchA/pair/S,AAAA,read1\nS,batchB/pair/S,CCCC,read1\n')
+            database=Path(tmp)/'index.sqlite3'
+            stage.build_representative_index([source],database)
+            index=stage.RepresentativeIndex(database)
+            self.assertEqual(index.lookup_many('batchA/pair/S',['read1']),{'read1':'AAAA'})
+            self.assertEqual(index.lookup_many('batchB/pair/S',['read1']),{'read1':'CCCC'})
     def test_legacy_csv_and_real_tsv_with_empty_header(self):
         for delimiter in (',', '\t'):
             with self.subTest(delimiter=delimiter), tempfile.TemporaryDirectory() as tmp:
