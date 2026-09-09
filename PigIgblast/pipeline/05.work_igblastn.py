@@ -102,10 +102,11 @@ def task(job):
     # for immunoglobulin chains.
     seqtype = "Ig" if chain.upper().startswith("IG") else "TCR"
     args = [BIN, "-germline_db_V", str(v), "-germline_db_J", str(j)]
-    if chain.upper() == "TRB":
-        d = db(chain, "D")
-        if not db_ok(d): common["error"] = "missing TRB D database"; return common
-        args.extend(["-germline_db_D", str(d)])
+    # Omitting D makes IgBLAST load its default pig_gl_D, even for TRA.
+    # Use the configured chain-specific D prefix, including VJ placeholders.
+    d = db(chain, "D")
+    if not db_ok(d): common["error"] = f"missing {chain} D database"; return common
+    args.extend(["-germline_db_D", str(d)])
     args.extend(["-auxiliary_data", str(aux), "-organism", "pig", "-ig_seqtype", seqtype, "-query", str(fasta), "-outfmt", "19", "-num_threads", str(THREADS)])
     with Path(str(filtered) + ".log").open("w", encoding="utf-8") as log: rc = subprocess.run(args + ["-out", str(raw)], stdout=log, stderr=subprocess.STDOUT).returncode
     if rc or not raw.is_file(): common["error"] = "igblast_failed"; raw.unlink(missing_ok=True); return common

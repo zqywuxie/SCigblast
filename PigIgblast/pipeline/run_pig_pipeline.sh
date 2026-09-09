@@ -219,16 +219,11 @@ preflight_db(){
   aux="${root}/optional_file/pig.aux"
   [[ -s "$aux" ]] || { echo "[PIG] ERROR missing/empty pig auxiliary file: $aux" >&2; exit 2; }
   for chain in TRA TRB; do
-    for part in V J; do
+    for part in V D J; do
       [[ -e "${base}/${chain}/pig_gl_${chain}_${part}.nhr" || -e "${base}/${chain}/pig_gl_${chain}_${part}.nin" ]] || {
         echo "[PIG] ERROR missing pig ${chain} ${part} BLAST prefix under ${base}/${chain}" >&2; exit 2;
       }
     done
-    if [[ "$chain" == "TRB" ]]; then
-      [[ -e "${base}/${chain}/pig_gl_${chain}_D.nhr" || -e "${base}/${chain}/pig_gl_${chain}_D.nin" ]] || {
-        echo "[PIG] ERROR missing pig TRB D BLAST prefix under ${base}/${chain}" >&2; exit 2;
-      }
-    fi
   done
   echo "[PIG] database preflight OK: root=${root} version=${version}"
 }
