@@ -225,9 +225,10 @@ def validate_output(value: str | None) -> Path:
     return resolved
 
 
-def default_job_output(username: str, pipeline: str) -> Path:
-    # Use the account username, preserving valid dots, underscores and hyphens.
-    name = username.strip().lower()
+def default_job_output(user: dict, pipeline: str) -> Path:
+    name = re.sub(r'[^\w.-]+', '_', user['display_name'].strip(), flags=re.UNICODE).strip('._')[:60] or 'user'
+    suffix = re.sub(r'[^a-zA-Z0-9]', '', user['id'])[:8]
+    name = f'{name}_{suffix}'
     stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
     return DEFAULT_OUTPUT_ROOT / name / pipeline / stamp
 
@@ -363,7 +364,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     barcode = validate_barcode(request.barcode_csv, bool(config["requires_barcode"]))
-    output_root = validate_output(request.output_root or str(default_job_output(auth.require_user()['username'], request.pipeline)))
+    output_root = validate_output(request.output_root or str(default_job_output(auth.require_user(), request.pipeline)))
     dataset = safe_dataset(request.dataset_label, input_path)
     if request.operator.strip() == "":
         raise HTTPException(400, "operator is required")
@@ -746,7 +747,7 @@ def stage_summary_file(row, kind):
     return Path(report['path']) if report and report['path'] else None
 
 
-def read_table(path: Path, offset=0, limit=50, query="", errors_only=False):
+def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excluded_keys=None):
     rows, counts, matched = [], {"total": 0, "ok": 0, "error": 0}, 0
     pairs, samples = set(), set()
     note = ''
@@ -767,6 +768,8 @@ def read_table(path: Path, offset=0, limit=50, query="", errors_only=False):
                 pairs.add(pair)
                 if ok:
                     samples.add((pair, item.get("sample_id", "")))
+            if excluded_keys is not None and str(index) in excluded_keys:
+                continue
             if errors_only and ok:
                 continue
             if query and query.casefold() not in " ".join(str(v or "") for v in item.values()).casefold():
@@ -1294,7 +1297,7 @@ def job_log(job_id: str, offset: int = 0, max_bytes: int = 262144, source: str =
 
 
 @app.get("/api/jobs/{job_id}/match-preview")
-def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False) -> dict[str, Any]:
+def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False, unmarked_only: bool = False, after_key: int = -1) -> dict[str, Any]:
     row = get_job_row(job_id)
     files = summary_files(row)
     if not files:
@@ -1316,6 +1319,13 @@ def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = ""
         marked = {r['row_key'] for r in annotations if r['label'] in {'已核对', '待补资料'}}
         result['review_counts'] = {'total': len(keys), 'marked': len(keys & marked),
                                    'unmarked': len(keys - marked)}
+        if unmarked_only:
+            filtered = read_table(path, offset, limit, query, errors_only, excluded_keys=marked)
+            result.update({k: filtered[k] for k in ('rows', 'total', 'offset')})
+        ordered = sorted(keys, key=int)
+        missing = sorted(keys - marked, key=int)
+        target = next((key for key in missing if int(key) > after_key), missing[0] if missing else None)
+        result['next_unmarked'] = {'row_key': target, 'offset': ordered.index(target)} if target is not None else None
         return result
     except (OSError, csv.Error) as exc:
         raise HTTPException(500, f"cannot read match summary: {exc}") from exc

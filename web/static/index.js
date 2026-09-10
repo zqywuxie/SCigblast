@@ -14,7 +14,7 @@
     $('#new-job-form').reset();
     resetSubmission();
     $('[name="barcode_csv"]').value = formDefaults.barcode_csv || '';
-    $('#submission-status').textContent = '选择 .xlsx 文件或目录后，可检查和修改 Note；原文件不变。';
+    $('#submission-status').textContent = '可编辑 Note 路径，原文件不变。';
     $('#validation-summary').textContent = '填写路径后可验证任务配置';
     $('#form-message').textContent = '';
     clearTimeout(showMessage.timer);
@@ -24,7 +24,8 @@
   const browseLabels = { input: '原始数据目录', submission: 'Submission 文件或目录', barcode: 'Barcode CSV', output: '输出根目录' };
   let pickerKind = '', pickerTarget = '', pickerPath = '', pickerBusy = false;
 
-  function closePicker() { $('#file-picker-shell').classList.remove('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'true'); pickerKind = ''; pickerTarget = ''; pickerPath = ''; }
+  let pickerReturnFocus=null;
+  function closePicker() { pickerReturnFocus?.focus(); $('#file-picker-shell').classList.remove('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'true'); pickerKind = ''; pickerTarget = ''; pickerPath = ''; }
   function pickerEntry(entry) {
     const icon = entry.type === 'directory' ? '▱' : '▤';
     const size = entry.size == null ? '' : ` · ${(entry.size / 1024).toFixed(1)} KB`;
@@ -57,7 +58,7 @@
       $('#file-picker-select').disabled = true;
     } finally { pickerBusy = false; }
   }
-  function openPicker(kind, target) { pickerKind = kind; pickerTarget = target; $('#file-picker-title').textContent = `选择${browseLabels[kind] || '路径'}`; $('#file-picker-shell').classList.add('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'false'); loadPicker(); }
+  function openPicker(kind, target) { pickerKind = kind; pickerTarget = target; $('#file-picker-title').textContent = `选择${browseLabels[kind] || '路径'}`; pickerReturnFocus=document.activeElement;$('#file-picker-shell').classList.add('open');$('#close-file-picker').focus(); $('#file-picker-shell').setAttribute('aria-hidden', 'false'); loadPicker(); }
   function choosePickerPath(path) { const input = document.querySelector(`[name="${pickerTarget}"]`); if (input) { input.value = path; input.dispatchEvent(new Event('input', { bubbles: true })); } closePicker(); }
 
   function openDrawer() { resetForm(); document.body.classList.add('task-dialog-open'); $('#drawer-shell').classList.add('open'); $('#drawer-shell').setAttribute('aria-hidden', 'false'); setTimeout(() => { $('#pipeline-cards .selected')?.focus({preventScroll:true}); $('#drawer-shell .drawer-body').scrollTop=0; }, 120); }
@@ -68,9 +69,7 @@
     const defaults = await Submission.api('/api/defaults');
     formDefaults = defaults;
     $('[name="barcode_csv"]').value = defaults.barcode_csv;
-    $('#output-hint').textContent = `${defaults.output_base}/用户名/Pipeline类型/YYYYMMDD_HHMMSS/（北京时间）`;
-    $('#pipeline-cards').insertAdjacentHTML('beforebegin', '<p id="pipeline-root-hint" class="field-hint"></p>');
-    $('#pipeline-root-hint').textContent = `项目目录：${defaults.pipeline_root}`;
+    $('#output-hint').textContent = `${defaults.output_base}/姓名_短编号/Pipeline类型/YYYYMMDD_HHMMSS/（北京时间）`;
     $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
     $('#help-pipeline').innerHTML = $('#pipeline').innerHTML;
     $('#pipeline-help-open').disabled = false;
@@ -158,7 +157,7 @@
   async function refreshJobs() { if (busy) return; busy = true; const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (filter === 'active') params.set('status', 'QUEUED,RUNNING,MATCHING,STOPPING'); if (filter === 'review') params.set('status', 'WAITING_REVIEW'); if (filter === 'done') params.set('status', 'SUCCEEDED,FAILED,STOPPED,INTERRUPTED,COMPLETED_WITHOUT_MARKER'); if ($('#pipeline-filter').value) params.set('pipeline', $('#pipeline-filter').value); if ($('#job-search').value.trim()) params.set('query', $('#job-search').value.trim()); try { const data = await Submission.api(`/api/jobs?${params}`); allJobs = data.jobs || []; renderJobs(data); } catch(error) { showMessage(error.message,true); } finally { busy = false; } }
 
   async function runAction(id, action) { if (action === 'confirm') { location.href = `/jobs/${id}#match`; return; } if (action === 'stop' && !window.confirm('停止这个任务？中间产物会保留，可稍后续跑。')) return; try { if(action === 'delete') { const job = allJobs.find(j => j.id === id); if(!job || !await Submission.deleteJob(job)) return; } else await Submission.api(`/api/jobs/${id}/${action}`, {}); await refreshJobs(); } catch(error) { alert(error.message); } }
-  function showMessage(message, error = false) { const node = $('#form-message'); node.textContent = message; node.classList.toggle('error', error); clearTimeout(showMessage.timer); showMessage.timer = setTimeout(() => { node.textContent = ''; node.classList.remove('error'); }, 4500); }
+  function showMessage(message, error = false) { const node = $('#form-message'); node.textContent = message; node.classList.toggle('error', error); clearTimeout(showMessage.timer); if (!error) showMessage.timer = setTimeout(() => { node.textContent = ''; node.classList.remove('error'); }, 4500); }
 
   async function validatePaths() {
     const button=$('#validate-button'); button.disabled=true;
@@ -178,6 +177,14 @@
   $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });
   $('#file-picker-entries').addEventListener('click', (event) => { const entry = event.target.closest('.file-tree-entry'); if (!entry) return; const path = entry.dataset.path; if (entry.dataset.entryType === 'directory') { loadPicker(path); } else { choosePickerPath(path); } });
   document.querySelectorAll('.filter-tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.filter-tab').forEach((item) => { item.classList.remove('active'); item.setAttribute('aria-selected', 'false'); }); tab.classList.add('active'); tab.setAttribute('aria-selected', 'true'); filter = tab.dataset.filter; page = 0; refreshJobs(); }));
+  document.addEventListener('keydown', event => {
+    if(event.key!=='Tab'||document.querySelector('dialog[open]'))return;
+    const shell=$('#file-picker-shell.open')||$('#drawer-shell.open');if(!shell)return;
+    const nodes=[...shell.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),a[href],[tabindex="0"]')].filter(n=>n.getClientRects().length);
+    const first=nodes[0],last=nodes[nodes.length-1];if(!first)return;
+    if(event.shiftKey&&(document.activeElement===first||!shell.contains(document.activeElement))){event.preventDefault();last.focus();}
+    else if(!event.shiftKey&&(document.activeElement===last||!shell.contains(document.activeElement))){event.preventDefault();first.focus();}
+  });
   document.addEventListener('keydown', (event) => { if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return; if ($('#file-picker-shell').classList.contains('open')) closePicker(); else closeDrawer(); });
   let submissionDraft = null, submissionGeneration = 0;
   function acceptSubmission(data) { submissionDraft = data; $('[name="submission_revision"]').value = data.revision; $('[name="submission_path"]').required = false; $('#submission-status').textContent = `工作副本已就绪 · ${data.sheets.reduce((n, s) => n + s.rows.length, 0)} 行`; }

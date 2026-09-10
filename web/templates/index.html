@@ -14,7 +14,7 @@
     </header>
 
     <section class="page-head">
-      <div><p class="eyebrow">PIPELINE OPERATIONS / 01</p><h1>任务控制台</h1><p class="page-subtitle">在这里提交、审核和追踪所有分析任务。第一次运行只生成 Match 清单，确认后才进入重型阶段。</p></div>
+      <div><h1>任务控制台</h1></div>
       <div class="page-actions"><button id="open-drawer" class="button button-primary button-large"><span>＋</span> 新建任务</button><button id="pipeline-help-open" type="button" class="button button-ghost help-button" aria-label="查看 Pipeline 介绍" aria-haspopup="dialog" aria-controls="pipeline-help" title="Pipeline 介绍" disabled>?</button></div>
     </section>
 
@@ -22,38 +22,40 @@
       <div class="stat-card"><span class="stat-label">运行中</span><strong id="stat-active">—</strong><small id="stat-capacity">读取中</small><span class="stat-accent teal"></span></div>
       <div class="stat-card"><span class="stat-label">待审核</span><strong id="stat-review">—</strong><small>需要 Match 确认</small><span class="stat-accent amber"></span></div>
       <div class="stat-card"><span class="stat-label">已结束</span><strong id="stat-done">—</strong><small>成功、失败或已停止</small><span class="stat-accent indigo"></span></div>
-      <div class="stat-card"><span class="stat-label">任务总数</span><strong id="stat-total">—</strong><small>最多显示最近 200 条</small><span class="stat-accent coral"></span></div>
+      <div class="stat-card"><span class="stat-label">任务总数</span><strong id="stat-total">—</strong><span class="stat-accent coral"></span></div>
     </section>
 
     <section class="panel tasks-panel">
-      <div class="panel-heading tasks-heading"><div><p class="eyebrow">PIPELINE QUEUE / 02</p><h2>操作列表</h2></div><button id="refresh-jobs" class="button button-ghost">↻ 刷新</button></div>
+      <div class="panel-heading tasks-heading"><div><h2>任务列表</h2></div><button id="refresh-jobs" class="button button-ghost">↻ 刷新</button></div>
       <div class="list-toolbar">
         <div class="filter-tabs" role="tablist" aria-label="任务状态筛选"><button class="filter-tab active" role="tab" aria-selected="true" data-filter="all">全部 <span id="count-all">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="active">运行中 <span id="count-active">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="review">待审核 <span id="count-review">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="done">已结束 <span id="count-done">0</span></button></div>
-        <div class="toolbar-tools"><select id="pipeline-filter" aria-label="按 Pipeline 筛选"><option value="">全部 Pipeline</option></select><label class="search-box"><span>⌕</span><input id="job-search" placeholder="搜索 Job 或 Dataset" aria-label="搜索任务"></label></div>
+        <div class="toolbar-tools"><select id="pipeline-filter" aria-label="按 Pipeline 筛选"><option value="">全部流程</option></select><label class="search-box"><span>⌕</span><input id="job-search" placeholder="搜索 Job 或 Dataset" aria-label="搜索任务"></label></div>
       </div>
       <div class="table-wrap"><table><thead><tr><th>任务 / 数据集</th><th>Pipeline</th><th>当前阶段</th><th>进度</th><th>操作者</th><th>状态</th><th class="action-col">操作</th></tr></thead><tbody id="jobs"></tbody></table><div id="empty-state" class="empty-state hidden"><div class="empty-icon">＋</div><strong>没有符合条件的任务</strong><span>调整筛选条件，或创建一个新任务</span></div></div>
       <div class="pagination"><span id="page-summary">—</span><div><button id="page-prev" class="button button-ghost button-small" disabled>← 上一页</button><button id="page-next" class="button button-ghost button-small" disabled>下一页 →</button></div></div>
     </section>
-    <footer class="footer"><span>SCIGBLAST RUNNER · v0.1</span><span>页面只管理任务，不保存生物学数据</span></footer>
+    <footer class="footer"><span>SCIGBLAST</span></footer>
   </main>
 
   <div id="drawer-shell" class="drawer-shell" aria-hidden="true"><div id="drawer-backdrop" class="drawer-backdrop"></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
-    <div class="drawer-header"><div><p class="eyebrow">NEW RUN / 03</p><h2 id="drawer-title">新建任务</h2></div><button id="close-drawer" class="close-button" aria-label="关闭新建任务">×</button></div>
+    <div class="drawer-header"><div><h2 id="drawer-title">新建任务</h2></div><button id="close-drawer" class="close-button" aria-label="关闭新建任务">×</button></div>
     <div class="drawer-body">
-      <div class="drawer-step"><span class="step-number">1</span><div><strong>选择 Pipeline</strong><small>根据数据类型选择分析流程</small></div></div>
+      <div class="drawer-step"><span class="step-number">1</span><div><strong>选择 Pipeline</strong></div></div>
       <div id="pipeline-cards" class="pipeline-cards"></div>
       <select name="pipeline" id="pipeline" form="new-job-form" class="visually-hidden" required></select>
-      <div class="drawer-step"><span class="step-number">2</span><div><strong>设置路径</strong><small>只接受服务器上的绝对路径</small></div></div>
+
+      <div class="drawer-step"><span class="step-number">2</span><div><strong>设置路径</strong><small>服务器绝对路径</small></div></div>
       <form id="new-job-form">
         <input type="hidden" name="submission_revision">
         <div class="field-stack">
-          <p class="field-hint">以 {{ request.state.user.display_name }}的身份创建任务，操作记录自动关联当前账户。</p>
+
           <label class="field"><span class="field-label">原始数据目录</span><div class="path-input-row"><div class="input-with-state"><input name="input_path" required placeholder="/colddata/.../raw" spellcheck="false"><span class="path-state" data-for="input_path"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="input" data-browse-target="input_path">浏览</button></div><span class="field-hint">输入目录需位于服务器允许根目录</span></label>
-          <div class="field submission-field"><label class="field-label" for="submission-path">Submission 文件或目录</label><div class="path-input-row"><div class="input-with-state"><input id="submission-path" name="submission_path" required placeholder="/colddata/.../submission" spellcheck="false"><span class="path-state" data-for="submission_path"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="submission" data-browse-target="submission_path">浏览</button></div><div class="submission-inline-tools"><button id="submission-edit" type="button" class="button button-ghost button-small">查看 / 编辑</button><small id="submission-status" role="status">选择 .xlsx 文件或目录后，可检查和修改 Note；原文件不变。</small></div></div>
-          <label class="field" id="barcode-row"><span class="field-label">Barcode CSV</span><div class="path-input-row"><div class="input-with-state"><input name="barcode_csv" placeholder="/colddata/.../8bp_barcodes.csv" spellcheck="false"><span class="path-state" data-for="barcode_csv"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="barcode" data-browse-target="barcode_csv">选择 CSV</button></div><span class="field-hint">IR_split、10X_split 必填，可手动输入或从服务器文件树选择</span></label>
-          <label class="field"><span class="field-label">本次任务输出目录 <em>可选</em></span><div class="path-input-row"><div class="input-with-state"><input name="output_root" placeholder="留空自动生成：执行人_pipeline_日期时间" spellcheck="false"><span class="path-state" data-for="output_root"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="output" data-browse-target="output_root">浏览</button></div><span id="output-hint" class="field-hint">每个任务使用独立目录；时间为北京时间。填写路径时使用该路径本身。</span></label>
-          <label class="field"><span class="field-label">Dataset label <em>可选</em></span><input name="dataset_label" placeholder="默认使用输入目录名"><span class="field-hint">用于 output 和断点目录</span></label>
+          <div class="field submission-field"><label class="field-label" for="submission-path">Submission 文件或目录</label><div class="path-input-row"><div class="input-with-state"><input id="submission-path" name="submission_path" required placeholder="/colddata/.../submission" spellcheck="false"><span class="path-state" data-for="submission_path"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="submission" data-browse-target="submission_path">浏览</button></div><div class="submission-inline-tools"><button id="submission-edit" type="button" class="button button-ghost button-small">查看 / 编辑</button><small id="submission-status" role="status">可编辑 Note 路径，原文件不变。</small></div></div>
+          <label class="field" id="barcode-row"><span class="field-label">Barcode CSV</span><div class="path-input-row"><div class="input-with-state"><input name="barcode_csv" placeholder="/colddata/.../8bp_barcodes.csv" spellcheck="false"><span class="path-state" data-for="barcode_csv"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="barcode" data-browse-target="barcode_csv">选择 CSV</button></div><span class="field-hint">IR、10X 流程必填</span></label>
+          <label class="field"><span class="field-label">本次任务输出目录 <em>可选</em></span><div class="path-input-row"><div class="input-with-state"><input name="output_root" placeholder="留空自动生成：姓名_短编号/Pipeline/时间" spellcheck="false"><span class="path-state" data-for="output_root"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="output" data-browse-target="output_root">浏览</button></div><span id="output-hint" class="field-hint">每个任务使用独立目录；时间为北京时间。填写路径时使用该路径本身。</span></label>
+          <label class="field"><span class="field-label">数据集名称 <em>可选</em></span><input name="dataset_label" placeholder="默认使用输入目录名"></label>
         </div>
+
         <div class="review-box"><div class="review-box-icon">✓</div><div><strong>提交前检查</strong><p id="validation-summary">填写路径后可验证任务配置</p></div><button id="validate-button" type="button" class="button button-ghost button-small">验证路径</button></div>
         <div class="drawer-footer"><span id="form-message" class="form-message" role="status" aria-live="polite"></span><button class="button button-primary" type="submit"><span>创建任务并执行 Match</span><b>→</b></button></div>
       </form>
@@ -63,7 +65,7 @@
   <div id="file-picker-shell" class="file-picker-shell" aria-hidden="true">
     <div id="file-picker-backdrop" class="file-picker-backdrop"></div>
     <section class="file-picker" role="dialog" aria-modal="true" aria-labelledby="file-picker-title">
-      <header class="file-picker-header"><div><p class="eyebrow">SERVER FILE TREE</p><h2 id="file-picker-title">选择路径</h2></div><button id="close-file-picker" class="close-button" aria-label="关闭文件选择器">×</button></header>
+      <header class="file-picker-header"><div><h2 id="file-picker-title">选择路径</h2></div><button id="close-file-picker" class="close-button" aria-label="关闭文件选择器">×</button></header>
       <div class="file-picker-path"><button id="file-picker-up" class="button button-ghost button-small" type="button" disabled>↑ 上一级</button><code id="file-picker-current">选择允许的根目录</code></div>
       <p id="file-picker-message" class="file-picker-message" role="status" aria-live="polite"></p>
       <div id="file-picker-entries" class="file-tree" role="tree"><div class="file-tree-empty">加载中…</div></div>

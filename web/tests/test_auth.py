@@ -222,7 +222,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         job = result.json()
         self.assertEqual(job['operator'], 'Test User')
-        self.assertEqual(workflow.Path(job['output_root']).parent, self.out/'alice'/'igblast_base')
+        self.assertEqual(workflow.Path(job['output_root']).parent, self.out/('Test_User_'+web.get_job_row(job['id'])['owner_id'][:8])/'igblast_base')
         own = user.get('/api/jobs').json()
         self.assertEqual(own['total'], 1)
         legacy_response = self.client.post('/api/jobs', json=body)
@@ -284,6 +284,23 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(env['SCIGBLAST_RUN_INPUT_MODE'], 'auto')
         self.assertEqual(env['SCIGBLAST_IR_PIPELINE_VARIANT'], 'representative')
         self.assertEqual(env['SCIGBLAST_RUN_PREPROCESSING'], '1')
+
+    def test_admin_rename_reset_permissions_and_sessions(self):
+        self.register()
+        alice = self.login()
+        with web.db() as connection:
+            uid = connection.execute("SELECT id FROM users WHERE username='alice'").fetchone()['id']
+        url = f'/api/admin/users/{uid}'
+        self.assertEqual(alice.post(url+'/name', json={'display_name':'Changed'}).status_code, 403)
+        self.assertEqual(alice.post(url+'/password', json={'new_password':'newpass123'}).status_code, 403)
+        self.assertEqual(self.client.post(url+'/name', json={'display_name':'Alice Smith'}).status_code, 200)
+        self.assertEqual(self.client.post('/api/admin/users/test-admin/name', json={'display_name':'alice smith'}).status_code, 409)
+        self.assertEqual(self.client.post(url+'/password', json={'new_password':'short'}).status_code, 422)
+        self.assertEqual(self.client.post(url+'/password', json={'new_password':'newpass123'}).status_code, 200)
+        self.assertEqual(alice.get('/api/jobs').status_code, 401)
+        with TestClient(web.app, headers=HEADERS) as client:
+            self.assertEqual(client.post('/api/auth/login', json={'display_name':'Alice Smith','password':PASSWORD}).status_code, 401)
+            self.assertEqual(client.post('/api/auth/login', json={'display_name':'Alice Smith','password':'newpass123'}).status_code, 200)
 
     def test_name_only_registration_and_login(self):
         code = self.invite()['code']

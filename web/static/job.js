@@ -1,7 +1,8 @@
 (() => {
   const $=s=>document.querySelector(s),id=window.SCIGBLAST_JOB_ID,{api,esc}=Submission;
   let job,tab='overview',revision='',attempt=-1,matchPage=0,offset=0,source='',paused=false,busy=false,logBusy=false;
-  const fmt=v=>v?new Date(v).toLocaleString('zh-CN'):'—',fail=e=>alert(e.message||e);
+  const fmt=v=>v?new Date(v).toLocaleString('zh-CN'):'—',fail=e=>{const node=$('#page-error');node.textContent=e.message||String(e);node.classList.remove('hidden');};
+  const statusLabels={QUEUED:'排队中',RUNNING:'运行中',MATCHING:'匹配中',WAITING_REVIEW:'待审核',SUCCEEDED:'已完成',FAILED:'失败',STOPPED:'已停止',STOPPING:'停止中',INTERRUPTED:'已中断',COMPLETED_WITHOUT_MARKER:'需检查'};
   const actionLabels = {create:'创建任务', 'confirm-match':'确认 Match 并继续', review:'审核标注', rematch:'更新资料并重新匹配', resume:'断点续跑', stop:'停止任务'};
   function actionDetail(a) {
     if(a.action==='confirm-match') { const attempt = String(a.details||'').split(':')[0]; return /^\d+$/.test(attempt) ? `已确认第 ${attempt} 次匹配结果，仅匹配成功的记录进入下游。` : '已确认匹配结果。'; }
@@ -13,9 +14,9 @@
     if(job.pipeline==='ir_split') items.push(['输入模式',({'auto':'自动识别','presplit':'已拆分（presplit）','raw':'未拆分（raw）'})[options.ir_input_mode]||'未拆分（raw）'],['代表序列',options.ir_variant==='merged'?'不提取，使用全部合并序列':'提取代表序列'],['结果整理',({'auto':'自动','1':'启用','0':'关闭'})[options.run_preprocessing]||'自动']);
     return items;
   }
-  $('#tab-match .match-filter').insertAdjacentHTML('beforeend',`<input id="match-search" placeholder="搜索样本 / 原因" aria-label="搜索 Match"><button id="match-refresh" class="button button-ghost">刷新</button><a href="/api/jobs/${id}/download?kind=match">下载清单</a>`);
+  $('#tab-match .match-filter').insertAdjacentHTML('beforeend',`<input id="match-search" placeholder="搜索样本 / 原因" aria-label="搜索 Match"><label><input id="unmarked-only" type="checkbox">只看未标注</label><button id="next-unmarked" class="button button-ghost">下一条未标注</button><button id="match-refresh" class="button button-ghost">刷新</button><a href="/api/jobs/${id}/download?kind=match">下载清单</a>`);
   $('#tab-match').insertAdjacentHTML('beforeend','<div class="pagination"><button id="match-prev" class="button button-ghost">上一页</button><button id="match-next" class="button button-ghost">下一页</button></div><p>标注不改变匹配状态。补齐资料后请重新 Match。</p>');
-  $('#tab-match').insertAdjacentHTML('beforeend','<section class="metadata-review-section"><div class="tab-toolbar"><h3>登记但未识别的样本</h3><span id="metadata-count" class="muted"></span></div><p class="muted">自动核对当前输入路径对应的 Submission 登记。下列样本尚未进入匹配清单，不会进入下游；清单中的 ERROR 记录在上表审阅。</p><p id="match-changes" class="muted"></p><div id="metadata-report" class="table-wrap" aria-live="polite">正在读取登记信息…</div></section>');
+  $('#tab-match').insertAdjacentHTML('beforeend','<section class="metadata-review-section"><div class="tab-toolbar"><h3>登记但未识别的样本</h3><span id="metadata-count" class="muted"></span></div><p class="muted">以下登记样本未匹配到输入文件，不会进入下游。</p><p id="match-changes" class="muted"></p><div id="metadata-report" class="table-wrap" aria-live="polite">正在读取登记信息…</div></section>');
   async function loadMetadata(token){
     $('#metadata-report').textContent='正在读取登记信息…';$('#metadata-count').textContent='';
     try{
@@ -30,16 +31,16 @@
   function setTab(name){tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));});document.querySelectorAll('.tab-content').forEach(p=>p.classList.toggle('active',p.id===`tab-${name}`));if(name==='match')loadMatch().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);syncSelection();}
   async function refresh(){const data=await api(`/api/jobs/${id}`);job=data.job;if(attempt!==job.attempt_no){attempt=job.attempt_no;revision='';offset=0;source='';$('#log-view').textContent='';if(tab==='match')loadMatch().catch(fail);}
     $('#job-id').textContent=id;$('#dataset-title').textContent=job.dataset;$('#job-subtitle').textContent=`${job.pipeline_label} · ${job.input_path}`;
-    $('#hero-status').innerHTML=`<span class="status-badge ${job.status.toLowerCase()}">${esc(job.status)}</span><strong>${job.progress}%</strong><small>阶段完成比例</small>`;
+    $('#hero-status').innerHTML=`<span class="status-badge ${job.status.toLowerCase()}">${esc(statusLabels[job.status]||job.status)}</span><strong>${job.progress}%</strong><small>阶段完成比例</small>`;
     const actions=[];if(job.status==='WAITING_REVIEW')actions.push(['confirm-match','审核并继续']);if(['QUEUED','RUNNING','MATCHING'].includes(job.status))actions.push(['stop','停止']);if(['FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER'].includes(job.status))actions.push(['resume','断点续跑']);if(!['QUEUED','RUNNING','MATCHING','STOPPING'].includes(job.status)&&job.submission_revision)actions.push(['edit','编辑资料 / 重新 Match']);$('#head-actions').innerHTML=actions.map(([a,t])=>`<button class="button ${a==='stop'?'button-danger':a==='edit'?'button-ghost':'button-primary'}" data-action="${a}">${t}</button>`).join('');
     $('#meta-cards').innerHTML=[['操作者',job.operator_display_name||job.operator],['创建时间',fmt(job.created_at)],['阶段内进度',`${job.stage_progress}%（日志报告）`],['尝试次数',job.attempt_no]].map(([k,v])=>`<div class="meta-card"><span>${k}</span><strong>${esc(v)}</strong></div>`).join('');
-    $('#progress-total').textContent=`${job.completed_stages.length} / ${job.stages.length} 已完成`;$('#stages').innerHTML=job.stages.map(s=>{const done=job.completed_stages.includes(s),current=s===job.current_stage;return `<div class="stage-row ${done?'done':''} ${current?'current':''}"><span class="stage-check">${done?'✓':current?'●':'○'}</span><span><strong>${esc(job.stage_labels[s]||s)}</strong><small>${s}</small></span><span class="stage-state">${done?'DONE':current?job.status:'PENDING'}</span></div>`;}).join('');
+    $('#progress-total').textContent=`${job.completed_stages.length} / ${job.stages.length} 已完成`;$('#stages').innerHTML=job.stages.map(s=>{const done=job.completed_stages.includes(s),current=s===job.current_stage;return `<div class="stage-row ${done?'done':''} ${current?'current':''}"><span class="stage-check">${done?'✓':current?'●':'○'}</span><span><strong>${esc(job.stage_labels[s]||s)}</strong><small>${s}</small></span><span class="stage-state">${done?'已完成':current?(statusLabels[job.status]||job.status):'未开始'}</span></div>`;}).join('');
     $('#overview-content').innerHTML=`<dl>${[['输入',job.input_path],['Submission 副本',job.submission_path],['Barcode',job.barcode_csv||'不需要'],['输出',job.output_root],['开始',fmt(job.started_at)],['结束',fmt(job.ended_at)],['退出码',job.exit_code??'—'],['错误',job.last_error||'无']].map(([k,v])=>`<dt>${k}</dt><dd class="mono">${esc(v)}</dd>`).join('')}</dl>`;
     if(!['QUEUED','RUNNING','MATCHING','STOPPING'].includes(job.status)) $('#head-actions').insertAdjacentHTML('beforeend','<button class="button button-danger-ghost" data-action="delete">删除任务</button>');
     $('#options-list').innerHTML=visibleOptions(data.options||{}).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');$('#audit-timeline').innerHTML=(data.actions||[]).map(a=>`<div class="audit-item"><div><strong>${esc(actionLabels[a.action]||'操作记录')}</strong><small>${esc(a.operator.replace(/ \([A-Za-z0-9_.-]+\)$/, ''))} · ${fmt(a.created_at)}</small><p>${esc(actionDetail(a))}</p></div></div>`).join('');
     syncSelection();
   }
-  let matchRequest=0, matchLoading=false, batchBusy=false, pageRows=[], selected=new Set(), reviewCounts=null;
+  let matchRequest=0, matchLoading=false, batchBusy=false, pageRows=[], selected=new Set(), reviewCounts=null, lastUnmarked=-1;
   $('#tab-match .match-table-wrap').before(Object.assign(document.createElement('div'), {className:'batch-review-bar', innerHTML:
     '<div><strong id="selection-count">已选 0 条</strong><small>跨页保留选择；更改筛选或清单版本后清空</small></div><div class="batch-review-actions"><select id="batch-label" aria-label="批量审核标注"><option value="已核对">已核对</option><option value="待补资料">待补资料</option><option value="">清除标注</option></select><button id="batch-apply" class="button button-primary" disabled>应用到所选</button><button id="selection-clear" class="button button-ghost" disabled>取消选择</button></div><span id="batch-message" role="status" aria-live="polite"></span>'}));
   $('#tab-match .match-filter').insertAdjacentHTML('afterend','<p id="review-progress" class="review-progress" role="status" aria-live="polite"></p>');
@@ -58,13 +59,13 @@
     const token=++matchRequest;matchLoading=true;syncSelection();
     loadMetadata(token);
     try{
-      const data=await api(`/api/jobs/${id}/match-preview?${new URLSearchParams({offset:matchPage*50,limit:50,query:$('#match-search').value,errors_only:$('#errors-only').checked})}`);
+      const data=await api(`/api/jobs/${id}/match-preview?${new URLSearchParams({offset:matchPage*50,limit:50,query:$('#match-search').value,errors_only:$('#errors-only').checked,unmarked_only:$('#unmarked-only').checked})}`);
       if(token!==matchRequest)return;
       if(revision!==(data.revision||'')){selected.clear();$('#batch-message').textContent='';}
       revision=data.revision||'';pageRows=data.rows;reviewCounts=data.review_counts||null;
-      $('#review-progress').textContent=reviewCounts?`全部清单：已标注 ${reviewCounts.marked} / ${reviewCounts.total} 条${reviewCounts.unmarked?` · 还有 ${reviewCounts.unmarked} 条未标注，暂不能进入下游`:' · 标注已完成'}。仅 OK 记录进入下游。`:'尚未生成可审核清单';
+      $('#review-progress').textContent=reviewCounts?`已标注 ${reviewCounts.marked} / ${reviewCounts.total} 条${reviewCounts.unmarked?` · 还有 ${reviewCounts.unmarked} 条未标注`:' · 标注已完成'}。全部标注后可继续，仅 OK 记录进入下游。`:'尚未生成可审核清单';
       $('#match-changes').textContent=`相比上次确认：新增 OK 记录 ${data.changes?.new_ok_records??0}；消失或改变的 OK 记录 ${data.changes?.removed_or_changed_ok_records??0}。`;
-      $('#match-path').textContent=data.path||'尚未生成清单';
+      $('#match-path').textContent=data.path?'核对样本匹配结果并完成标注。':'尚未生成清单';
       const names={total:'记录',ok:'匹配成功',error:'匹配失败',file_pairs:'文件对',matched_samples:'匹配样本'};
       $('#match-counts').innerHTML=Object.entries(data.counts||{}).map(([k,v])=>`<span class="count-pill ${k}"><b>${v}</b>${esc(names[k]||k)}</span>`).join('');
       $('#match-row-count').textContent=`筛选后 ${data.total||0} 行 · 第 ${matchPage+1} 页`;
@@ -75,6 +76,14 @@
       $('#select-page').onchange=e=>{pageRows.forEach(r=>e.target.checked?selected.add(r._row_key):selected.delete(r._row_key));syncSelection();};
     }finally{if(token===matchRequest){matchLoading=false;syncSelection();}}
   }
+  $('#next-unmarked').onclick=async()=>{
+    const button=$('#next-unmarked');button.disabled=true;
+    try{const data=await api(`/api/jobs/${id}/match-preview?after_key=${lastUnmarked}`);const target=data.next_unmarked;
+      if(!target){$('#batch-message').textContent='全部记录已标注';return;}
+      $('#unmarked-only').checked=false;$('#errors-only').checked=false;$('#match-search').value='';selected.clear();matchPage=Math.floor(target.offset/50);await loadMatch();
+      lastUnmarked=Number(target.row_key);const field=document.querySelector(`[data-review="${target.row_key}"]`);field?.scrollIntoView({block:'center'});field?.focus();
+    }catch(error){fail(error);}finally{button.disabled=false;}
+  };
   $('#selection-clear').onclick=()=>{selected.clear();syncSelection();};
   $('#batch-apply').onclick=async()=>{
     if(batchBusy||matchLoading||!selected.size)return;
@@ -87,12 +96,13 @@
     finally{batchBusy=false;syncSelection();}
   };
   async function loadLog(){if(paused||logBusy)return;logBusy=true;try{const data=await api(`/api/jobs/${id}/log?${new URLSearchParams({offset,source})}`);if(data.reset)$('#log-view').textContent='';source=data.source||'';offset=data.next_offset;$('#log-view').textContent=($('#log-view').textContent+data.content).slice(-500000);if($('#auto-scroll').checked)$('#log-view').scrollTop=$('#log-view').scrollHeight;}finally{logBusy=false;}}
-  let summaryKind='', summaryPage=0, summaryRequest=0;
+  let summaryKind='', summaryPage=0, summaryRequest=0, summaryLimit=5, summaryData=null;
+  const selectedColumns=new Map();
   $('#artifacts-refresh').onclick=()=>loadArtifacts().catch(fail);
   const columnLabels = {sample:'样本',sample_id:'样本',sample_key:'样本',total_reads:'输入 reads',matched_reads:'匹配 reads',matched_pct:'匹配比例 %',mismatch_reads:'未匹配 reads',mismatch_pct:'未匹配比例 %',discarded_pct:'丢弃比例 %',short_reads:'过短 reads',processed_reads:'处理 reads',Total_Reads:'输入 reads',OK_Reads:'合并成功',Merged_Percent:'合并比例 %',Merged_FASTA_Records:'合并序列数',Unaligned_FASTA_Records:'未合并序列数',before_reads:'过滤前 reads',after_reads:'过滤后 reads',reads_retained_pct:'保留比例 %',status:'状态',error:'原因'};
   async function loadArtifacts(){
     const data=await api(`/api/jobs/${id}/artifacts`);
-    $('#artifacts-list').innerHTML=`<div class="report-list" aria-label="阶段报告">${(data.reports||[]).map(r=>`<section class="report-item ${r.exists?'':'pending'}"><button class="report-open" data-summary="${esc(r.kind)}" ${r.exists?'':'disabled'} aria-pressed="false"><span>${esc(r.label)}</span><small>${r.exists?'查看统计':'尚未生成'}</small></button>${r.exists?`<a class="report-download" href="/api/jobs/${id}/download?kind=${encodeURIComponent(r.kind)}" aria-label="下载 ${esc(r.label)}">下载</a>`:''}</section>`).join('')}</div><section id="stage-summary-panel" class="hidden"><div class="tab-toolbar"><h3 id="stage-summary-title"></h3><button id="summary-refresh" class="button button-ghost button-small">刷新统计</button></div><p id="stage-summary-description" class="muted"></p><div class="summary-filter"><input id="summary-query" placeholder="搜索样本 / 状态" aria-label="搜索阶段统计"><label><input id="summary-all-columns" type="checkbox">显示路径等全部字段</label></div><p id="stage-summary-info" class="muted"></p><div class="table-wrap"><table><thead id="stage-summary-head"></thead><tbody id="stage-summary-body"></tbody></table></div><div class="pagination"><button id="summary-prev" class="button button-ghost">上一页</button><button id="summary-next" class="button button-ghost">下一页</button></div></section><details class="technical-paths"><summary>查看关键文件路径</summary>${data.files.map(f=>`<div class="artifact-row"><code>${esc(f.path)}</code><b>${f.exists?'存在':'未生成'}</b></div>`).join('')}</details>`;
+    $('#artifacts-list').innerHTML=`<div class="report-list" aria-label="阶段报告">${(data.reports||[]).map(r=>`<section class="report-item ${r.exists?'':'pending'}"><button class="report-open" data-summary="${esc(r.kind)}" ${r.exists?'':'disabled'} aria-pressed="false"><span>${esc(r.label)}</span><small>${r.exists?'查看统计':'尚未生成'}</small></button>${r.exists?`<a class="report-download" href="/api/jobs/${id}/download?kind=${encodeURIComponent(r.kind)}" aria-label="下载 ${esc(r.label)}">下载</a>`:''}</section>`).join('')}</div><section id="stage-summary-panel" class="hidden"><div class="tab-toolbar"><h3 id="stage-summary-title"></h3><button id="summary-refresh" class="button button-ghost button-small">刷新统计</button></div><p id="stage-summary-description" class="muted"></p><div class="summary-filter"><input id="summary-query" placeholder="搜索样本 / 状态" aria-label="搜索阶段统计"><label>每页 <select id="summary-limit" aria-label="每页记录数"><option value="5" selected>5 条</option><option value="10">10 条</option><option value="20">20 条</option><option value="50">50 条</option></select></label><details class="column-picker"><summary>选择字段</summary><div class="column-picker-menu"><input id="column-search" type="search" placeholder="搜索字段" aria-label="搜索字段"><button id="columns-default" class="button button-ghost button-small">显示全部字段</button><div id="column-options"></div></div></details></div><p id="stage-summary-info" class="muted"></p><div class="table-wrap summary-table"><table><thead id="stage-summary-head"></thead><tbody id="stage-summary-body"></tbody></table></div><dialog id="record-detail" class="record-detail"><div class="tab-toolbar"><h3>记录详情</h3><button id="record-close" class="button button-ghost">关闭</button></div><dl id="record-fields"></dl></dialog><div class="pagination"><button id="summary-prev" class="button button-ghost">上一页</button><button id="summary-next" class="button button-ghost">下一页</button></div></section>`;
     const reports=data.reports||[];
     const originalChoose = kind => document.querySelectorAll('[data-summary]').forEach(b=>{
       const active=b.dataset.summary===kind; b.closest('.report-item').classList.toggle('selected',active); b.setAttribute('aria-pressed',String(active));
@@ -100,7 +110,14 @@
     const choose = kind => {summaryKind=kind;summaryPage=0;$('#stage-summary-title').textContent=reports.find(r=>r.kind===kind)?.label||'阶段统计';$('#stage-summary-description').textContent=reports.find(r=>r.kind===kind)?.description||'';$('#stage-summary-panel').classList.remove('hidden');loadStageSummary().catch(fail);};
     document.querySelectorAll('[data-summary]').forEach(b=>b.onclick=()=>{originalChoose(b.dataset.summary);choose(b.dataset.summary);});
     $('#summary-query').onchange=()=>{summaryPage=0;loadStageSummary().catch(fail);};
-    $('#summary-all-columns').onchange=$('#summary-refresh').onclick=()=>loadStageSummary().catch(fail);
+    $('#summary-limit').value=String(summaryLimit);
+    $('#summary-limit').onchange=()=>{summaryLimit=Number($('#summary-limit').value);summaryPage=0;loadStageSummary().catch(fail);};
+    $('#summary-refresh').onclick=()=>loadStageSummary().catch(fail);
+    $('#column-search').oninput=()=>{const q=$('#column-search').value.toLowerCase();document.querySelectorAll('#column-options label').forEach(label=>label.hidden=!label.textContent.toLowerCase().includes(q));};
+    $('#columns-default').onclick=()=>{selectedColumns.delete(summaryKind);renderSummary();};
+    $('#column-options').onchange=e=>{if(!e.target.matches('input[type=checkbox]'))return;const chosen=selectedColumns.get(summaryKind);if(e.target.checked)chosen.add(e.target.value);else chosen.delete(e.target.value);renderSummary();};
+    $('#record-close').onclick=()=>$('#record-detail').close();
+    $('#stage-summary-body').onclick=e=>{const b=e.target.closest('[data-record]');if(!b)return;const row=summaryData.rows[Number(b.dataset.record)];$('#record-fields').innerHTML=summaryData.columns.map(c=>`<dt>${esc(columnLabels[c]||c)}${columnLabels[c]?`<small>${esc(c)}</small>`:''}</dt><dd>${esc(row[c]||'—')}</dd>`).join('');$('#record-detail').showModal();};
     $('#summary-prev').onclick=()=>{summaryPage--;loadStageSummary().catch(fail);};$('#summary-next').onclick=()=>{summaryPage++;loadStageSummary().catch(fail);};
     const preferred=[summaryKind,'split','prefilter','pandaseq','fastp','results'].find(k=>reports.some(r=>r.kind===k&&r.exists));
     if(preferred){originalChoose(preferred);choose(preferred);}
@@ -109,19 +126,29 @@
     const token=++summaryRequest;
     $('#stage-summary-info').textContent='正在读取统计…';
     $('#stage-summary-head').textContent='';$('#stage-summary-body').textContent='';
-    const data=await api(`/api/jobs/${id}/stage-summary?${new URLSearchParams({kind:summaryKind,offset:summaryPage*50,limit:50,query:$('#summary-query').value})}`);
+    const data=await api(`/api/jobs/${id}/stage-summary?${new URLSearchParams({kind:summaryKind,offset:summaryPage*summaryLimit,limit:summaryLimit,query:$('#summary-query').value})}`);
     if(token!==summaryRequest)return;
-    const hidden=/^(r1|r2|output_r1|output_r2|umi_sidecar|json_path|note)$|_path$/;
-    const columns=data.columns.filter(c=>$('#summary-all-columns').checked||!hidden.test(c));
-    $('#stage-summary-info').textContent=data.path?`${data.total} 条记录 · 第 ${summaryPage+1} 页 · 按脚本原始计数展示；不会重新计算。`:'尚未生成统计';
-    $('#stage-summary-head').innerHTML=`<tr>${columns.map(c=>`<th>${esc(columnLabels[c]||c)}${columnLabels[c]?`<small class="column-code">${esc(c)}</small>`:''}</th>`).join('')}</tr>`;
-    $('#stage-summary-body').innerHTML=data.rows.map(r=>`<tr class="${r.status==='ERROR'||(Number(r.total_reads)>0&&r.matched_reads!==undefined&&Number(r.matched_reads)===0)?'error-row':''}">${columns.map(c=>`<td title="${esc(r[c])}">${esc(r[c])}</td>`).join('')}</tr>`).join('');
-    $('#summary-prev').disabled=summaryPage===0;$('#summary-next').disabled=(summaryPage+1)*50>=data.total;
+    summaryData=data;
+    renderSummary();
+    $('#summary-prev').disabled=summaryPage===0;$('#summary-next').disabled=(summaryPage+1)*summaryLimit>=data.total;
+  }
+  function renderSummary(){
+    if(!summaryData)return;
+    const data=summaryData;
+    if(!selectedColumns.has(summaryKind))selectedColumns.set(summaryKind,new Set(data.columns));
+    const chosen=selectedColumns.get(summaryKind),columns=data.columns.filter(c=>chosen.has(c));
+    $('#column-options').innerHTML=data.columns.map(c=>`<label><input type="checkbox" value="${esc(c)}" ${chosen.has(c)?'checked':''}>${esc(columnLabels[c]||c)}${columnLabels[c]?` · ${esc(c)}`:''}</label>`).join('');
+    $('#column-search').oninput();
+    $('#stage-summary-info').textContent=data.path?`${data.total} 条记录 · 第 ${summaryPage+1} / ${Math.max(1,Math.ceil(data.total/summaryLimit))} 页 · 已显示 ${columns.length} / ${data.columns.length} 个字段`:'尚未生成统计';
+    $('#stage-summary-head').innerHTML=`<tr>${columns.map(c=>`<th>${esc(columnLabels[c]||c)}${columnLabels[c]?`<small class="column-code">${esc(c)}</small>`:''}</th>`).join('')}<th>操作</th></tr>`;
+    $('#stage-summary-body').innerHTML=data.rows.length?data.rows.map((r,i)=>`<tr class="${r.status==='ERROR'||(Number(r.total_reads)>0&&r.matched_reads!==undefined&&Number(r.matched_reads)===0)?'error-row':''}">${columns.map(c=>`<td title="${esc(r[c])}">${esc(r[c])}</td>`).join('')}<td><button class="button button-ghost button-small" data-record="${i}">详情</button></td></tr>`).join(''):`<tr><td colspan="${columns.length+1}">没有符合条件的记录</td></tr>`;
   }
   async function action(name){if(busy)return;busy=true;try{if(name==='edit'){const data=await api(`/api/submissions?revision=${encodeURIComponent(job.submission_revision)}`);Submission.open(data,async updated=>{await api(`/api/jobs/${id}/rematch`,{revision:updated.revision});revision='';await refresh();});return;}if(name==='confirm-match'){if(!revision||tab!=='match'){setTab('match');return;}await loadMatch();if(!reviewCounts||reviewCounts.unmarked)throw new Error(`还有 ${reviewCounts?.unmarked??'未知数量的'} 条 Match 记录未标注，请完成全部审阅标注。`);if(!confirm('全部记录已标注，确认本版清单并继续？仅 OK 记录进入下游，ERROR 保留待补。'))return;}if(name==='stop'&&!confirm('停止任务并保留中间产物？'))return;await api(`/api/jobs/${id}/${name}`,name==='confirm-match'?{revision}:{});await refresh();}catch(e){fail(e);}finally{busy=false;}}
   $('#head-actions').onclick=async e=>{const b=e.target.closest('[data-action]');if(!b)return;if(b.dataset.action==='delete'){if(busy)return;busy=true;try{if(await Submission.deleteJob(job))location.href='/';}catch(error){fail(error);}finally{busy=false;}}else action(b.dataset.action);};document.querySelectorAll('.detail-tab').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   $('#match-body').onchange=async e=>{if(e.target.dataset.selectRow!==undefined){e.target.checked?selected.add(e.target.dataset.selectRow):selected.delete(e.target.dataset.selectRow);syncSelection();return;}if(!e.target.dataset.review)return;batchBusy=true;syncSelection();try{await api(`/api/jobs/${id}/review`,{revision,row_key:e.target.dataset.review,label:e.target.value});await loadMatch();}catch(error){fail(error);await loadMatch();}finally{batchBusy=false;syncSelection();}};
-  $('#errors-only').onchange=$('#match-search').onchange=()=>{selected.clear();syncSelection();matchPage=0;loadMatch().catch(fail);};$('#match-refresh').onclick=()=>loadMatch().catch(fail);$('#match-prev').onclick=()=>{matchPage--;loadMatch().catch(fail);};$('#match-next').onclick=()=>{matchPage++;loadMatch().catch(fail);};
+  $('#unmarked-only').onchange=$('#errors-only').onchange=$('#match-search').onchange=()=>{selected.clear();syncSelection();matchPage=0;loadMatch().catch(fail);};$('#match-refresh').onclick=()=>loadMatch().catch(fail);$('#match-prev').onclick=()=>{matchPage--;loadMatch().catch(fail);};$('#match-next').onclick=()=>{matchPage++;loadMatch().catch(fail);};
+  const tabs=[...document.querySelectorAll('.detail-tab')];
+  tabs.forEach((button,index)=>{button.setAttribute('aria-controls','tab-'+button.dataset.tab);button.onkeydown=e=>{let next;if(e.key==='ArrowRight')next=(index+1)%tabs.length;else if(e.key==='ArrowLeft')next=(index+tabs.length-1)%tabs.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=tabs.length-1;else return;e.preventDefault();tabs[next].focus();setTab(tabs[next].dataset.tab);};});
   $('#pause-log').onclick=()=>{paused=!paused;$('#pause-log').textContent=paused?'继续刷新':'暂停刷新';};$('#copy-log').onclick=()=>navigator.clipboard.writeText($('#log-view').textContent).catch(fail);
   refresh().then(()=>{if(location.hash==='#match')setTab('match');}).catch(fail);setInterval(()=>refresh().catch(console.error),5000);setInterval(()=>{if(tab==='log')loadLog().catch(console.error);},2000);
 })();

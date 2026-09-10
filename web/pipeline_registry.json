@@ -24,7 +24,7 @@
   },
   "10x_split": {
     "label": "10X split",
-    "description": "单细胞 10X 数据：按 barcode / UMI 提取代表序列并聚类。",
+    "description": "单细胞 · barcode + UMI 代表序列、链聚类",
     "accent": "amber",
     "runner": "10X_split/pipeline/run_10x_pipeline.sh",
     "stages": ["01.match", "02.fastp", "03.prefilter", "04.clean", "05.pandaseq", "06.split", "07.igblast", "08.cluster"],

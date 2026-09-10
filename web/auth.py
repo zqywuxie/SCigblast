@@ -158,6 +158,14 @@ class Registration(Credentials):
     invitation: str = Field(min_length=10, max_length=128)
 
 
+class RenameRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=60, pattern=r'^[A-Za-z][A-Za-z0-9 ._-]*$')
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=6, max_length=128)
+
+
 class InvitationRequest(BaseModel):
     hours: int = Field(default=24, ge=1, le=168)
 
@@ -277,6 +285,30 @@ def router(db):
                                       'LEFT JOIN invitations i ON i.used_by=u.id ORDER BY u.created_at,u.id')
             return {'users': [{**public_user(u), 'invitation_id': u['invitation_id'],
                                'invitation_deleted_at': u['invitation_deleted_at']} for u in rows]}
+
+    @routes.post('/api/admin/users/{user_id}/name')
+    def rename_user(user_id: str, body: RenameRequest):
+        admin = require_admin()
+        name = body.display_name.strip()
+        with db() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            if connection.execute('SELECT 1 FROM users WHERE id<>? AND lower(trim(display_name))=lower(?)', (user_id, name)).fetchone():
+                raise HTTPException(409, '姓名已被使用')
+            if not connection.execute('UPDATE users SET display_name=? WHERE id=?', (name, user_id)).rowcount:
+                raise HTTPException(404, '用户不存在')
+            event(connection, admin['id'], 'rename-user', user_id)
+        return {'ok': True}
+
+    @routes.post('/api/admin/users/{user_id}/password')
+    def reset_user_password(user_id: str, body: ResetPasswordRequest):
+        admin = require_admin()
+        encoded = password_hash(body.new_password)
+        with db() as connection:
+            if not connection.execute('UPDATE users SET password_hash=? WHERE id=?', (encoded, user_id)).rowcount:
+                raise HTTPException(404, '用户不存在')
+            connection.execute('DELETE FROM sessions WHERE user_id=?', (user_id,))
+            event(connection, admin['id'], 'reset-user-password', user_id)
+        return {'ok': True}
 
     @routes.post('/api/admin/users/{user_id}/active')
     def set_active(user_id: str, body: ActiveRequest):
