@@ -452,7 +452,7 @@ def discover_pairs_from_summary(summary_path: Path, input_dir: Path,
             # audit metadata only and may be absent from the match summary.
             # Raw input still requires the 8 bp primer barcode because it is
             # used to decide which reads are written to the sample output.
-            barcode_required = input_mode != "presplit"
+            barcode_required = input_mode not in {"presplit", "auto"}
             if not sample_id or (barcode_required and not re.fullmatch(r"[ACGT]{8}", sequence)):
                 errors.append(PairResult(sample_id, candidate, barcode_name, sequence, raw_r1, raw_r2,
                                          status="ERROR", error="Invalid sample/barcode fields in mapping summary"))
@@ -1061,6 +1061,8 @@ def _write_pair(pair: FastqPair, output_dir: Path, input_dir: Path, umi_length: 
                         raise ValueError("R1/R2 FASTQ record counts differ")
                     h1, s1, p1, q1 = r1
                     h2, s2, p2, q2 = r2
+                    if INPUT_MODE == "auto" and any("#" in h.split()[0] for h in (h1, h2)):
+                        raise ValueError("Tagged read found after raw-mode detection; mixed input is not supported within a pair")
                     if read_key(h1) != read_key(h2):
                         raise ValueError(f"R1/R2 headers do not match: {h1} / {h2}")
                     result.total_reads += 1
@@ -1251,6 +1253,8 @@ def _write_physical_group(group: list[FastqPair], output_dir: Path, input_dir: P
                     raise ValueError("R1/R2 FASTQ record counts differ")
                 h1, s1, p1, q1 = r1
                 h2, s2, p2, q2 = r2
+                if INPUT_MODE == "auto" and any("#" in h.split()[0] for h in (h1, h2)):
+                    raise ValueError("Tagged read found after raw-mode detection; mixed input is not supported within a pair")
                 if read_key(h1) != read_key(h2):
                     raise ValueError(f"R1/R2 headers do not match: {h1} / {h2}")
                 for item_index, item in enumerate(items):
@@ -1521,9 +1525,35 @@ def write_summary(path: Path, results: Iterable[PairResult]) -> None:
             writer.writerow(_result_to_row(result))
 
 
+def detect_pair_mode(pair: FastqPair, umi_length: int) -> str:
+    """Inspect up to 64 pairs; malformed/one-sided/mixed tags are not raw input."""
+    modes = set()
+    with open_fastq(pair.r1) as forward, open_fastq(pair.r2) as reverse:
+        for _ in range(64):
+            r1, r2 = read_fastq_record(forward), read_fastq_record(reverse)
+            if r1 is None and r2 is None:
+                break
+            if r1 is None or r2 is None:
+                raise ValueError("R1/R2 FASTQ record counts differ")
+            tagged = ["#" in read[0].split()[0] for read in (r1, r2)]
+            if any(tagged):
+                id1, umi1 = header_umi(r1[0], umi_length)
+                id2, umi2 = header_umi(r2[0], umi_length)
+                if (id1, umi1) != (id2, umi2):
+                    raise ValueError("R1/R2 header UMI or read ID mismatch")
+                modes.add("presplit")
+            else:
+                modes.add("raw")
+    if len(modes) > 1:
+        raise ValueError("Mixed tagged and untagged reads in one FASTQ pair")
+    if not modes:
+        raise ValueError("Cannot detect input mode from an empty FASTQ pair")
+    return modes.pop()
+
+
 def main() -> int:
-    if INPUT_MODE not in {"raw", "presplit"}:
-        raise SystemExit("SCIGBLAST_IR_INPUT_MODE must be raw or presplit")
+    if INPUT_MODE not in {"raw", "presplit", "auto"}:
+        raise SystemExit("SCIGBLAST_IR_INPUT_MODE must be raw, presplit or auto")
     if UMI_LENGTH < 0:
         raise SystemExit("UMI_LENGTH must be >= 0")
     if WORKERS < 1:
@@ -1564,6 +1594,21 @@ def main() -> int:
             def worker(item: object, index: int) -> object:
                 if not isinstance(item, list) or not all(isinstance(x, FastqPair) for x in item):
                     raise TypeError("invalid raw split task")
+                if INPUT_MODE == "auto":
+                    try:
+                        mode = detect_pair_mode(item[0], UMI_LENGTH)
+                        print(f"[IR][split] detected={mode} file={item[0].r1}", file=sys.stderr, flush=True)
+                        if mode == "presplit":
+                            if len(item) != 1:
+                                raise ValueError("Pre-split pair must match exactly one sample/barcode destination")
+                            return _prepare_presplit_pair(item[0], OUTPUT_DIR, INPUT_DIR, UMI_LENGTH,
+                                                          SKIP_EXISTING, progress_path, state_dir, index, len(tasks))
+                        if any(not re.fullmatch(r"[ACGT]{8}", p.sample.barcode_sequence) for p in item):
+                            raise ValueError("Raw input requires an 8 bp barcode in the match summary")
+                    except (ValueError, OSError) as exc:
+                        return [PairResult(p.sample.sample_id, p.sample.barcode_candidate,
+                                           p.sample.barcode_name, p.sample.barcode_sequence,
+                                           str(p.r1), str(p.r2), status="ERROR", error=str(exc)) for p in item]
                 if len(item) > 1:
                     return _write_physical_group(item, OUTPUT_DIR, INPUT_DIR, UMI_LENGTH,
                                                  COMPRESSLEVEL, SKIP_EXISTING,

@@ -243,3 +243,15 @@ dialog.pipeline-help::backdrop { background:#12393966; }
 .pipeline-help .pipeline-final-note { margin-top:16px; padding-top:14px; border-top:1px solid #dbe9e3; font-size:13px; color:var(--muted); }
 .pipeline-help .pipeline-help-review { color:var(--muted); font-size:13px; }
 @media(max-width:540px) { dialog.pipeline-help { padding:20px; } .pipeline-final-stage { padding:16px; } .pipeline-final-stage dl { grid-template-columns:1fr; gap:4px; } .pipeline-final-stage dd + dt { margin-top:8px; } }
+
+/* Compact stage report navigation; description belongs to the selected report. */
+.report-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0 0 16px}
+.report-item{display:flex;align-items:center;gap:8px;min-width:0;border:1px solid var(--line);border-radius:7px;background:var(--surface)}
+.report-item.selected{border-color:var(--primary);background:var(--primary-soft)}
+.report-open{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:1;min-width:0;padding:10px 12px;border:0;background:transparent;text-align:left;color:var(--ink);font:600 13px var(--font);cursor:pointer}
+.report-open span{min-width:0;overflow-wrap:anywhere}.report-open small{flex-shrink:0;color:var(--primary);font-size:11px;font-weight:400}
+.report-open:disabled{cursor:default;color:var(--muted)}.report-open:disabled small{color:var(--faint)}
+.report-open:focus-visible,.report-download:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:5px}
+.report-download{flex-shrink:0;margin-right:12px;color:var(--primary);font-size:12px;text-decoration:none}.report-download:hover{text-decoration:underline}
+.review-progress{padding:10px 12px;background:var(--amber-soft);border-radius:6px;color:var(--ink);font-size:13px}
+@media(max-width:760px){.report-list{grid-template-columns:1fr}.report-open{padding:10px}}

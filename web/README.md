@@ -78,6 +78,10 @@ docker compose exec scigblast-web python /app/check_runtime.py
 
 ## 使用流程
 
+Match 审核要求当前版本全部记录（包括其他分页和 ERROR 记录）都有“已核对”或“待补资料”标注；存在未标注记录时无法确认进入下游。重新 Match 后须重新标注。标注不改变匹配状态，仅 OK 记录参与下游分析。
+
+IR_split 自动识别 raw 和已带 UMI 标签的 presplit 输入，网页无需设置 IR 专用参数。主流程统一执行 representative → IgBLAST → preprocessing，命令行同样不再选择 merged 或跳过 preprocessing。
+
 1. 登录后选择 Pipeline，页面展示对应流程图；填写输入/输出和需要的 Barcode CSV。操作者由后端绑定登录用户，无需填写。点击“验证路径”检查入口工具与 Python 库缺项。
 2. 统一在“Submission 文件或目录”中选择路径，再点击同一处“查看 / 编辑”。按工作表分页查看；支持修改样本、Dual Index、Chain、Barcode、Species 和 Note。Note 合并/继承区域一起修改；前缀替换先显示影响行数，目标目录可浏览选择。编辑器仍支持用补齐后的 XLSX 替换工作副本。
 3. 保存工作副本，原始 XLSX 不变。每次编辑生成新版本，当前版本和原始副本均可下载；副本与任务记录保存在 `web/runtime`。

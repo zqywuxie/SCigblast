@@ -55,6 +55,12 @@ class WorkflowTests(unittest.TestCase):
         r = self.client.post('/api/jobs', json={'pipeline':pipeline, 'operator':'test', 'input_path':str(self.raw), 'submission_revision':self.view['revision'], 'output_root':str(self.out), 'dataset_label':dataset})
         self.assertEqual(r.status_code,200,r.text);return r.json()['id']
 
+    def mark_all(self, jid):
+        data = self.client.get(f'/api/jobs/{jid}/match-preview', params={'limit': 200}).json()
+        result = self.client.post(f'/api/jobs/{jid}/review', json={
+            'revision': data['revision'], 'row_keys': [r['_row_key'] for r in data['rows']], 'label': '已核对'})
+        self.assertEqual(result.status_code, 200, result.text)
+
     def match(self, jid, rows=151):
         row=web.get_job_row(jid);folder=self.out/'01.match'/row['dataset'];folder.mkdir(parents=True,exist_ok=True)
         path=folder/'sample_manifest.csv'
@@ -136,6 +142,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.client.post(f'/api/jobs/{jid}/review',json=body).status_code,200)
         self.assertEqual(self.client.post(f'/api/jobs/{jid}/resume',json={}).status_code,409)
         self.assertEqual(self.client.post(f'/api/jobs/{jid}/confirm-match',json={'revision':'old'}).status_code,409)
+        self.mark_all(jid)
         self.assertEqual(self.client.post(f'/api/jobs/{jid}/confirm-match',json={'revision':r['revision']}).status_code,200)
         self.assertEqual(json.loads(web.get_job_row(jid)['env_json'])['SCIGBLAST_WEB_MATCH_ONLY'],'0')
         self.assertEqual(self.client.post('/api/jobs',json={'pipeline':'igblast_base','operator':'test','input_path':str(self.raw),'submission_revision':self.view['revision'],'output_root':str(self.out),'dataset_label':'batch'}).status_code,409)
@@ -145,6 +152,7 @@ class WorkflowTests(unittest.TestCase):
         def confirm():
             web.update_job(jid,status='WAITING_REVIEW')
             revision=self.client.get(f'/api/jobs/{jid}/match-preview').json()['revision']
+            self.mark_all(jid)
             return self.client.post(f'/api/jobs/{jid}/confirm-match',json={'revision':revision})
         self.assertEqual(confirm().status_code,200)
         with p.open('a') as h:h.write('new,OK,,/raw/new_R1.fq,TRA\n')
@@ -210,6 +218,34 @@ class WorkflowTests(unittest.TestCase):
         revised=submission.revise(web.STATE_ROOT,view['revision'],[{'file':view['sheets'][0]['file'],'sheet':'Sheet','cell':'B2','value':'/analysis/new'}])
         self.assertEqual(len(revised['sheets'][0]['rows']),27)
         self.assertTrue(all(r['values'][1]=='/analysis/new' for r in revised['sheets'][0]['rows']))
+
+    def test_unmarked_rows_block_confirmation_across_pages_filters_and_revisions(self):
+        jid = self.create()
+        path = self.match(jid, 151)
+        data = self.client.get(f'/api/jobs/{jid}/match-preview', params={'query': 'missing', 'errors_only': True}).json()
+        self.assertEqual(len(data['rows']), 1)
+        self.assertEqual(data['review_counts'], {'total': 151, 'marked': 0, 'unmarked': 151})
+        revision = data['revision']
+        def confirm():
+            return self.client.post(f'/api/jobs/{jid}/confirm-match', json={'revision': revision})
+        self.assertEqual(confirm().status_code, 409)
+        self.client.post(f'/api/jobs/{jid}/review', json={'revision': revision, 'row_keys': [str(i) for i in range(150)], 'label': '已核对'})
+        denied = confirm()
+        self.assertEqual(denied.status_code, 409)
+        self.assertIn('1 条', denied.json()['detail'])
+        self.assertEqual(web.get_job_row(jid)['status'], 'WAITING_REVIEW')
+        self.assertEqual(json.loads(web.get_job_row(jid)['env_json'])['SCIGBLAST_WEB_MATCH_ONLY'], '1')
+        self.client.post(f'/api/jobs/{jid}/review', json={'revision': revision, 'row_key': '150', 'label': '待补资料'})
+        self.client.post(f'/api/jobs/{jid}/review', json={'revision': revision, 'row_key': '0', 'label': ''})
+        self.assertEqual(confirm().status_code, 409)
+        self.client.post(f'/api/jobs/{jid}/review', json={'revision': revision, 'row_key': '0', 'label': '已核对'})
+        self.assertEqual(confirm().status_code, 200)
+        self.assertEqual(json.loads(web.get_job_row(jid)['env_json'])['SCIGBLAST_WEB_MATCH_ONLY'], '0')
+        web.update_job(jid, status='WAITING_REVIEW', attempt_no=2)
+        fresh = self.client.get(f'/api/jobs/{jid}/match-preview').json()
+        self.assertEqual(fresh['review_counts']['unmarked'], 151)
+        revision = fresh['revision']
+        self.assertEqual(confirm().status_code, 409)
 
     def test_batch_review_atomic_and_version_bound(self):
         jid=self.create();self.match(jid)

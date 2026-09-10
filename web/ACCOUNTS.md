@@ -22,7 +22,7 @@ docker exec -it scigblast-web python /app/manage_users.py create-admin zqy --nam
 
 手动创建时密码通过隐藏提示输入两次（6–128 字符），不要写在命令行或提交进 Git。
 创建管理员后打开网站登录，在“用户管理”生成注册码，通过可信渠道交给新用户。
-用户名为 3–32 位英文、数字、点、短横线或下划线；姓名用于任务展示。
+用户名为 3–32 位英文、数字、点、短横线或下划线；英文姓名以字母开头，可含数字、空格、点、短横线或下划线。页面人员信息只显示姓名。
 
 管理员账户已存在时，重复创建会报错，不覆盖密码。如忘记密码：
 
@@ -48,6 +48,9 @@ docker exec -it scigblast-web python /app/manage_users.py reset-password zqy
 - 登录会话有效 12 小时；退出、修改密码、服务器重置密码或停用账户会撤销相应会话。
 - 普通用户仅能查看和操作自己的任务；管理员可以查看和操作全部任务。
 - 任务创建、路径验证的操作者强制使用当前登录姓名，即使直接调用 API 提交其他名字也不会冒用。
+- 新任务默认输出目录为 `默认根目录/用户名/Pipeline类型/YYYYMMDD_HHMMSS/`，时间为北京时间；同秒重名时追加 `_02` 等编号。旧任务续跑仍使用原路径。
+- 网页和命令行 IR 主流程统一为自动识别 raw/presplit 输入 → representative → IgBLAST → preprocessing，不再提供 merged 或跳过 preprocessing 的选项。
+- IR 自动识别在 fastp 后按物理 FASTQ 对检查前 64 对 header；存在合法且两端一致的 UMI 标签则走 presplit，否则无标签走 raw。实际处理仍检查全部 reads；混合标签、错配或已拆分文件匹配多个样本报错，不猜测。
 - 操作日志记录实际操作人的姓名及用户名，管理员代为操作时不冒记为任务创建者。
 - Submission 工作副本按用户归属保护；管理员可访问全部副本。
 - 历史任务的 owner_id 留空，仅管理员可见，不根据同名姓名自动认领，不移动或重算旧结果。
@@ -72,3 +75,7 @@ docker exec -it scigblast-web python /app/manage_users.py reset-password zqy
 的 PBKDF2-HMAC-SHA256 600,000 次迭代建议，以及
 [OWASP CSRF 防护](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)
 的自定义请求头与 SameSite 防护。无需新增第三方认证服务。
+
+## 姓名登录
+
+网页注册只填写姓名、密码和注册码，登录使用相同姓名与密码，不再单独填写用户名。姓名使用英文全名或缩写，新注册时不允许重复（忽略大小写和首尾空格）。已有账户可直接使用保存的姓名登录，内部账号标识、任务归属和已有结果目录保留。历史同名账户需先由管理员区分姓名；原用户名 API 登录仍兼容。

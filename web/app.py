@@ -346,9 +346,9 @@ class CreateJob(BaseModel):
     barcode_csv: str | None = None
     output_root: str | None = None
     dataset_label: str = ""
-    ir_input_mode: str = "raw"
+    ir_input_mode: str = "auto"
     ir_variant: str = "representative"
-    run_preprocessing: str = "auto"
+    run_preprocessing: str = "1"
 
 
 def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
@@ -368,12 +368,9 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     if request.operator.strip() == "":
         raise HTTPException(400, "operator is required")
     if request.pipeline == "ir_split":
-        if request.ir_input_mode not in {"raw", "presplit"}:
-            raise HTTPException(400, "ir_input_mode must be raw or presplit")
-        if request.ir_variant not in {"representative", "merged"}:
-            raise HTTPException(400, "ir_variant must be representative or merged")
-        if request.run_preprocessing not in {"auto", "0", "1"}:
-            raise HTTPException(400, "run_preprocessing must be auto, 0, or 1")
+        request.ir_input_mode = "auto"
+        request.ir_variant = "representative"
+        request.run_preprocessing = "1"
 
     runner = (PIPELINE_ROOT / config["runner"]).resolve()
     if not runner.is_file() or not is_under(runner, [PIPELINE_ROOT]):
@@ -494,6 +491,9 @@ def pipeline_done(row: sqlite3.Row) -> bool:
 
 
 def snapshot(row: sqlite3.Row) -> dict[str, Any]:
+    with db() as connection:
+        owner = connection.execute('SELECT display_name FROM users WHERE id=?', (row['owner_id'],)).fetchone()
+    operator_display_name = owner['display_name'] if owner else row['operator']
     config = job_config(row)
     state = state_dir(row)
     done = []
@@ -509,6 +509,7 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "operator": row["operator"],
+        "operator_display_name": operator_display_name,
         "pipeline": row["pipeline"],
         "pipeline_label": config["label"],
         "dataset": row["dataset"],
@@ -1309,6 +1310,12 @@ def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = ""
         with db() as connection:
             annotations = connection.execute("SELECT * FROM reviews WHERE job_id=? AND revision=?", (job_id, result["revision"])).fetchall()
         result["reviews"] = {r["row_key"]: {"label": r["label"], "note": r["note"]} for r in annotations}
+        with path.open(encoding='utf-8-sig', newline='') as handle:
+            keys = {str(i) for i, record in enumerate(csv.DictReader(handle))
+                    if any(str(v or '').strip() for v in record.values())}
+        marked = {r['row_key'] for r in annotations if r['label'] in {'已核对', '待补资料'}}
+        result['review_counts'] = {'total': len(keys), 'marked': len(keys & marked),
+                                   'unmarked': len(keys - marked)}
         return result
     except (OSError, csv.Error) as exc:
         raise HTTPException(500, f"cannot read match summary: {exc}") from exc
@@ -1325,6 +1332,9 @@ def confirm_match(job_id: str, request: dict) -> dict[str, Any]:
             raise HTTPException(409, "Match changed; reload and review again")
         if not match.get("counts", {}).get("ok"):
             raise HTTPException(409, "No usable matched records")
+        unmarked = match.get('review_counts', {}).get('unmarked', 0)
+        if unmarked:
+            raise HTTPException(409, f'还有 {unmarked} 条 Match 记录未标注，请完成全部审阅标注后再继续')
         assignments = matched_assignments(Path(match['path']))
         options = json.loads(row['options_json'])
         if not set(options.get('approved_assignments', [])).issubset(assignments):

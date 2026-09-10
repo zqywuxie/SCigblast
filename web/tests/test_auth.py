@@ -1,8 +1,8 @@
 """Authentication, ownership and invitation regression tests (no pipelines started)."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-import sqlite3
 import time
+import sqlite3
 import unittest
 
 from fastapi.testclient import TestClient
@@ -26,7 +26,7 @@ class AuthTests(unittest.TestCase):
 
     def register(self, username='alice', code=None):
         with TestClient(web.app, headers=HEADERS) as client:
-            return client.post('/api/auth/register', json={'username': username, 'display_name': '测试用户',
+            return client.post('/api/auth/register', json={'username': username, 'display_name': 'Test User',
                               'password': PASSWORD, 'invitation': code or self.invite()['code']})
 
     def login(self, username='alice', password=PASSWORD):
@@ -90,7 +90,7 @@ class AuthTests(unittest.TestCase):
         record, = response.json()['invitations']
         self.assertEqual((record['created_by'], record['created_username']), ('test-admin', 'admin'))
         self.assertEqual((record['used_by'], record['used_username'], record['used_display_name']),
-                         (user['id'], 'alice', '测试用户'))
+                         (user['id'], 'alice', 'Test User'))
         self.assertEqual(record['used_at'], user['created_at'])
         self.assertEqual(record['used_active'], 1)
         self.assertNotIn(invitation['code'], response.text)
@@ -115,7 +115,7 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()['total'], 1)
             self.assertEqual(response.json()['invitations'][0]['id'], invitation['id'])
-        for query in ('alice', '测试用户', used['id']):
+        for query in ('alice', 'Test User', used['id']):
             result = self.client.get('/api/admin/invitations', params={'q': query}).json()
             self.assertEqual(result['total'], 1)
             self.assertEqual(result['invitations'][0]['id'], used['id'])
@@ -221,11 +221,11 @@ class AuthTests(unittest.TestCase):
         result = user.post('/api/jobs', json=body)
         self.assertEqual(result.status_code, 200, result.text)
         job = result.json()
-        self.assertEqual(job['operator'], '测试用户')
+        self.assertEqual(job['operator'], 'Test User')
         self.assertEqual(workflow.Path(job['output_root']).parent, self.out/'alice'/'igblast_base')
         own = user.get('/api/jobs').json()
         self.assertEqual(own['total'], 1)
-        legacy_response = self.client.post('/api/jobs', json={**body, 'output_root': str(self.out/'legacy')})
+        legacy_response = self.client.post('/api/jobs', json=body)
         self.assertEqual(legacy_response.status_code, 200, legacy_response.text)
         legacy = legacy_response.json()['id']
         web.update_job(legacy, owner_id=None)
@@ -238,7 +238,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/stop", json={}).status_code, 200)
         actions = user.get(f"/api/jobs/{job['id']}").json()['actions']
         self.assertEqual(actions[-1]['operator'], '郑钦云 (admin)')
-        self.assertEqual(actions[0]['operator'], '测试用户 (alice)')
+        self.assertEqual(actions[0]['operator'], 'Test User (alice)')
 
     def test_submission_ownership_and_output_overlap(self):
         self.register()
@@ -254,6 +254,54 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(alice.post('/api/jobs', json=body).status_code, 200)
         body.update(submission_revision='', submission_path=str(self.source), dataset_label='different')
         self.assertEqual(bob.post('/api/jobs', json=body).status_code, 409)
+
+    def test_english_names_and_pipeline_filter(self):
+        code = self.invite()['code']
+        body = {'username': 'alice', 'display_name': '中文', 'password': PASSWORD, 'invitation': code}
+        self.assertEqual(self.client.post('/api/auth/register', json=body).status_code, 422)
+        body['display_name'] = 'Alice Smith'
+        self.assertEqual(self.client.post('/api/auth/register', json=body).status_code, 200)
+        user = self.login()
+        request = {'pipeline': 'igblast_base', 'input_path': str(self.raw), 'submission_path': str(self.source)}
+        self.assertEqual(user.post('/api/jobs', json=request).status_code, 200)
+        self.assertEqual(self.client.post('/api/jobs', json=request).status_code, 200)
+        self.assertEqual(user.get('/api/jobs?pipeline=igblast_base').json()['total'], 1)
+        self.assertEqual(user.get('/api/jobs?pipeline=pig_igblast').json()['total'], 0)
+
+    def test_ir_fixed_flow_cannot_be_disabled_by_request(self):
+        html = self.client.get('/').text
+        self.assertNotIn('IR 专用参数', html)
+        for field in ('ir_input_mode', 'ir_variant', 'run_preprocessing'):
+            self.assertNotIn('name="' + field + '"', html)
+            self.assertNotIn(field, web.REGISTRY['ir_split']['form_fields'])
+        import json
+        response = self.client.post('/api/jobs', json={
+            'pipeline': 'ir_split', 'input_path': str(self.raw),
+            'submission_path': str(self.source), 'ir_variant': 'merged',
+            'ir_input_mode': 'raw', 'run_preprocessing': '0'})
+        self.assertEqual(response.status_code, 200, response.text)
+        env = json.loads(web.get_job_row(response.json()['id'])['env_json'])
+        self.assertEqual(env['SCIGBLAST_RUN_INPUT_MODE'], 'auto')
+        self.assertEqual(env['SCIGBLAST_IR_PIPELINE_VARIANT'], 'representative')
+        self.assertEqual(env['SCIGBLAST_RUN_PREPROCESSING'], '1')
+
+    def test_name_only_registration_and_login(self):
+        code = self.invite()['code']
+        body = {'display_name': 'Name Only', 'password': PASSWORD, 'invitation': code}
+        self.assertEqual(self.client.post('/api/auth/register', json=body).status_code, 200)
+        with TestClient(web.app, headers={'X-SCIGBLAST-Request': '1'}) as client:
+            response = client.post('/api/auth/login', json={'display_name': ' name only ', 'password': PASSWORD})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['user']['display_name'], 'Name Only')
+        duplicate_code = self.invite()['code']
+        body.update(display_name='NAME ONLY', invitation=duplicate_code)
+        self.assertEqual(self.client.post('/api/auth/register', json=body).status_code, 409)
+        body['display_name'] = 'Different Name'
+        self.assertEqual(self.client.post('/api/auth/register', json=body).status_code, 200)
+        with TestClient(web.app) as visitor:
+            html = visitor.get('/login').text
+        self.assertNotIn('name="username"', html)
+        self.assertEqual(html.count('name="display_name"'), 2)
 
     def test_rate_limit_is_persistent(self):
         with web.db() as connection:

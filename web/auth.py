@@ -120,7 +120,8 @@ def rate_limit(db, key, maximum):
 
 
 class Credentials(BaseModel):
-    username: str = Field(min_length=3, max_length=32, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    username: str | None = Field(default=None, min_length=3, max_length=32, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    display_name: str | None = Field(default=None, min_length=1, max_length=60)
     password: str = Field(min_length=6, max_length=128)
 
 
@@ -153,7 +154,7 @@ def bootstrap_admin(db):
 
 
 class Registration(Credentials):
-    display_name: str = Field(min_length=1, max_length=60)
+    display_name: str = Field(min_length=1, max_length=60, pattern=r"^[A-Za-z][A-Za-z0-9 ._-]*$")
     invitation: str = Field(min_length=10, max_length=128)
 
 
@@ -192,8 +193,13 @@ def router(db):
                     'AND u.active=1 AND u.role=\'admin\'', (digest(body.invitation.strip()), timestamp)).fetchone()
                 if not invite:
                     raise HTTPException(400, '注册码无效、已使用、已撤销或已过期')
+                if not body.username and connection.execute(
+                    'SELECT 1 FROM users WHERE lower(trim(display_name))=lower(?)', (name,)
+                ).fetchone():
+                    raise HTTPException(409, '姓名已被使用，请使用可区分的完整姓名或缩写')
+                account_key = body.username.lower() if body.username else user_id
                 connection.execute('INSERT INTO users(id,username,display_name,password_hash,role,created_at) '
-                                   'VALUES(?,?,?,?,\'user\',?)', (user_id, body.username.lower(), name, encoded, timestamp))
+                                   'VALUES(?,?,?,?,\'user\',?)', (user_id, account_key, name, encoded, timestamp))
                 connection.execute('UPDATE invitations SET used_by=? WHERE id=?', (user_id, invite['id']))
                 event(connection, user_id, 'register', invite['id'])
         except sqlite3.IntegrityError as exc:
@@ -203,12 +209,19 @@ def router(db):
     @routes.post('/api/auth/login')
     def login(body: Credentials, request: Request):
         rate_limit(db, 'login-ip:' + request.client.host, 30)
-        rate_limit(db, 'login-user:' + body.username.lower(), 20)
+        identity = (body.display_name or body.username or '').strip()
+        if not identity:
+            raise HTTPException(400, '请填写姓名')
+        rate_limit(db, 'login-user:' + identity.lower(), 20)
         with db() as connection:
-            user = connection.execute('SELECT * FROM users WHERE username=?', (body.username.lower(),)).fetchone()
+            if body.display_name is not None:
+                candidates = connection.execute('SELECT * FROM users WHERE lower(trim(display_name))=lower(?)', (identity,)).fetchall()
+                user = candidates[0] if len(candidates) == 1 else None
+            else:
+                user = connection.execute('SELECT * FROM users WHERE username=?', (identity.lower(),)).fetchone()
         correct = password_matches(body.password, user['password_hash'] if user else dummy_hash)
         if not user or not correct or not user['active']:
-            raise HTTPException(401, '用户名或密码错误，或账户已停用')
+            raise HTTPException(401, '姓名或密码错误，或账户已停用')
         token = secrets.token_urlsafe(32)
         timestamp = int(time.time())
         with db() as connection:

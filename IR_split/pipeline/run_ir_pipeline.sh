@@ -7,12 +7,6 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BRANCH_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 CONFIG_FILE="${SCRIPT_DIR}/00.pipeline_config.env"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-PIPELINE_VARIANT="${SCIGBLAST_IR_PIPELINE_VARIANT:-representative}"
-INPUT_MODE="${SCIGBLAST_IR_INPUT_MODE:-raw}"
-RUN_PREPROCESSING="${SCIGBLAST_IR_RUN_PREPROCESSING:-auto}"
-RUN_PREPROCESSING_ENV_OVERRIDE="${SCIGBLAST_IR_RUN_PREPROCESSING:-}"
-RUN_PREPROCESSING_OVERRIDE="${SCIGBLAST_RUN_PREPROCESSING:-}"
-RUN_INPUT_MODE_OVERRIDE="${SCIGBLAST_RUN_INPUT_MODE:-}"
 RUN_RAW_INPUT_OVERRIDE="${SCIGBLAST_RUN_RAW_INPUT_DIR:-}"
 RUN_SUBMISSION_OVERRIDE="${SCIGBLAST_RUN_SUBMISSION_XLSX:-}"
 RUN_SUBMISSION_PATHS_OVERRIDE="${SCIGBLAST_RUN_SUBMISSION_PATHS:-}"
@@ -24,46 +18,16 @@ if [[ -f "$CONFIG_FILE" ]]; then
     . "$CONFIG_FILE"
     set +a
 fi
-PIPELINE_VARIANT="${SCIGBLAST_IR_PIPELINE_VARIANT:-$PIPELINE_VARIANT}"
-if [[ -n "$RUN_PREPROCESSING_OVERRIDE" ]]; then
-    RUN_PREPROCESSING="$RUN_PREPROCESSING_OVERRIDE"
-elif [[ -n "$RUN_PREPROCESSING_ENV_OVERRIDE" ]]; then
-    RUN_PREPROCESSING="$RUN_PREPROCESSING_ENV_OVERRIDE"
-fi
-if [[ -n "$RUN_INPUT_MODE_OVERRIDE" ]]; then
-    INPUT_MODE="$RUN_INPUT_MODE_OVERRIDE"
-else
-    INPUT_MODE="${SCIGBLAST_IR_INPUT_MODE:-$INPUT_MODE}"
-fi
-case "$PIPELINE_VARIANT" in
-    representative|merged) ;;
-    *)
-        echo "[IR] unsupported pipeline variant: $PIPELINE_VARIANT (expected representative or merged)" >&2
-        exit 2
-        ;;
-esac
-case "$INPUT_MODE" in
-    raw|presplit) ;;
-    *) echo "[IR] unsupported input mode: $INPUT_MODE (expected raw or presplit)" >&2; exit 2 ;;
-esac
-case "$RUN_PREPROCESSING" in
-    auto|0|1) ;;
-    *) echo "[IR] unsupported SCIGBLAST_IR_RUN_PREPROCESSING: $RUN_PREPROCESSING (expected auto, 0 or 1)" >&2; exit 2 ;;
-esac
-if [[ "$PIPELINE_VARIANT" == "representative" ]]; then
-    _default_pandaseq_format="fastq"
-else
-    _default_pandaseq_format="fasta"
-fi
-PANDASEQ_OUTPUT_FORMAT="${SCIGBLAST_IR_PANDASEQ_OUTPUT_FORMAT:-${_default_pandaseq_format}}"
+# The IR pipeline always detects raw/presplit input and runs the full
+# representative -> IgBLAST -> preprocessing flow, including on resume.
+INPUT_MODE="auto"
+RUN_PREPROCESSING="1"
+export SCIGBLAST_IR_PIPELINE_VARIANT="representative"
+PANDASEQ_OUTPUT_FORMAT="${SCIGBLAST_IR_PANDASEQ_OUTPUT_FORMAT:-fastq}"
 case "$PANDASEQ_OUTPUT_FORMAT" in
     fastq|fasta) ;;
     *) echo "[IR] unsupported PANDAseq output format: $PANDASEQ_OUTPUT_FORMAT (expected fastq or fasta)" >&2; exit 2 ;;
 esac
-if [[ "$PIPELINE_VARIANT" == "merged" && "$PANDASEQ_OUTPUT_FORMAT" == "fastq" ]]; then
-    echo "[IR] merged variant requires PANDAseq FASTA output; use representative variant for quality-aware FASTQ" >&2
-    exit 2
-fi
 resolve_output_root() {
     local value="${1:-}"
     if [[ -z "$value" ]]; then
@@ -184,11 +148,7 @@ if (( ${#_inputs[@]} )); then
             _c="${OUTPUT_ROOT}/04.clean_data/${_label}"
             _p="${OUTPUT_ROOT}/05.pandaseq/${_label}"
             _r="${OUTPUT_ROOT}/06.representative/${_label}"
-            if [[ "$PIPELINE_VARIANT" == "merged" ]]; then
-                _g="${OUTPUT_ROOT}/06.igblastn_out/${_label}"
-            else
-                _g="${OUTPUT_ROOT}/07.igblastn_out/${_label}"
-            fi
+            _g="${OUTPUT_ROOT}/07.igblastn_out/${_label}"
             _a="${OUTPUT_ROOT}/08.preprocessing/${_label}"
             csv_quote "$_label"; printf ','
             csv_quote "$_input"; printf ','
@@ -303,13 +263,8 @@ CLEAN_DIR="${SCIGBLAST_CLEAN_OUTPUT_DIR:-$(stage_root 04.clean_data)}"
 PANDASEQ_DIR="${SCIGBLAST_PANDASEQ_OUTPUT_DIR:-$(stage_root 05.pandaseq)}"
 REPRESENTATIVE_DIR="${SCIGBLAST_IR_REP_OUTPUT:-$(stage_root 06.representative)}"
 PREPROCESSING_DIR="${SCIGBLAST_IR_PREPROCESSING_OUTPUT:-$(stage_root 08.preprocessing)}"
-if [[ "$PIPELINE_VARIANT" == "merged" ]]; then
-    IGBLAST_STAGE_KEY="06.igblast"
-    IGBLAST_OUTPUT_DIR="${SCIGBLAST_IGBLAST_OUTPUT_DIR:-$(stage_root 06.igblastn_out)}"
-else
-    IGBLAST_STAGE_KEY="07.igblast"
-    IGBLAST_OUTPUT_DIR="${SCIGBLAST_IGBLAST_OUTPUT_DIR:-$(stage_root 07.igblastn_out)}"
-fi
+IGBLAST_STAGE_KEY="07.igblast"
+IGBLAST_OUTPUT_DIR="${SCIGBLAST_IGBLAST_OUTPUT_DIR:-$(stage_root 07.igblastn_out)}"
 
 # A direct single-dataset invocation has no parent batch loop.  Create the
 # same manifest contract so downstream preprocessing can always discover the
@@ -550,14 +505,10 @@ pipeline_script_hash() {
     local stage digest payload=""
     digest="$(hash_file "${SCRIPT_DIR}/run_ir_pipeline.sh")" || return 1
     payload+="run_ir_pipeline\t${digest}\n"
-    for stage in 01.match 02.fastp 03.split 04.clean 05.pandaseq 06.representative 07.igblast; do
+    for stage in 01.match 02.fastp 03.split 04.clean 05.pandaseq 06.representative 07.igblast 08.preprocessing; do
         digest="$(stage_script_hash "$stage")" || return 1
         payload+="${stage}\t${digest}\n"
     done
-    if [[ "$PIPELINE_VARIANT" == "representative" && "$RUN_PREPROCESSING" != "0" ]]; then
-        digest="$(stage_script_hash 08.preprocessing)" || return 1
-        payload+="08.preprocessing\t${digest}\n"
-    fi
     if command -v sha256sum >/dev/null 2>&1; then
         printf '%b' "$payload" | sha256sum | awk '{print $1}'
     elif command -v shasum >/dev/null 2>&1; then
@@ -676,7 +627,6 @@ stage_done() {
             ;;
         07.igblast) [[ -s "${IGBLAST_OUTPUT_DIR}/chain_summary.csv" ]] || return 1; [[ -n "$(find "$IGBLAST_OUTPUT_DIR" -type f \( -name 'TCR.tsv' -o -name 'BCR.tsv' -o -name '.NO_RESULTS' \) -print -quit 2>/dev/null)" ]] || return 1 ;;
         08.preprocessing)
-            [[ "$PIPELINE_VARIANT" == "representative" && "$RUN_PREPROCESSING" != "0" ]] || return 1
             [[ -s "${PREPROCESSING_DIR}/Datapoint.csv" && -s "${PREPROCESSING_DIR}/processing_manifest.csv" ]] || return 1
             [[ -s "${PREPROCESSING_DIR}/.preprocessing_state/run.json" ]] || return 1
             grep -q '"status": "DONE"' "${PREPROCESSING_DIR}/.preprocessing_state/run.json" || return 1
@@ -688,11 +638,7 @@ stage_done() {
 final_outputs_ready() {
     [[ -s "${IGBLAST_OUTPUT_DIR}/chain_summary.csv" ]] || return 1
     [[ -n "$(find "${IGBLAST_OUTPUT_DIR}" -type f \( -name 'TCR.tsv' -o -name 'BCR.tsv' -o -name '.NO_RESULTS' \) -print -quit 2>/dev/null)" ]] || return 1
-    if [[ "$PIPELINE_VARIANT" == "representative" && "$RUN_PREPROCESSING" != "0" ]]; then
-        stage_done 08.preprocessing
-    else
-        return 0
-    fi
+    stage_done 08.preprocessing
 }
 
 has_fastp_pair() {
@@ -915,97 +861,72 @@ if ! stage_done "05.pandaseq"; then
     write_stage_marker "05.pandaseq"
 else echo "[IR] reusing completed PANDAseq stage"; fi
 
-if [[ "$PIPELINE_VARIANT" == "merged" ]]; then
-    # Direct mode skips representative selection and sends every PANDAseq
-    # merged FASTA to IgBLAST.  This is useful when UMI-level representatives
-    # are not desired; 07.work_igblastn.sh handles the pandaseq input mode.
-    echo "[IR 6/6] IgBLAST on merged PANDAseq FASTA"
-    if (( PANDASEQ_RERAN )); then
-        rm -f "${STATE_DIR}/.pipeline_stage_06.igblast.DONE"
-        archive_igblast_batches
-    fi
-    if ! stage_done "$IGBLAST_STAGE_KEY"; then
-        rm -f "${STATE_DIR}/.pipeline_stage_06.igblast.DONE"
-        run_monitored_stage "IgBLAST (merged)" "$IGBLAST_REQUIRED_GB" env \
-        SCIGBLAST_IGBLAST_CHAIN_SUMMARY="${MAPPING_SUMMARY}" \
-        bash "${SCRIPT_DIR}/07.work_igblastn.sh" \
-        --data-dir "${PANDASEQ_DIR}" \
-        --input-mode pandaseq \
-        --output-dir "${IGBLAST_OUTPUT_DIR}"
-        write_stage_marker "$IGBLAST_STAGE_KEY"
-    else echo "[IR] reusing completed merged-IgBLAST stage"; fi
-else
-    echo "[IR 6/8] representative sequences"
-    if (( PANDASEQ_RERAN )); then
-        rm -f "${STATE_DIR}/.pipeline_stage_06.representative.DONE" \
-              "${STATE_DIR}/.pipeline_stage_07.igblast.DONE"
-        # IgBLAST batches are derived from the PANDAseq inventory.  Reusing the
-        # old manifest would silently omit newly restored sample directories.
-        archive_igblast_batches
-    fi
-    REPRESENTATIVE_RERAN=0
-    if ! stage_done "06.representative"; then
-        REPRESENTATIVE_RERAN=1
-        # Never leave an older DONE marker able to resurrect stale representative
-        # files if this run fails before publishing a new result.
-        rm -f "${STATE_DIR}/.pipeline_stage_06.representative.DONE"
-        run_monitored_stage "IR representative" "$REPRESENTATIVE_REQUIRED_GB" env \
-        SCIGBLAST_IR_REP_INPUT="${PANDASEQ_DIR}" \
-        SCIGBLAST_IR_REP_OUTPUT="${REPRESENTATIVE_DIR}" \
-        SCIGBLAST_IR_SPLIT_INPUT="${SPLIT_OUTPUT_DIR}" \
-        "${PYTHON_BIN}" "${SCRIPT_DIR}/06.representative.py"
-        write_stage_marker "06.representative"
-    else echo "[IR] reusing completed representative stage"; fi
+echo "[IR 6/8] representative sequences"
+if (( PANDASEQ_RERAN )); then
+    rm -f "${STATE_DIR}/.pipeline_stage_06.representative.DONE" \
+          "${STATE_DIR}/.pipeline_stage_07.igblast.DONE"
+    # IgBLAST batches are derived from the PANDAseq inventory.  Reusing the
+    # old manifest would silently omit newly restored sample directories.
+    archive_igblast_batches
+fi
+REPRESENTATIVE_RERAN=0
+if ! stage_done "06.representative"; then
+    REPRESENTATIVE_RERAN=1
+    # Never leave an older DONE marker able to resurrect stale representative
+    # files if this run fails before publishing a new result.
+    rm -f "${STATE_DIR}/.pipeline_stage_06.representative.DONE"
+    run_monitored_stage "IR representative" "$REPRESENTATIVE_REQUIRED_GB" env \
+    SCIGBLAST_IR_REP_INPUT="${PANDASEQ_DIR}" \
+    SCIGBLAST_IR_REP_OUTPUT="${REPRESENTATIVE_DIR}" \
+    SCIGBLAST_IR_SPLIT_INPUT="${SPLIT_OUTPUT_DIR}" \
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/06.representative.py"
+    write_stage_marker "06.representative"
+else echo "[IR] reusing completed representative stage"; fi
 
-    echo "[IR 7/8] IgBLAST"
-    if [[ -f "${REPRESENTATIVE_DIR}/.layout_migrated" ]]; then
-        # Flat results must not coexist with the new source-scoped sample paths.
-        for old_output in "$IGBLAST_OUTPUT_DIR" "$PREPROCESSING_DIR"; do
-            if [[ -d "$old_output" ]]; then
-                mv -- "$old_output" "${old_output}.legacy_flat.$(date +%Y%m%d%H%M%S).${BASHPID:-$$}"
-            fi
-        done
-        rm -f "${STATE_DIR}/.pipeline_stage_07.igblast.DONE" "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
-        rm -f "${REPRESENTATIVE_DIR}/.layout_migrated"
-    fi
-    if (( REPRESENTATIVE_RERAN )); then
-        rm -f "${STATE_DIR}/.pipeline_stage_07.igblast.DONE"
-        rm -f "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
-        archive_igblast_batches
-    fi
-    IGBLAST_RERAN=0
-    if ! stage_done "$IGBLAST_STAGE_KEY"; then
-        IGBLAST_RERAN=1
-        # Analysis consumes the final TSVs, so any IgBLAST rerun invalidates
-        # its checkpoint even when representative FASTA did not change.
-        rm -f "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
-        run_monitored_stage "IgBLAST" "$IGBLAST_REQUIRED_GB" env \
-        SCIGBLAST_IGBLAST_CHAIN_SUMMARY="${MAPPING_SUMMARY}" \
-        bash "${SCRIPT_DIR}/07.work_igblastn.sh" \
-        --data-dir "${REPRESENTATIVE_DIR}/representative_fasta" \
-        --input-mode representative \
-        --output-dir "${IGBLAST_OUTPUT_DIR}"
-        write_stage_marker "$IGBLAST_STAGE_KEY"
-    else echo "[IR] reusing completed IgBLAST stage"; fi
-
-    if [[ "$RUN_PREPROCESSING" != "0" ]]; then
-        echo "[IR 8/8] preprocessing representative IgBLAST output"
-        if (( IGBLAST_RERAN )) || ! stage_done "08.preprocessing"; then
-            rm -f "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
-            run_monitored_stage "IR preprocessing" "$REPRESENTATIVE_REQUIRED_GB" env \
-            SCIGBLAST_IR_PREPROCESSING_INPUTS_SERIALIZED="${IGBLAST_OUTPUT_DIR}" \
-            SCIGBLAST_IR_PREPROCESSING_INPUT="${IGBLAST_OUTPUT_DIR}" \
-            SCIGBLAST_IR_PREPROCESSING_OUTPUT="${PREPROCESSING_DIR}" \
-            SCIGBLAST_IR_PREPROCESSING_REPRESENTATIVE_ROOT="${REPRESENTATIVE_DIR}" \
-            SCIGBLAST_IR_PREPROCESSING_UMI_SOURCE="auto" \
-            "${PYTHON_BIN}" "${SCRIPT_DIR}/08.preprocessing.py"
-            write_stage_marker "08.preprocessing"
-        else
-            echo "[IR] reusing completed preprocessing stage"
+echo "[IR 7/8] IgBLAST"
+if [[ -f "${REPRESENTATIVE_DIR}/.layout_migrated" ]]; then
+    # Flat results must not coexist with the new source-scoped sample paths.
+    for old_output in "$IGBLAST_OUTPUT_DIR" "$PREPROCESSING_DIR"; do
+        if [[ -d "$old_output" ]]; then
+            mv -- "$old_output" "${old_output}.legacy_flat.$(date +%Y%m%d%H%M%S).${BASHPID:-$$}"
         fi
-    else
-        echo "[IR] representative output preprocessing disabled (SCIGBLAST_IR_RUN_PREPROCESSING=0)"
-    fi
+    done
+    rm -f "${STATE_DIR}/.pipeline_stage_07.igblast.DONE" "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
+    rm -f "${REPRESENTATIVE_DIR}/.layout_migrated"
+fi
+if (( REPRESENTATIVE_RERAN )); then
+    rm -f "${STATE_DIR}/.pipeline_stage_07.igblast.DONE"
+    rm -f "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
+    archive_igblast_batches
+fi
+IGBLAST_RERAN=0
+if ! stage_done "$IGBLAST_STAGE_KEY"; then
+    IGBLAST_RERAN=1
+    # Analysis consumes the final TSVs, so any IgBLAST rerun invalidates
+    # its checkpoint even when representative FASTA did not change.
+    rm -f "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
+    run_monitored_stage "IgBLAST" "$IGBLAST_REQUIRED_GB" env \
+    SCIGBLAST_IGBLAST_CHAIN_SUMMARY="${MAPPING_SUMMARY}" \
+    bash "${SCRIPT_DIR}/07.work_igblastn.sh" \
+    --data-dir "${REPRESENTATIVE_DIR}/representative_fasta" \
+    --input-mode representative \
+    --output-dir "${IGBLAST_OUTPUT_DIR}"
+    write_stage_marker "$IGBLAST_STAGE_KEY"
+else echo "[IR] reusing completed IgBLAST stage"; fi
+
+echo "[IR 8/8] preprocessing representative IgBLAST output"
+if (( IGBLAST_RERAN )) || ! stage_done "08.preprocessing"; then
+    rm -f "${STATE_DIR}/.pipeline_stage_08.preprocessing.DONE"
+    run_monitored_stage "IR preprocessing" "$REPRESENTATIVE_REQUIRED_GB" env \
+    SCIGBLAST_IR_PREPROCESSING_INPUTS_SERIALIZED="${IGBLAST_OUTPUT_DIR}" \
+    SCIGBLAST_IR_PREPROCESSING_INPUT="${IGBLAST_OUTPUT_DIR}" \
+    SCIGBLAST_IR_PREPROCESSING_OUTPUT="${PREPROCESSING_DIR}" \
+    SCIGBLAST_IR_PREPROCESSING_REPRESENTATIVE_ROOT="${REPRESENTATIVE_DIR}" \
+    SCIGBLAST_IR_PREPROCESSING_UMI_SOURCE="auto" \
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/08.preprocessing.py"
+    write_stage_marker "08.preprocessing"
+else
+    echo "[IR] reusing completed preprocessing stage"
 fi
 
 if [[ "$PIPELINE_STATUS" -eq 0 ]]; then

@@ -19,8 +19,8 @@ def main():
     if not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{2,31}', username):
         parser.error('username must be 3–32 ASCII letters/digits/_.-')
     name = (args.name or username).strip()
-    if not 1 <= len(name) <= 60:
-        parser.error('display name must be 1–60 characters')
+    if not 1 <= len(name) <= 60 or not re.fullmatch(r'[A-Za-z][A-Za-z0-9 ._-]*', name):
+        parser.error('display name must start with an English letter; only ASCII letters/digits/spaces/._- are allowed')
     password = getpass.getpass('New password (6–128 characters): ')
     if not 6 <= len(password) <= 128 or password != getpass.getpass('Confirm password: '):
         parser.error('password length invalid or confirmation does not match')

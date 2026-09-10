@@ -370,7 +370,8 @@ def load_metadata(path: Path, sheet: str | None, sample_column: str, barcode_col
                 candidates = [i for i, value in enumerate(normalized) if "barcode" in value and ("候选" in value or "引物" in value or "primer" in value)]
                 barcode_idx = candidates[0] if len(candidates) == 1 else None
             break
-    if header_index is None or sample_idx is None or barcode_idx is None:
+    optional_barcode = NO_BARCODE or os.environ.get("SCIGBLAST_IR_INPUT_MODE") in {"auto", "presplit"}
+    if header_index is None or sample_idx is None or (barcode_idx is None and not optional_barcode):
         raise ValueError(f"Could not resolve sample/barcode columns in {path}")
     headers = rows[header_index]
     dual_idx = resolve_optional_column(headers, dual_column, "dual")
@@ -388,17 +389,21 @@ def load_metadata(path: Path, sheet: str | None, sample_column: str, barcode_col
         if row_note:
             current_note = row_note
         sample_id = display_text(row[sample_idx] if sample_idx < len(row) else "")
-        candidate = display_text(row[barcode_idx] if barcode_idx < len(row) else "")
+        candidate = display_text(row[barcode_idx] if barcode_idx is not None and barcode_idx < len(row) else "")
         if not sample_id or normalize_text(sample_id) == sample_target:
             continue
         if NO_BARCODE:
             barcode_name = ""
             barcode_sequence = ""
         else:
-            barcode_name = normalize_barcode_name(candidate)
-            if barcode_name not in reference:
-                raise ValueError(f"Barcode {candidate!r} ({barcode_name}) absent from reference")
-            barcode_sequence = reference[barcode_name]
+            if not candidate and os.environ.get("SCIGBLAST_IR_INPUT_MODE") in {"auto", "presplit"}:
+                barcode_name = ""
+                barcode_sequence = ""
+            else:
+                barcode_name = normalize_barcode_name(candidate)
+                if barcode_name not in reference:
+                    raise ValueError(f"Barcode {candidate!r} ({barcode_name}) absent from reference")
+                barcode_sequence = reference[barcode_name]
         chain_raw = display_text(row[chain_idx] if chain_idx < len(row) else "")
         chain_value, chain_expanded, igblast_chain = normalize_chain(chain_raw)
         record = MetadataRecord(

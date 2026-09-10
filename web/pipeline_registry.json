@@ -1,12 +1,12 @@
 {
   "ir_split": {
     "label": "IR split",
-    "description": "Bulk IR 数据：支持 raw/presplit 与 representative/merged 两种模式。",
+    "description": "Bulk IR · 自动识别输入、UMI 代表序列、结果整理",
     "accent": "teal",
     "runner": "IR_split/pipeline/run_ir_pipeline.sh",
     "stages": ["01.match", "02.fastp", "03.split", "04.clean", "05.pandaseq", "06.representative", "07.igblast", "08.preprocessing"],
     "stage_labels": {"01.match": "样本匹配", "02.fastp": "质量过滤", "03.split": "Barcode / UMI 拆分", "04.clean": "Header 清理", "05.pandaseq": "序列合并", "06.representative": "代表序列", "07.igblast": "IgBLAST", "08.preprocessing": "结果整理"},
-    "form_fields": ["input_path", "submission_path", "barcode_csv", "output_root", "dataset_label", "ir_input_mode", "ir_variant", "run_preprocessing"],
+    "form_fields": ["input_path", "submission_path", "barcode_csv", "output_root", "dataset_label"],
     "completion": "pipeline_done",
     "env_keys": {
       "input": ["SCIGBLAST_RUN_RAW_INPUT_DIR"],
@@ -19,7 +19,7 @@
       "preprocessing": ["SCIGBLAST_RUN_PREPROCESSING"]
     },
     "requires_barcode": true,
-    "ir_options": true,
+    "ir_options": false,
     "match_summary": ["01.match/{dataset}/sample_barcode_summary.csv", "01.match/{dataset}/sample_manifest.csv"]
   },
   "10x_split": {

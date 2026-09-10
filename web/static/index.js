@@ -86,7 +86,6 @@
   function updatePipelineFields() {
     const info = pipelineInfo[selectedPipeline()] || {};
     $('#barcode-row').classList.toggle('hidden', !info.requires_barcode);
-    $('#ir-options').classList.toggle('hidden', !info.ir_options);
     $('[name="barcode_csv"]').disabled = !info.requires_barcode;
     document.querySelectorAll('.pipeline-card').forEach((card) => {
       const selected = card.dataset.pipeline === selectedPipeline();
@@ -144,7 +143,7 @@
       <td><span class="pipeline-chip ${job.pipeline}"><i></i>${esc(job.pipeline_label)}</span></td>
       <td><span class="stage-name">${esc(job.stage_labels?.[job.current_stage] || job.current_stage || '等待启动')}</span><small class="stage-code">${esc(job.current_stage || '')}</small></td>
       <td><div class="progress-cell"><div class="progress-track"><span style="width:${Math.max(0, Math.min(100, job.progress))}%"></span></div><b>${job.progress}%</b></div></td>
-      <td><span class="operator-name">${esc(job.operator)}</span><small class="time-text">${formatTime(job.started_at || job.created_at)}</small></td>
+      <td><span class="operator-name">${esc(job.operator_display_name||job.operator)}</span><small class="time-text">${formatTime(job.started_at || job.created_at)}</small></td>
       <td><span class="status-badge ${job.status.toLowerCase()}"><i></i>${esc(statusText(job.status))}</span>${job.last_error ? `<small class="error-text" title="${esc(job.last_error)}">${esc(job.last_error)}</small>` : ''}</td>
       <td class="row-actions">${job.status === 'WAITING_REVIEW' ? `<button class="button button-review button-small" data-action="confirm" data-id="${job.id}">审核 Match</button>` : ''}${isActive(job) ? `<button class="button button-danger-ghost button-small" data-action="stop" data-id="${job.id}">停止</button>` : ''}<a class="button button-ghost button-small" href="/jobs/${job.id}">详情</a></td>
     </tr>`).join('');
@@ -206,7 +205,6 @@
     return Submission.api('/api/submissions/import', {path});
   });
   $('[name="submission_path"]').addEventListener('input', () => { resetSubmission(); $('#submission-status').textContent = '路径已变更，可查看 / 编辑新选择的 Submission'; });
-  $('[name="ir_variant"]').addEventListener('change', updatePipelineFields);
   loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); resetForm(); refreshJobs(); }).catch(error => showMessage(error.message, true));
   window.addEventListener('pageshow', event => { if(event.persisted) { resetForm(); closeDrawer(); refreshJobs(); } });
   setInterval(refreshJobs, 5000);
