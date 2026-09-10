@@ -33,7 +33,7 @@ PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
 DEFAULT_OUTPUT_ROOT = Path(
-    os.environ.get("SCIGBLAST_DEFAULT_OUTPUT_ROOT", "/colddata/zqy/SCigblast/results")
+    os.environ.get("SCIGBLAST_DEFAULT_OUTPUT_ROOT", "/colddata/SCigblast/results")
 ).resolve()
 # Compatibility with the original .env: web_output was a shared task root.
 if DEFAULT_OUTPUT_ROOT == Path('/colddata/zqy/SCigblast/results/web_output').resolve():
@@ -172,7 +172,7 @@ def validate_input_path(value: str, label: str) -> Path:
     resolved = path.resolve()
     if not children(resolved):
         raise HTTPException(400, f"{label} is not an existing directory: {resolved}")
-    if not is_under(resolved, configured_roots("SCIGBLAST_ALLOWED_INPUT_ROOTS", "/colddata")):
+    if not is_under(resolved, configured_roots("SCIGBLAST_ALLOWED_INPUT_ROOTS", "/colddata/SCigblast/data")):
         raise HTTPException(400, f"{label} is outside the allowed input roots")
     return resolved
 
@@ -190,7 +190,7 @@ def validate_submission(value: str) -> Path:
             raise HTTPException(400, "submission directory contains no .xlsx files")
     else:
         raise HTTPException(400, f"submission path does not exist: {resolved}")
-    if not is_under(resolved, configured_roots("SCIGBLAST_ALLOWED_SUBMISSION_ROOTS", "/colddata")):
+    if not is_under(resolved, configured_roots("SCIGBLAST_ALLOWED_SUBMISSION_ROOTS", "/colddata/SCigblast/data")):
         raise HTTPException(400, "submission path is outside the allowed roots")
     return resolved
 
@@ -250,7 +250,7 @@ def browse_directory(kind: str, value: str | None) -> dict[str, Any]:
     if kind not in BROWSE_SPECS:
         raise HTTPException(400, "unsupported browse kind")
     env_name, suffixes = BROWSE_SPECS[kind]
-    roots = barcode_roots() if kind == 'barcode' else configured_roots(env_name, "/colddata")
+    roots = barcode_roots() if kind == 'barcode' else configured_roots(env_name, str(DEFAULT_OUTPUT_ROOT) if kind == "output" else "/colddata/SCigblast/data")
     if not roots:
         return {"kind": kind, "path": None, "parent": None, "roots": [], "entries": []}
 
@@ -1093,10 +1093,19 @@ def download_result(job_id: str, kind: str = "results"):
     return FileResponse(path, filename=Path(path).name)
 
 
+def apply_task_policy(request: CreateJob, user: dict) -> None:
+    # New tasks cannot select a shared/server directory. Historical jobs retain
+    # their recorded paths for resume and deletion.
+    if (request.output_root or '').strip():
+        raise HTTPException(400, '输出目录由服务器自动分配，不能自定义')
+    request.output_root = None
+    request.operator = user['display_name']
+
+
 @app.post("/api/jobs")
 def create_job(request: CreateJob) -> dict[str, Any]:
     user = auth.require_user()
-    request.operator = user['display_name']
+    apply_task_policy(request, user)
     check_submission_owner(request.submission_revision)
     if not request.submission_revision:
         source = validate_submission(request.submission_path)
@@ -1199,7 +1208,7 @@ def delete_job(job_id: str, request: dict):
 @app.post("/api/validate")
 def validate_job(request: CreateJob) -> dict[str, Any]:
     """Validate form paths without creating a job or starting a runner."""
-    request.operator = auth.require_user()['display_name']
+    apply_task_policy(request, auth.require_user())
     check_submission_owner(request.submission_revision)
     job, _ = build_job(request)
     return {

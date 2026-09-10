@@ -48,7 +48,7 @@ docker exec -it scigblast-web python /app/manage_users.py reset-password zqy
 - 登录会话有效 12 小时；退出、修改密码、服务器重置密码或停用账户会撤销相应会话。
 - 普通用户仅能查看和操作自己的任务；管理员可以查看和操作全部任务。
 - 任务创建、路径验证的操作者强制使用当前登录姓名，即使直接调用 API 提交其他名字也不会冒用。
-- 新任务默认输出目录为 `默认根目录/姓名_账号短编号/Pipeline类型/YYYYMMDD_HHMMSS/`，时间为北京时间；同秒重名时追加 `_02` 等编号。旧任务续跑仍使用原路径。
+- 新任务输出目录固定由服务器分配为 `默认根目录/姓名_账号短编号/Pipeline类型/YYYYMMDD_HHMMSS/`，时间为北京时间；同秒重名时追加 `_02` 等编号。网页和 API 均不能自定义，旧任务续跑仍使用原路径。
 - 网页和命令行 IR 主流程统一为自动识别 raw/presplit 输入 → representative → IgBLAST → preprocessing，不再提供 merged 或跳过 preprocessing 的选项。
 - IR 自动识别在 fastp 后按物理 FASTQ 对检查前 64 对 header；存在合法且两端一致的 UMI 标签则走 presplit，否则无标签走 raw。实际处理仍检查全部 reads；混合标签、错配或已拆分文件匹配多个样本报错，不猜测。
 - 操作日志记录实际操作人的姓名及用户名，管理员代为操作时不冒记为任务创建者。

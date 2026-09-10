@@ -18,11 +18,11 @@ services:
     environment:
       SCIGBLAST_PIPELINE_ROOT: /opt/scigblast
       SCIGBLAST_STATE_DIR: /var/lib/scigblast-web
-      SCIGBLAST_DEFAULT_OUTPUT_ROOT: ${SCIGBLAST_DEFAULT_OUTPUT_ROOT:-/colddata/zqy/SCigblast/results}
-      SCIGBLAST_ALLOWED_INPUT_ROOTS: ${SCIGBLAST_ALLOWED_INPUT_ROOTS:-/colddata}
-      SCIGBLAST_ALLOWED_SUBMISSION_ROOTS: ${SCIGBLAST_ALLOWED_SUBMISSION_ROOTS:-/colddata}
+      SCIGBLAST_DEFAULT_OUTPUT_ROOT: ${SCIGBLAST_DEFAULT_OUTPUT_ROOT:-/colddata/SCigblast/results}
+      SCIGBLAST_ALLOWED_INPUT_ROOTS: ${SCIGBLAST_ALLOWED_INPUT_ROOTS:-/colddata/SCigblast/data}
+      SCIGBLAST_ALLOWED_SUBMISSION_ROOTS: ${SCIGBLAST_ALLOWED_SUBMISSION_ROOTS:-/colddata/SCigblast/data}
       SCIGBLAST_ALLOWED_BARCODE_ROOTS: ${SCIGBLAST_ALLOWED_BARCODE_ROOTS:-/colddata}
-      SCIGBLAST_ALLOWED_OUTPUT_ROOTS: ${SCIGBLAST_ALLOWED_OUTPUT_ROOTS:-/colddata/zqy/SCigblast/results}
+      SCIGBLAST_ALLOWED_OUTPUT_ROOTS: ${SCIGBLAST_ALLOWED_OUTPUT_ROOTS:-/colddata/SCigblast/results:/colddata/zqy/SCigblast/results}
       SCIGBLAST_MAX_ACTIVE_JOBS: ${SCIGBLAST_MAX_ACTIVE_JOBS:-2}
       SCIGBLAST_COOKIE_SECURE: ${SCIGBLAST_COOKIE_SECURE:-0}
       SCIGBLAST_ADMIN_USERNAME: ${SCIGBLAST_ADMIN_USERNAME:-}
@@ -31,6 +31,8 @@ services:
     volumes:
       - ${SCIGBLAST_HOST_COLD_DATA:-/colddata}:/colddata:ro
       - /data/scAnalyis/Scigblast/igblast:/data/scAnalyis/Scigblast/igblast:ro
-      - ${SCIGBLAST_HOST_RESULTS_ROOT:-/colddata/zqy/SCigblast/results}:/colddata/zqy/SCigblast/results:rw
+      - ${SCIGBLAST_HOST_RESULTS_ROOT:-/colddata/SCigblast/results}:/colddata/SCigblast/results:rw
+      # Compatibility mount for historical job paths.
+      - ${SCIGBLAST_HOST_RESULTS_ROOT:-/colddata/SCigblast/results}:/colddata/zqy/SCigblast/results:rw
       - ./runtime:/var/lib/scigblast-web
     mem_limit: 300g

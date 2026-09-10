@@ -150,3 +150,9 @@ docker compose up -d --no-build
 输出文件页提供完整压缩包下载；归档后的任务不能直接续跑或重新 Match，可下载解压查看。手动检查：`docker exec scigblast-web python /app/archive_results.py --dry-run`。计划：`crontab -l`；最近一次日志：`~/.local/state/scigblast/archive-results.log`。安装脚本支持 UTC 和 UTC+8 主机，重复部署更新同一条 cron。旧版 Web 未支持归档状态时计划暂不执行清理，部署新版后自动启用。
 
 当前服务器目录：代码 `/colddata/SCigblast/code`，输入 `/colddata/SCigblast/data`，结果 `/colddata/SCigblast/results`。服务器 `.env` 的 `SCIGBLAST_ALLOWED_INPUT_ROOTS` 固定为上述 data 目录，`SCIGBLAST_HOST_RESULTS_ROOT` 指向上述 results 目录。为兼容已有任务，容器内仍映射为历史 `/colddata/zqy/SCigblast/results`；这不会在宿主机复制一份结果。
+
+### 固定数据与结果目录
+
+新部署的输入和 Submission 浏览范围均为 `/colddata/SCigblast/data`；测试数据放在 `data/web_test/20260909`，配套 Excel 放在其 `submission` 子目录。新任务输出由服务器分配到 `/colddata/SCigblast/results/姓名_短编号/Pipeline类型/北京时间/`，网页不提供输出路径选择，API 也拒绝自定义输出路径。已有部署请同步设置 `.env` 的 `SCIGBLAST_ALLOWED_INPUT_ROOTS` 和 `SCIGBLAST_ALLOWED_SUBMISSION_ROOTS`。
+
+迁移部署保留 `/colddata/zqy/SCigblast/results` 作为同一 results 目录的容器兼容挂载；已有 `.env` 的输出根路径可继续使用该别名，以保持历史任务及归档的路径一致。

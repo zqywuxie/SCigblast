@@ -6,7 +6,7 @@
     "runner": "IR_split/pipeline/run_ir_pipeline.sh",
     "stages": ["01.match", "02.fastp", "03.split", "04.clean", "05.pandaseq", "06.representative", "07.igblast", "08.preprocessing"],
     "stage_labels": {"01.match": "样本匹配", "02.fastp": "质量过滤", "03.split": "Barcode / UMI 拆分", "04.clean": "Header 清理", "05.pandaseq": "序列合并", "06.representative": "代表序列", "07.igblast": "IgBLAST", "08.preprocessing": "结果整理"},
-    "form_fields": ["input_path", "submission_path", "barcode_csv", "output_root", "dataset_label"],
+    "form_fields": ["input_path", "submission_path", "barcode_csv", "dataset_label"],
     "completion": "pipeline_done",
     "env_keys": {
       "input": ["SCIGBLAST_RUN_RAW_INPUT_DIR"],
@@ -29,7 +29,7 @@
     "runner": "10X_split/pipeline/run_10x_pipeline.sh",
     "stages": ["01.match", "02.fastp", "03.prefilter", "04.clean", "05.pandaseq", "06.split", "07.igblast", "08.cluster"],
     "stage_labels": {"01.match": "样本匹配", "02.fastp": "质量过滤", "03.prefilter": "R1 / R2 预筛选", "04.clean": "Header 清理", "05.pandaseq": "序列合并", "06.split": "Barcode / UMI 代表序列", "07.igblast": "IgBLAST", "08.cluster": "链聚类"},
-    "form_fields": ["input_path", "submission_path", "barcode_csv", "output_root", "dataset_label"],
+    "form_fields": ["input_path", "submission_path", "barcode_csv", "dataset_label"],
     "completion": "pipeline_done",
     "env_keys": {
       "input": ["SCIGBLAST_RUN_RAW_INPUT_DIR"],
@@ -49,7 +49,7 @@
     "runner": "Igblast_base/pipeline/run_igblast_base.sh",
     "stages": ["01.match", "02.fastp", "03.clean", "04.pandaseq", "05.igblast"],
     "stage_labels": {"01.match": "样本匹配", "02.fastp": "质量过滤", "03.clean": "Header 清理", "04.pandaseq": "序列合并", "05.igblast": "IgBLAST"},
-    "form_fields": ["input_path", "submission_path", "output_root", "dataset_label"],
+    "form_fields": ["input_path", "submission_path", "dataset_label"],
     "completion": "last_stage",
     "env_keys": {
       "input": ["SCIGBLAST_RUN_RAW_INPUT_DIR"],
@@ -68,7 +68,7 @@
     "runner": "PigIgblast/pipeline/run_pig_pipeline.sh",
     "stages": ["01.match", "02.fastp", "03.clean", "04.pandaseq", "05.igblast"],
     "stage_labels": {"01.match": "样本匹配", "02.fastp": "质量过滤", "03.clean": "Header 清理", "04.pandaseq": "序列合并", "05.igblast": "IgBLAST"},
-    "form_fields": ["input_path", "submission_path", "output_root", "dataset_label"],
+    "form_fields": ["input_path", "submission_path", "dataset_label"],
     "completion": "last_stage",
     "env_keys": {
       "input": ["SCIGBLAST_RUN_RAW_INPUT_DIR"],
