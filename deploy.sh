@@ -93,6 +93,10 @@ for attempt in {1..30}; do
   if "${compose[@]}" exec -T "$SERVICE" python -c 'import json,urllib.request; s=json.load(urllib.request.urlopen("http://127.0.0.1:8000/health",timeout=3)); assert s.get("status")=="ok"' >/dev/null 2>&1; then
     binding="$("${compose[@]}" port "$SERVICE" 8000)"
     port="${binding##*:}"
+    if ! bash "${WEB_DIR}/install_archive_cron.sh"; then
+      log "归档定时任务安装失败，请检查 crontab 和宿主机时区后运行 web/install_archive_cron.sh。"
+      exit 1
+    fi
     log "服务已就绪；浏览器访问：http://服务器IP:${port}"
     log "如果外部无法访问，请检查服务器防火墙和端口映射。"
     exit 0

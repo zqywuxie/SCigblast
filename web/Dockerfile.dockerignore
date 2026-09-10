@@ -27,3 +27,5 @@
 !PigIgblast/pipeline/**/*.sh
 !PigIgblast/pipeline/00.pipeline_config.env
 !reference/8bp_barcodes.csv
+
+!web/archive_results.py

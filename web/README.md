@@ -142,3 +142,11 @@ docker compose up -d --no-build
 仅有镜像、没有 Git 仓库的服务器请直接使用上面的 Docker Compose 命令。新版 `deploy.sh` 要求 Git 克隆目录，默认先拉取再从源码重建；`--no-build` 只适用于已有 Git 仓库且明确使用现有镜像的情况。数据/数据库挂载仍需配置正确；网页仍可选择自定义 Barcode CSV。
 
 镜像打包不是代码加密：普通网页用户看不到源码，但有 Docker/服务器管理权限的人仍可从镜像提取脚本。
+
+## Results 自动归档
+
+部署时安装宿主机 cron，每天北京时间 03:00 检查 Web 任务。仅归档成功完成满 14 天的独立 results 子目录；运行、待审核、失败、停止任务及共享目录不处理。生成目录内的 `results.tar.gz`，逐文件校验后清理已打包文件，保留小于等于 10 MB 的统计表、日志和状态文件供网页查看。无法节省空间时保留原文件。已有 gzip 数据通常压缩收益有限。
+
+输出文件页提供完整压缩包下载；归档后的任务不能直接续跑或重新 Match，可下载解压查看。手动检查：`docker exec scigblast-web python /app/archive_results.py --dry-run`。计划：`crontab -l`；最近一次日志：`~/.local/state/scigblast/archive-results.log`。安装脚本支持 UTC 和 UTC+8 主机，重复部署更新同一条 cron。旧版 Web 未支持归档状态时计划暂不执行清理，部署新版后自动启用。
+
+当前服务器目录：代码 `/colddata/SCigblast/code`，输入 `/colddata/SCigblast/data`，结果 `/colddata/SCigblast/results`。服务器 `.env` 的 `SCIGBLAST_ALLOWED_INPUT_ROOTS` 固定为上述 data 目录，`SCIGBLAST_HOST_RESULTS_ROOT` 指向上述 results 目录。为兼容已有任务，容器内仍映射为历史 `/colddata/zqy/SCigblast/results`；这不会在宿主机复制一份结果。

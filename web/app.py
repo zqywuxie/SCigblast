@@ -506,7 +506,7 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
     if '01.match' not in done and summary_files(row) and (row['status'] in {'WAITING_REVIEW', 'SUCCEEDED'} or row['current_stage'] not in {'', None, '01.match'}):
         done.insert(0, '01.match')
     current = row["current_stage"] or (done[-1] if done else "")
-    progress = 100 if row["status"] == "SUCCEEDED" else int(len(done) * 100 / len(config["stages"]))
+    progress = 100 if row["status"] in {"SUCCEEDED", "ARCHIVING", "ARCHIVED"} else int(len(done) * 100 / len(config["stages"]))
     return {
         "id": row["id"],
         "operator": row["operator"],
@@ -1017,7 +1017,7 @@ def download_submission(revision: str, filename: str, original: bool = False):
 def rematch(job_id: str, request: dict):
     with PROCESS_LOCK:
         row = get_job_row(job_id)
-        if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING"}:
+        if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING", "ARCHIVING", "ARCHIVED"}:
             raise HTTPException(409, "Wait for this attempt to finish")
         token = request.get("revision", "")
         check_submission_owner(token)
@@ -1082,7 +1082,12 @@ def stage_summary(job_id: str, kind: str, offset: int = 0, limit: int = 50, quer
 @app.get("/api/jobs/{job_id}/download")
 def download_result(job_id: str, kind: str = "results"):
     row = get_job_row(job_id)
-    path = stage_summary_file(row, kind)
+    if kind == 'archive':
+        path = Path(row['output_root']) / 'results.tar.gz'
+        if row['status'] != 'ARCHIVED' or not path.is_file() or path.is_symlink():
+            raise HTTPException(404, 'Archive not available')
+    else:
+        path = stage_summary_file(row, kind)
     if path is None or not is_under(Path(path), [Path(row["output_root"])]):
         raise HTTPException(404, "Summary not available")
     return FileResponse(path, filename=Path(path).name)
@@ -1135,7 +1140,7 @@ def delete_job(job_id: str, request: dict):
         row = get_job_row(job_id)
         if request.get('output_root') != row['output_root'] or request.get('confirm') != job_id:
             raise HTTPException(400, '请确认任务和将删除的输出目录')
-        if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING'} or job_id in PROCESSES:
+        if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING'} or job_id in PROCESSES:
             raise HTTPException(409, '请先停止任务，等待进程退出后再删除')
         # A restarted server may have marked a still-live process INTERRUPTED.
         if row['pgid'] and hasattr(os, 'killpg'):
@@ -1253,7 +1258,7 @@ def list_jobs(
             "SELECT COUNT(*) AS total, "
             "SUM(CASE WHEN status IN ('QUEUED','RUNNING','MATCHING','STOPPING') THEN 1 ELSE 0 END) AS active, "
             "SUM(CASE WHEN status = 'WAITING_REVIEW' THEN 1 ELSE 0 END) AS review, "
-            "SUM(CASE WHEN status IN ('SUCCEEDED','FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER') THEN 1 ELSE 0 END) AS done "
+            "SUM(CASE WHEN status IN ('SUCCEEDED','ARCHIVED','FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER') THEN 1 ELSE 0 END) AS done "
             "FROM jobs" + owner_where, owner_params
         ).fetchone()
     counts = {key: int(stats[key] or 0) for key in ("total", "active", "review", "done")}
@@ -1470,6 +1475,7 @@ def artifacts(job_id: str) -> dict[str, Any]:
         candidates.append(final_summary)
     return {
         "output_root": str(output),
+        "archive_available": row["status"] == "ARCHIVED" and (output / "results.tar.gz").is_file(),
         "reports": stage_reports(row),
         "files": [{"path": str(path), "exists": path.exists(), "is_dir": path.is_dir(), "size": path.stat().st_size if path.is_file() else None} for path in candidates],
     }
