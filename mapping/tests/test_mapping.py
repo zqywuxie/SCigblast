@@ -84,7 +84,7 @@ class MappingTests(unittest.TestCase):
         with patch.object(runner.subprocess, 'run', side_effect=self.fake_igblast), redirect_stdout(io.StringIO()):
             self.assertEqual(runner.run(self.input, self.output, 'batch', ['IGH'], self.config, ['one/A']), 0)
         self.assertEqual(len(self.calls), 1)
-        self.assertTrue((self.output/'03.umi_count/batch/one/A__IGH.raw.tsv').exists())
+        self.assertTrue((self.output/'03.umi_count/batch/one/A__IGH.tsv').exists())
         self.assertFalse((self.output/'01.fasta/batch/two/A__IGH.fasta').exists())
 
     def test_bad_csv_and_zero_sequence(self):
@@ -118,9 +118,18 @@ class MappingTests(unittest.TestCase):
             rows = list(csv.DictReader(handle))
         self.assertEqual((rows[0]['mapped_rows'],rows[0]['productive_rows'],rows[0]['output_rows']), ('2','2','1'))
         self.assertEqual(rows[0]['mapping_percent'], '66.67')
-        with (self.output/'03.umi_count/batch/A__IGH.raw.tsv').open() as handle:
+        with (self.output/'03.umi_count/batch/A__IGH.tsv').open() as handle:
             data = list(csv.DictReader(handle, delimiter='\t'))
-        self.assertEqual([r['umi_count'] for r in data], ['11','002','3'])
+        self.assertEqual([r['umi_count'] for r in data], ['11'])
+        with (self.output/'02.igblastn_out/batch/A__IGH.tsv').open() as handle:
+            airr = list(csv.DictReader(handle, delimiter='\t'))
+        self.assertEqual([r['sequence_id'] for r in airr], [r['sequence_id'] for r in data])
+        self.assertNotIn('umi_count', airr[0])
+        for stage in ('02.igblastn_out', '03.umi_count'):
+            folder = self.output/stage/'batch'
+            self.assertEqual(sorted(p.relative_to(folder).as_posix() for p in folder.rglob('*.tsv')),
+                             ['A__IGH.tsv', 'nested/A__IGH.tsv'])
+            self.assertFalse(list(folder.rglob('*.tmp')))
         self.assertEqual(data[0]['junction'], 'NA')
         self.assertTrue((self.output/'.pipeline_state/batch/.pipeline.DONE').exists())
         self.assertFalse((self.output/'01.fasta/batch/unused__TRB.fasta').exists())

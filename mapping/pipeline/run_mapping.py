@@ -185,33 +185,33 @@ def run(input_dir: Path, output: Path, dataset: str, chains: list[str], config=N
         row = {**item, 'species': 'human', 'status': 'ERROR', 'error': ''}
         rel = Path(item['source_file'])
         fasta = fasta_root / rel.with_suffix('.fasta')
-        raw = airr_root / rel.with_suffix('.raw.tsv')
-        filtered = airr_root / rel.with_suffix('.filtered.tsv')
+        filtered = airr_root / rel.with_suffix('.tsv')
+        temp = filtered.with_suffix('.igblast.tmp')
         marker = state / 'files' / rel.with_suffix('.igblast.json')
-        raw.parent.mkdir(parents=True, exist_ok=True)
+        filtered.parent.mkdir(parents=True, exist_ok=True)
         try:
             if not binary:
                 raise ValueError('igblastn 不可用')
             db_args, db_files = database_args(Path(config['SCIGBLAST_IGBLAST_DB_DIR']), item['chain'])
             signature = [metadata(fasta), metadata(binary), metadata(__file__), db_args, threads, [metadata(p) for p in db_files]]
-            result = cached(marker, signature, [raw, filtered])
+            result = cached(marker, signature, [filtered])
             marker.unlink(missing_ok=True)
             if result is None:
-                temp = raw.with_suffix('.tmp')
                 temp.unlink(missing_ok=True)
                 args = [binary, '-query', str(fasta), *db_args, '-num_threads', str(threads), '-outfmt', '19', '-out', str(temp)]
-                with raw.with_suffix('.log').open('w', encoding='utf-8') as log:
+                with filtered.with_suffix('.log').open('w', encoding='utf-8') as log:
                     rc = subprocess.run(args, stdout=log, stderr=subprocess.STDOUT).returncode
                 if rc or not temp.is_file():
                     temp.unlink(missing_ok=True)
                     raise ValueError(f'igblast_failed exit={rc}')
-                os.replace(temp, raw)
-                result = filter_airr(raw, filtered)
+                result = filter_airr(temp, filtered)
             n = item['input_sequences']
             row.update(result, status='OK', mapping_percent=f"{result['mapped_rows']*100/n:.2f}", retained_percent=f"{result['output_rows']*100/n:.2f}")
-            save(marker, signature, [raw, filtered], result)
+            save(marker, signature, [filtered], result)
         except (OSError, ValueError) as exc:
             row['error'] = str(exc)
+        finally:
+            temp.unlink(missing_ok=True)
         return row
 
     usable = [r for r in conversion if r['status'] == 'OK']
@@ -227,23 +227,22 @@ def run(input_dir: Path, output: Path, dataset: str, chains: list[str], config=N
         if item['status'] != 'OK':
             continue
         rel = Path(item['source_file'])
-        for kind in ('raw', 'filtered'):
-            source = airr_root / rel.with_suffix(f'.{kind}.tsv')
-            destination = umi_root / rel.with_suffix(f'.{kind}.tsv')
-            marker = state / 'files' / rel.with_suffix(f'.{kind}.umi.json')
-            row = {**{key: item[key] for key in identity}, 'kind': kind, 'status': 'ERROR', 'error': ''}
-            try:
-                signature = [metadata(source), metadata(Path(__file__).with_name('umi_count.py'))]
-                result = cached(marker, signature, [destination])
-                marker.unlink(missing_ok=True)
-                if result is None:
-                    result = organize(source, destination)
-                save(marker, signature, [destination], result)
-                row.update(result, status='OK')
-            except (OSError, ValueError, csv.Error) as exc:
-                row['error'] = str(exc)
-            umi.append(row)
-    write_table(umi_root / 'umi_count_summary.csv', umi, identity + ['kind', 'id_column', 'input_rows', 'output_rows', 'status', 'error'])
+        source = airr_root / rel.with_suffix('.tsv')
+        destination = umi_root / rel.with_suffix('.tsv')
+        marker = state / 'files' / rel.with_suffix('.umi.json')
+        row = {**{key: item[key] for key in identity}, 'status': 'ERROR', 'error': ''}
+        try:
+            signature = [metadata(source), metadata(Path(__file__).with_name('umi_count.py'))]
+            result = cached(marker, signature, [destination])
+            marker.unlink(missing_ok=True)
+            if result is None:
+                result = organize(source, destination)
+            save(marker, signature, [destination], result)
+            row.update(result, status='OK')
+        except (OSError, ValueError, csv.Error) as exc:
+            row['error'] = str(exc)
+        umi.append(row)
+    write_table(umi_root / 'umi_count_summary.csv', umi, identity + ['id_column', 'input_rows', 'output_rows', 'status', 'error'])
     done('03.umi_count', umi)
     failed = sum(r['status'] == 'ERROR' for r in [*conversion, *results, *umi])
     if not failed and all((state / f'.pipeline_stage_{stage}.DONE').is_file() for stage in STAGES):

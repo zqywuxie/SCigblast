@@ -10,7 +10,7 @@
 
 IgBLAST 使用 human 各链 V/J 数据库、存在时的 D/C 数据库及 `optional_file/human_gl.aux`，输出 AIRR。raw 结果完整保留；filtered 只保留有效 v_call 且 productive 为 T/TRUE 的行。mapping_percent 分母是 FASTA 记录数，retained_percent 是该交集的比例。
 
-最后一步使用 `umi_count.ipynb` 提取计数的逻辑，已经整理为 `pipeline/umi_count.py`：从 AIRR `sequence_id` 末尾提取原 copy，新增单数 `umi_count` 列。没有 sequence_id 时支持历史 barcode 列。其他列及行顺序不变，raw/filtered 分别另存；合法零行 filtered 仍保留表头。
+最后一步使用 `umi_count.ipynb` 提取计数的逻辑，已经整理为 `pipeline/umi_count.py`：从 AIRR `sequence_id` 末尾提取原 copy，新增单数 `umi_count` 列。没有 sequence_id 时支持历史 barcode 列。仅处理筛选后的 AIRR，其他列及行顺序不变；合法零行结果仍保留表头。
 
 ## Linux 命令行
 
@@ -30,8 +30,8 @@ CLI 可附加 `--samples sampleA subdir/sampleB` 只处理指定样本键；省�
 ## 输出与续跑
 
 - `01.fasta/<dataset>/`：FASTA、`conversion_summary.csv`。
-- `02.igblastn_out/<dataset>/`：每个源文件的 `.raw.tsv`、`.filtered.tsv`、`.raw.log` 和 `chain_summary.csv`。
-- `03.umi_count/<dataset>/`：含 umi_count 的 raw/filtered TSV、`umi_count_summary.csv`。
+- `02.igblastn_out/<dataset>/`：每个源文件筛选后的 `<样本>__<链>.tsv`、`.log` 和 `chain_summary.csv`。
+- `03.umi_count/<dataset>/`：含 umi_count 的筛选后 `<样本>__<链>.tsv`、`umi_count_summary.csv`。
 - `logs/<dataset>/pipeline.log` 与 `.pipeline_state/<dataset>/`：日志、阶段及逐文件完成记录。
 
 网页“输出文件”可查看三个汇总报告，并选择 FASTA/AIRR/UMI 文件下载或预览表格。任一所选文件失败，整条任务标为失败，成功产物保留。用相同参数重新运行或网页“断点续跑”，只重做输入、配置或产物变化的文件；仅 UMI 整理失败不会重跑已完成 IgBLAST。网页续跑保留原链选择，改链需新建任务。

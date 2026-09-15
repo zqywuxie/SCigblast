@@ -798,28 +798,23 @@ def mapping_files(row):
     """Expose only outputs authorized by this attempt's successful source summaries."""
     root, dataset = Path(row['output_root']), row['dataset']
     entries = []
-    specs = [('01.fasta', 'conversion_summary.csv', ['fasta']),
-             ('02.igblastn_out', 'chain_summary.csv', ['raw.tsv', 'filtered.tsv']),
-             ('03.umi_count', 'umi_count_summary.csv', None)]
-    for stage, name, suffixes in specs:
+    specs = [("03.umi_count", "umi_count_summary.csv"),
+             ("02.igblastn_out", "chain_summary.csv")]
+    for stage, name in specs:
         summary = root / stage / dataset / name
         if not summary.is_file() or not is_under(summary, [root]):
             continue
-        with summary.open(encoding='utf-8-sig', newline='') as handle:
+        with summary.open(encoding="utf-8-sig", newline="") as handle:
             for record in csv.DictReader(handle):
-                if record.get('status') != 'OK' or not record.get('source_file'):
+                if record.get("status") != "OK" or not record.get("source_file"):
                     continue
-                kinds = suffixes if suffixes is not None else [record.get('kind', '') + '.tsv']
-                for suffix in kinds:
-                    if suffix not in {'fasta', 'raw.tsv', 'filtered.tsv'}:
-                        continue
-                    path = root / stage / dataset / Path(record['source_file']).with_suffix('.' + suffix)
-                    if not path.is_file() or not is_under(path, [root / stage / dataset]):
-                        continue
-                    relative = path.relative_to(root).as_posix()
-                    kind = 'mapping:' + relative
-                    entries.append({'kind': kind, 'path': str(path), 'label': relative,
-                                    'preview': suffix.endswith('.tsv')})
+                path = root / stage / dataset / Path(record["source_file"]).with_suffix(".tsv")
+                if not path.is_file() or not is_under(path, [root / stage / dataset]):
+                    continue
+                relative = path.relative_to(root).as_posix()
+                entries.append({"kind": "mapping:" + relative, "path": str(path),
+                                "stage": stage, "label": Path(record["source_file"]).with_suffix("").as_posix(),
+                                "preview": True})
     return entries
 
 

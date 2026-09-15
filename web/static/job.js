@@ -109,12 +109,18 @@
     $('#artifacts-list').innerHTML=`${data.archive_available?`<p>结果已压缩归档。<a class="button button-ghost" href="/api/jobs/${id}/download?kind=archive">下载完整压缩包</a></p>`:''}<div class="report-list" aria-label="阶段报告">${(data.reports||[]).map(r=>`<section class="report-item ${r.exists?'':'pending'}"><button class="report-open" data-summary="${esc(r.kind)}" ${r.exists?'':'disabled'} aria-pressed="false"><span>${esc(r.label)}</span><small>${r.exists?'查看统计':'尚未生成'}</small></button>${r.exists?`<a class="report-download" href="/api/jobs/${id}/download?kind=${encodeURIComponent(r.kind)}" aria-label="下载 ${esc(r.label)}">下载</a>`:''}</section>`).join('')}</div><section id="stage-summary-panel" class="hidden"><div class="tab-toolbar"><h3 id="stage-summary-title"></h3><button id="summary-refresh" class="button button-ghost button-small">刷新统计</button></div><p id="stage-summary-description" class="muted"></p><div class="summary-filter"><input id="summary-query" placeholder="搜索样本 / 状态" aria-label="搜索阶段统计"><label>每页 <select id="summary-limit" aria-label="每页记录数"><option value="5" selected>5 条</option><option value="10">10 条</option><option value="20">20 条</option><option value="50">50 条</option></select></label><details class="column-picker"><summary>选择字段</summary><div class="column-picker-menu"><input id="column-search" type="search" placeholder="搜索字段" aria-label="搜索字段"><button id="columns-default" class="button button-ghost button-small">显示全部字段</button><div id="column-options"></div></div></details></div><p id="stage-summary-info" class="muted"></p><div class="table-wrap summary-table"><table><thead id="stage-summary-head"></thead><tbody id="stage-summary-body"></tbody></table></div><dialog id="record-detail" class="record-detail"><div class="tab-toolbar"><h3>记录详情</h3><button id="record-close" class="button button-ghost">关闭</button></div><dl id="record-fields"></dl></dialog><div class="pagination"><button id="summary-prev" class="button button-ghost">上一页</button><button id="summary-next" class="button button-ghost">下一页</button></div></section>`;
     const reports=data.reports||[];
     if(data.mapping_files?.length) {
-      $('#artifacts-list').insertAdjacentHTML('afterbegin', '<label class="field"><span>Mapping 序列结果</span><select id="mapping-file"><option value="">选择文件（FASTA / AIRR / UMI count）</option></select></label><div id="mapping-file-actions" class="tab-toolbar"></div>');
-      $('#mapping-file').innerHTML += data.mapping_files.map(f=>`<option value="${esc(f.kind)}">${esc(f.label)}</option>`).join('');
+      $('#artifacts-list').insertAdjacentHTML('afterbegin', '<label class="field"><span>各样本 UMI count 结果</span><select id="mapping-file"><option value="">选择样本结果</option></select></label><div id="mapping-file-actions" class="tab-toolbar"></div>');
+      $('#mapping-file').innerHTML += [['03.umi_count','UMI count 最终结果'],['02.igblastn_out','IgBLAST 中间结果']].map(([stage,label])=>{
+        const files=data.mapping_files.filter(f=>f.stage===stage);
+        return files.length?`<optgroup label="${label}">${files.map(f=>`<option value="${esc(f.kind)}">${esc(f.label)}</option>`).join('')}</optgroup>`:'';
+      }).join('');
       $('#mapping-file').onchange=()=>{
         const file=data.mapping_files.find(f=>f.kind===$('#mapping-file').value);
         $('#mapping-file-actions').innerHTML=file?`<a class="button button-ghost" href="/api/jobs/${id}/download?kind=${encodeURIComponent(file.kind)}">下载文件</a>${file.preview?'<button id="mapping-preview" class="button button-ghost">预览表格</button>':''}`:'';
-        if(file?.preview)$('#mapping-preview').onclick=()=>{summaryKind=file.kind;summaryPage=0;$('#stage-summary-title').textContent=file.label;$('#stage-summary-description').textContent='保留源文件记录；03.umi_count 结果包含原 CSV copy。';$('#stage-summary-panel').classList.remove('hidden');loadStageSummary().catch(fail);};
+        if(file?.preview){
+          $('#mapping-preview').onclick=()=>{summaryKind=file.kind;summaryPage=0;$('#stage-summary-title').textContent=file.label;$('#stage-summary-description').textContent=file.stage==='03.umi_count'?'UMI count 最终结果：umi_count 为原 CSV 的 copy。':'IgBLAST 中间结果，尚未添加 umi_count。';$('#stage-summary-panel').classList.remove('hidden');originalChoose(null);loadStageSummary().catch(fail);};
+          $('#mapping-preview').click();
+        }
       };
     }
     const originalChoose = kind => document.querySelectorAll('[data-summary]').forEach(b=>{
@@ -133,7 +139,9 @@
     $('#stage-summary-body').onclick=e=>{const b=e.target.closest('[data-record]');if(!b)return;const row=summaryData.rows[Number(b.dataset.record)];$('#record-fields').innerHTML=summaryData.columns.map(c=>`<dt>${esc(columnLabels[c]||c)}${columnLabels[c]?`<small>${esc(c)}</small>`:''}</dt><dd>${esc(row[c]||'—')}</dd>`).join('');$('#record-detail').showModal();};
     $('#summary-prev').onclick=()=>{summaryPage--;loadStageSummary().catch(fail);};$('#summary-next').onclick=()=>{summaryPage++;loadStageSummary().catch(fail);};
     const preferred=[summaryKind,'split','prefilter','pandaseq','fastp','results'].find(k=>reports.some(r=>r.kind===k&&r.exists));
-    if(preferred){originalChoose(preferred);choose(preferred);}
+    const selectedFile=data.mapping_files?.find(f=>f.kind===summaryKind)||data.mapping_files?.find(f=>f.stage==='03.umi_count');
+    if(selectedFile){$('#mapping-file').value=selectedFile.kind;$('#mapping-file').onchange();}
+    else if(preferred){originalChoose(preferred);choose(preferred);}
   }
   async function loadStageSummary(){
     const token=++summaryRequest;

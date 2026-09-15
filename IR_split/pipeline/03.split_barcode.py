@@ -1358,7 +1358,8 @@ def _presplit_paths(pair: FastqPair, output_dir: Path, input_dir: Path) -> tuple
         pair_dir = pair_dir / base
     elif pair_dir.parent.name == base:
         pair_dir = pair_dir.parent
-    out_dir = pair_dir / (pair.output_prefix or output_stem(pair.sample.sample_id))
+    sample_dir = pair.output_prefix or output_stem(pair.sample.sample_id)
+    out_dir = pair_dir if pair_dir.name == sample_dir else pair_dir / sample_dir
     return out_dir, out_dir / f"{base}{CANONICAL_R1_SUFFIX}", out_dir / f"{base}{CANONICAL_R2_SUFFIX}"
 
 
