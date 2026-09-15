@@ -5,12 +5,14 @@
   const statusLabels={QUEUED:'排队中',RUNNING:'运行中',MATCHING:'匹配中',WAITING_REVIEW:'待审核',SUCCEEDED:'已完成',ARCHIVING:'归档中',ARCHIVED:'已归档',FAILED:'失败',STOPPED:'已停止',STOPPING:'停止中',INTERRUPTED:'已中断',COMPLETED_WITHOUT_MARKER:'需检查'};
   const actionLabels = {create:'创建任务', 'confirm-match':'确认 Match 并继续', review:'审核标注', rematch:'更新资料并重新匹配', resume:'断点续跑', stop:'停止任务'};
   function actionDetail(a) {
+    if(a.action==='create' && job?.pipeline==='mapping') return '按所选链执行 FASTA、IgBLAST 和 UMI count 整理。';
     if(a.action==='confirm-match') { const attempt = String(a.details||'').split(':')[0]; return /^\d+$/.test(attempt) ? `已确认第 ${attempt} 次匹配结果，仅匹配成功的记录进入下游。` : '已确认匹配结果。'; }
     if(a.action==='review') { try { const r=JSON.parse(a.details); return `${r.row_keys ? new Set(r.row_keys).size : 1} 条记录 · ${r.label || '清除标注'}`; } catch { return '已保存审核标注'; } }
     return {create:'已提交配置，首先执行样本匹配。', rematch:'已更新 Submission 工作副本。', resume:'保留已有结果，继续执行。',stop:'已请求停止，保留中间结果。'}[a.action] || '';
   }
   function visibleOptions(options) {
     const items = [['数据集',job.dataset],['输出目录',job.output_root]];
+    if(job.pipeline==='mapping') items.push(['物种','human'],['处理链',(job.mapping_chains||[]).join(', ')],['处理样本',job.mapping_samples?.join(', ')||'全部样本']);
     if(job.pipeline==='ir_split') items.push(['输入模式',({'auto':'自动识别','presplit':'已拆分（presplit）','raw':'未拆分（raw）'})[options.ir_input_mode]||'未拆分（raw）'],['代表序列',options.ir_variant==='merged'?'不提取，使用全部合并序列':'提取代表序列'],['结果整理',({'auto':'自动','1':'启用','0':'关闭'})[options.run_preprocessing]||'自动']);
     return items;
   }
@@ -28,14 +30,15 @@
       $('#metadata-report').innerHTML=rows.length?`<table><thead><tr><th>状态</th><th>样本</th><th>Dual Index</th><th>Note</th><th>来源</th><th>说明</th></tr></thead><tbody>${rows.map(r=>`<tr class="error-row"><td>未识别</td><td>${esc(r.sample_id)}</td><td>${esc(r.dual_index)}</td><td>${esc(r.note)}</td><td>${esc(r.file)} / ${esc(r.sheet)}:${r.row}</td><td>${esc(r.reason)}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">当前筛选下没有未识别的登记样本。</p>';
     }catch(e){if(token===matchRequest)$('#metadata-report').textContent=`登记信息读取失败：${e.message}。请刷新重试。`;}
   }
-  function setTab(name){tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));});document.querySelectorAll('.tab-content').forEach(p=>p.classList.toggle('active',p.id===`tab-${name}`));if(name==='match')loadMatch().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);syncSelection();}
+  function setTab(name){if(name==='match'&&job?.requires_match_review===false)name='overview';tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));});document.querySelectorAll('.tab-content').forEach(p=>p.classList.toggle('active',p.id===`tab-${name}`));if(name==='match')loadMatch().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);syncSelection();}
   async function refresh(){const data=await api(`/api/jobs/${id}`);job=data.job;if(attempt!==job.attempt_no){attempt=job.attempt_no;revision='';offset=0;source='';$('#log-view').textContent='';if(tab==='match')loadMatch().catch(fail);}
     $('#job-id').textContent=id;$('#dataset-title').textContent=job.dataset;$('#job-subtitle').textContent=`${job.pipeline_label} · ${job.input_path}`;
+    $('[data-tab="match"]').classList.toggle('hidden', job.requires_match_review===false);
     $('#hero-status').innerHTML=`<span class="status-badge ${job.status.toLowerCase()}">${esc(statusLabels[job.status]||job.status)}</span><strong>${job.progress}%</strong><small>阶段完成比例</small>`;
     const actions=[];if(job.status==='WAITING_REVIEW')actions.push(['confirm-match','审核并继续']);if(['QUEUED','RUNNING','MATCHING'].includes(job.status))actions.push(['stop','停止']);if(['FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER'].includes(job.status))actions.push(['resume','断点续跑']);if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING','ARCHIVED'].includes(job.status)&&job.submission_revision)actions.push(['edit','编辑资料 / 重新 Match']);$('#head-actions').innerHTML=actions.map(([a,t])=>`<button class="button ${a==='stop'?'button-danger':a==='edit'?'button-ghost':'button-primary'}" data-action="${a}">${t}</button>`).join('');
     $('#meta-cards').innerHTML=[['操作者',job.operator_display_name||job.operator],['创建时间',fmt(job.created_at)],['阶段内进度',`${job.stage_progress}%（日志报告）`],['尝试次数',job.attempt_no]].map(([k,v])=>`<div class="meta-card"><span>${k}</span><strong>${esc(v)}</strong></div>`).join('');
     $('#progress-total').textContent=`${job.completed_stages.length} / ${job.stages.length} 已完成`;$('#stages').innerHTML=job.stages.map(s=>{const done=job.completed_stages.includes(s),current=s===job.current_stage;return `<div class="stage-row ${done?'done':''} ${current?'current':''}"><span class="stage-check">${done?'✓':current?'●':'○'}</span><span><strong>${esc(job.stage_labels[s]||s)}</strong><small>${s}</small></span><span class="stage-state">${done?'已完成':current?(statusLabels[job.status]||job.status):'未开始'}</span></div>`;}).join('');
-    $('#overview-content').innerHTML=`<dl>${[['输入',job.input_path],['Submission 副本',job.submission_path],['Barcode',job.barcode_csv||'不需要'],['输出',job.output_root],['开始',fmt(job.started_at)],['结束',fmt(job.ended_at)],['退出码',job.exit_code??'—'],['错误',job.last_error||'无']].map(([k,v])=>`<dt>${k}</dt><dd class="mono">${esc(v)}</dd>`).join('')}</dl>`;
+    $('#overview-content').innerHTML=`<dl>${[['输入',job.input_path],...(job.pipeline==='mapping'?[['物种','human'],['处理链',(job.mapping_chains||[]).join(', ')],['处理样本',job.mapping_samples?.join(', ')||'全部样本']]:[['Submission 副本',job.submission_path],['Barcode',job.barcode_csv||'不需要']]),['输出',job.output_root],['开始',fmt(job.started_at)],['结束',fmt(job.ended_at)],['退出码',job.exit_code??'—'],['错误',job.last_error||'无']].map(([k,v])=>`<dt>${k}</dt><dd class="mono">${esc(v)}</dd>`).join('')}</dl>`;
     if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING'].includes(job.status)) $('#head-actions').insertAdjacentHTML('beforeend','<button class="button button-danger-ghost" data-action="delete">删除任务</button>');
     $('#options-list').innerHTML=visibleOptions(data.options||{}).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');$('#audit-timeline').innerHTML=(data.actions||[]).map(a=>`<div class="audit-item"><div><strong>${esc(actionLabels[a.action]||'操作记录')}</strong><small>${esc(a.operator.replace(/ \([A-Za-z0-9_.-]+\)$/, ''))} · ${fmt(a.created_at)}</small><p>${esc(actionDetail(a))}</p></div></div>`).join('');
     syncSelection();
@@ -56,6 +59,7 @@
     document.querySelectorAll('[data-review]').forEach(c=>c.disabled=!editable);
   }
   async function loadMatch(){
+    if(job?.requires_match_review===false)return;
     const token=++matchRequest;matchLoading=true;syncSelection();
     loadMetadata(token);
     try{
@@ -104,6 +108,15 @@
     const data=await api(`/api/jobs/${id}/artifacts`);
     $('#artifacts-list').innerHTML=`${data.archive_available?`<p>结果已压缩归档。<a class="button button-ghost" href="/api/jobs/${id}/download?kind=archive">下载完整压缩包</a></p>`:''}<div class="report-list" aria-label="阶段报告">${(data.reports||[]).map(r=>`<section class="report-item ${r.exists?'':'pending'}"><button class="report-open" data-summary="${esc(r.kind)}" ${r.exists?'':'disabled'} aria-pressed="false"><span>${esc(r.label)}</span><small>${r.exists?'查看统计':'尚未生成'}</small></button>${r.exists?`<a class="report-download" href="/api/jobs/${id}/download?kind=${encodeURIComponent(r.kind)}" aria-label="下载 ${esc(r.label)}">下载</a>`:''}</section>`).join('')}</div><section id="stage-summary-panel" class="hidden"><div class="tab-toolbar"><h3 id="stage-summary-title"></h3><button id="summary-refresh" class="button button-ghost button-small">刷新统计</button></div><p id="stage-summary-description" class="muted"></p><div class="summary-filter"><input id="summary-query" placeholder="搜索样本 / 状态" aria-label="搜索阶段统计"><label>每页 <select id="summary-limit" aria-label="每页记录数"><option value="5" selected>5 条</option><option value="10">10 条</option><option value="20">20 条</option><option value="50">50 条</option></select></label><details class="column-picker"><summary>选择字段</summary><div class="column-picker-menu"><input id="column-search" type="search" placeholder="搜索字段" aria-label="搜索字段"><button id="columns-default" class="button button-ghost button-small">显示全部字段</button><div id="column-options"></div></div></details></div><p id="stage-summary-info" class="muted"></p><div class="table-wrap summary-table"><table><thead id="stage-summary-head"></thead><tbody id="stage-summary-body"></tbody></table></div><dialog id="record-detail" class="record-detail"><div class="tab-toolbar"><h3>记录详情</h3><button id="record-close" class="button button-ghost">关闭</button></div><dl id="record-fields"></dl></dialog><div class="pagination"><button id="summary-prev" class="button button-ghost">上一页</button><button id="summary-next" class="button button-ghost">下一页</button></div></section>`;
     const reports=data.reports||[];
+    if(data.mapping_files?.length) {
+      $('#artifacts-list').insertAdjacentHTML('afterbegin', '<label class="field"><span>Mapping 序列结果</span><select id="mapping-file"><option value="">选择文件（FASTA / AIRR / UMI count）</option></select></label><div id="mapping-file-actions" class="tab-toolbar"></div>');
+      $('#mapping-file').innerHTML += data.mapping_files.map(f=>`<option value="${esc(f.kind)}">${esc(f.label)}</option>`).join('');
+      $('#mapping-file').onchange=()=>{
+        const file=data.mapping_files.find(f=>f.kind===$('#mapping-file').value);
+        $('#mapping-file-actions').innerHTML=file?`<a class="button button-ghost" href="/api/jobs/${id}/download?kind=${encodeURIComponent(file.kind)}">下载文件</a>${file.preview?'<button id="mapping-preview" class="button button-ghost">预览表格</button>':''}`:'';
+        if(file?.preview)$('#mapping-preview').onclick=()=>{summaryKind=file.kind;summaryPage=0;$('#stage-summary-title').textContent=file.label;$('#stage-summary-description').textContent='保留源文件记录；03.umi_count 结果包含原 CSV copy。';$('#stage-summary-panel').classList.remove('hidden');loadStageSummary().catch(fail);};
+      };
+    }
     const originalChoose = kind => document.querySelectorAll('[data-summary]').forEach(b=>{
       const active=b.dataset.summary===kind; b.closest('.report-item').classList.toggle('selected',active); b.setAttribute('aria-pressed',String(active));
     });
@@ -148,7 +161,7 @@
   $('#match-body').onchange=async e=>{if(e.target.dataset.selectRow!==undefined){e.target.checked?selected.add(e.target.dataset.selectRow):selected.delete(e.target.dataset.selectRow);syncSelection();return;}if(!e.target.dataset.review)return;batchBusy=true;syncSelection();try{await api(`/api/jobs/${id}/review`,{revision,row_key:e.target.dataset.review,label:e.target.value});await loadMatch();}catch(error){fail(error);await loadMatch();}finally{batchBusy=false;syncSelection();}};
   $('#unmarked-only').onchange=$('#errors-only').onchange=$('#match-search').onchange=()=>{selected.clear();syncSelection();matchPage=0;loadMatch().catch(fail);};$('#match-refresh').onclick=()=>loadMatch().catch(fail);$('#match-prev').onclick=()=>{matchPage--;loadMatch().catch(fail);};$('#match-next').onclick=()=>{matchPage++;loadMatch().catch(fail);};
   const tabs=[...document.querySelectorAll('.detail-tab')];
-  tabs.forEach((button,index)=>{button.setAttribute('aria-controls','tab-'+button.dataset.tab);button.onkeydown=e=>{let next;if(e.key==='ArrowRight')next=(index+1)%tabs.length;else if(e.key==='ArrowLeft')next=(index+tabs.length-1)%tabs.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=tabs.length-1;else return;e.preventDefault();tabs[next].focus();setTab(tabs[next].dataset.tab);};});
+  tabs.forEach(button=>{button.setAttribute('aria-controls','tab-'+button.dataset.tab);button.onkeydown=e=>{const visible=tabs.filter(b=>!b.classList.contains('hidden')),index=visible.indexOf(button);let next;if(e.key==='ArrowRight')next=(index+1)%visible.length;else if(e.key==='ArrowLeft')next=(index+visible.length-1)%visible.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=visible.length-1;else return;e.preventDefault();visible[next].focus();setTab(visible[next].dataset.tab);};});
   $('#pause-log').onclick=()=>{paused=!paused;$('#pause-log').textContent=paused?'继续刷新':'暂停刷新';};$('#copy-log').onclick=()=>navigator.clipboard.writeText($('#log-view').textContent).catch(fail);
   refresh().then(()=>{if(location.hash==='#match')setTab('match');}).catch(fail);setInterval(()=>refresh().catch(console.error),5000);setInterval(()=>{if(tab==='log')loadLog().catch(console.error);},2000);
 })();

@@ -12,9 +12,14 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
         if not runner.is_file():
             raise RuntimeError(f'Missing packaged runner: {runner}')
         folder = runner.parent
-        for required in ('00.pipeline_config.env', 'tools/pipeline_config.py', 'stop.sh'):
+        required_files = ('00.pipeline_config.env', 'tools/pipeline_config.py', 'stop.sh')
+        if pipeline['runner'] == 'mapping/pipeline/run_mapping_pipeline.sh':
+            required_files = ('00.pipeline_config.env', 'run_mapping.py', 'umi_count.py', '../fasta.py')
+        for required in required_files:
             if not (folder / required).is_file():
                 raise RuntimeError(f'Missing packaged file: {folder / required}')
+            if required.endswith('.py'):
+                ast.parse((folder / required).read_text(encoding='utf-8-sig'), filename=str(folder / required))
         for path in folder.rglob('*.py'):
             ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
         for path in [*folder.rglob('*.sh'), folder / '00.pipeline_config.env']:
@@ -23,7 +28,7 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
         raise RuntimeError('IR preprocessing models were not packaged')
     if not (root / 'reference/8bp_barcodes.csv').is_file():
         raise RuntimeError('Default Barcode CSV was not packaged')
-    print('Packaged pipelines: 4, source validation OK', flush=True)
+    print(f'Packaged pipelines: {len(registry)}, source validation OK', flush=True)
 
 
 if __name__ == '__main__':

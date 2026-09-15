@@ -1,4 +1,20 @@
 {
+  "mapping": {
+    "label": "Mapping",
+    "description": "Human 官方 CSV：选择链 → FASTA → IgBLAST → UMI count 整理",
+    "accent": "indigo",
+    "runner": "mapping/pipeline/run_mapping_pipeline.sh",
+    "stages": ["01.fasta", "02.igblast", "03.umi_count"],
+    "stage_labels": {"01.fasta": "CSV → FASTA", "02.igblast": "IgBLAST", "03.umi_count": "UMI count 整理"},
+    "form_fields": ["input_path", "mapping_chains", "mapping_samples", "dataset_label"],
+    "completion": "pipeline_done",
+    "env_keys": {"input": ["SCIGBLAST_RUN_RAW_INPUT_DIR"], "output": ["SCIGBLAST_OUTPUT_ROOT"], "dataset": ["SCIGBLAST_DATASET_LABEL"]},
+    "requires_barcode": false,
+    "requires_submission": false,
+    "requires_match_review": false,
+    "ir_options": false,
+    "match_summary": []
+  },
   "ir_split": {
     "label": "IR split",
     "description": "Bulk IR · 自动识别输入、UMI 代表序列、结果整理",

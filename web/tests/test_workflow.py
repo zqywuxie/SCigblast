@@ -295,6 +295,9 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(pipeline=pipeline):
                 body = {'pipeline': pipeline, 'operator': 'forged-user', 'input_path': str(self.raw),
                         'submission_revision': self.view['revision']}
+                if pipeline == 'mapping':
+                    (self.raw / 'A__IGH.csv').write_text('CDR3(pep),copy,joinedSeq\nCAR,11,ACGT\n', encoding='utf-8')
+                    body.update(mapping_chains=['IGH'], submission_revision='')
                 validated = self.client.post('/api/validate', json=body)
                 self.assertEqual(validated.status_code, 200, validated.text)
                 self.assertEqual(Path(validated.json()['output_root']).parent, self.out/'郑钦云_testadmi'/pipeline)

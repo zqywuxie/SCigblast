@@ -1,11 +1,16 @@
 # SCigblast Web Runner
 
-这是一个轻量执行面板，不替代四条 pipeline。后端只调用当前服务器上的：
+这是一个轻量执行面板，不替代各条 pipeline。后端只调用当前服务器上的：
 
 - `IR_split/pipeline/run_ir_pipeline.sh`
 - `10X_split/pipeline/run_10x_pipeline.sh`
 - `Igblast_base/pipeline/run_igblast_base.sh`
 - `PigIgblast/pipeline/run_pig_pipeline.sh`
+- `mapping/pipeline/run_mapping_pipeline.sh`：human CSV → FASTA → IgBLAST → UMI count 整理，详见 [Mapping 使用说明](../mapping/README.md)。
+
+Mapping 为第五条独立流程：选择 CSV 目录后先扫描，按实际发现的链与文件数多选，仅处理所选链。无需 Submission、Barcode 或 Match 审核；三阶段全部完成才显示成功，结果页提供转换/比对/UMI 汇总以及逐文件预览和下载。以下四条 FASTQ 流程的 Match 使用说明仍适用于 IR、10X、Base 和 Pig。
+
+Mapping 扫描还展示识别到的样本及其来源路径、链和文件数，样本默认全选，可取消不需要的样本；实际只处理所选样本中的所选链。详情页显示保存的样本范围，断点续跑保留该选择。
 
 ## Linux Docker 部署
 

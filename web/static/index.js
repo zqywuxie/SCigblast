@@ -10,9 +10,39 @@
   const isActive = (job) => activeStates.has(job.status);
   const isDone = (job) => doneStates.has(job.status);
   let formDefaults = {};
+  let scanGeneration = 0, scannedInput = '';
+  function mappingSelection() { return [...document.querySelectorAll('#mapping-chains input:checked')].map(n => n.value); }
+  function mappingSampleSelection() { return [...document.querySelectorAll('#mapping-samples input:checked')].map(n => n.value); }
+  function syncMappingSubmit() {
+    const chains = mappingSelection(), samples = mappingSampleSelection();
+    const matches = [...document.querySelectorAll('#mapping-samples input:checked')].some(n => JSON.parse(n.dataset.chains).some(c => chains.includes(c)));
+    $('#mapping-sample-count').textContent = `已选 ${samples.length} / ${document.querySelectorAll('#mapping-samples input').length} 个样本`;
+    $('#new-job-form button[type="submit"]').disabled = selectedPipeline() === 'mapping' && (!scannedInput || scannedInput !== $('[name="input_path"]').value.trim() || !chains.length || !samples.length || !matches);
+  }
+  function clearMappingScan() {
+    scanGeneration++; scannedInput = '';
+    $('#mapping-chains').textContent = '';
+    $('#mapping-samples').textContent = '';
+    $('#mapping-scan-status').textContent = '先扫描目录，再选择要处理的链和样本。';
+    $('#mapping-scan').disabled = false;
+    syncMappingSubmit();
+  }
+  function taskBody(form) {
+    const body = Object.fromEntries(new FormData(form).entries());
+    if (body.pipeline === 'mapping') {
+      body.mapping_chains = mappingSelection();
+      body.mapping_samples = mappingSampleSelection();
+      body.submission_path = ''; body.submission_revision = '';
+      if (!scannedInput || scannedInput !== body.input_path.trim() || !body.mapping_chains.length || !body.mapping_samples.length) throw new Error('请先扫描输入目录并选择至少一条链和一个样本');
+    }
+    if (!body.barcode_csv) body.barcode_csv = null;
+    return body;
+  }
   function resetForm() {
     $('#new-job-form').reset();
+    if (pipelineInfo.ir_split) $('#pipeline').value = 'ir_split';
     resetSubmission();
+    clearMappingScan();
     $('[name="barcode_csv"]').value = formDefaults.barcode_csv || '';
     $('#submission-status').textContent = '可编辑 Note 路径，原文件不变。';
     $('#validation-summary').textContent = '填写路径后可验证任务配置';
@@ -71,6 +101,7 @@
     $('[name="barcode_csv"]').value = defaults.barcode_csv;
     $('#output-hint').textContent = `${defaults.output_base}/姓名_短编号/Pipeline类型/YYYYMMDD_HHMMSS/（北京时间）`;
     $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
+    $('#pipeline').value = 'ir_split';
     $('#help-pipeline').innerHTML = $('#pipeline').innerHTML;
     $('#pipeline-help-open').disabled = false;
     updatePipelineFields();
@@ -84,6 +115,17 @@
 
   function updatePipelineFields() {
     const info = pipelineInfo[selectedPipeline()] || {};
+    const mapping = selectedPipeline() === 'mapping';
+    $('#mapping-fields').classList.toggle('hidden', !mapping);
+    $('#mapping-fields').disabled = !mapping;
+    $('.submission-field').classList.toggle('hidden', mapping);
+    $('.submission-field').querySelectorAll('input,button').forEach(n => n.disabled = mapping);
+    $('[name="submission_revision"]').disabled = mapping;
+    if (mapping) { resetSubmission(); $('[name="submission_path"]').required = false; }
+    else $('[name="submission_path"]').required = !$('[name="submission_revision"]').value;
+    $('[name="input_path"]').closest('.field').querySelector('.field-label').textContent = mapping ? '免疫组库 CSV 目录' : '原始数据目录';
+    $('#new-job-form button[type="submit"] span').textContent = mapping ? '创建任务并开始分析' : '创建任务并执行 Match';
+    syncMappingSubmit();
     $('#barcode-row').classList.toggle('hidden', !info.requires_barcode);
     $('[name="barcode_csv"]').disabled = !info.requires_barcode;
     document.querySelectorAll('.pipeline-card').forEach((card) => {
@@ -120,7 +162,7 @@
     const finalStage = finalStages[key];
     const finalSection = finalStage ? `<section class="pipeline-final-stage" aria-labelledby="pipeline-final-title"><span class="pipeline-final-label">最后一步</span><h3 id="pipeline-final-title">${esc(finalStage.title)}</h3><dl><dt>输入</dt><dd>${esc(finalStage.input)}</dd><dt>处理</dt><dd>${esc(finalStage.processing)}</dd><dt>输出</dt><dd>${esc(finalStage.output)}</dd></dl><p class="pipeline-final-note">${esc(finalStage.note)}</p></section>` : '';
     const representative = ['ir_split', '10x_split'].includes(key) ? '<p><strong>代表序列：</strong>reads 数最高者优先；仅在并列时按平均期望错误数更低、平均质量更高排序。质量缺失或仍并列时采用确定性规则，并记录混淆和备选序列。</p>' : '';
-    $('#pipeline-help-content').innerHTML = `<p class="pipeline-help-summary">${esc(info.description)}</p><div class="flow-nodes" aria-label="分析步骤">${(info.stages || []).map((s, i) => `<span${finalStage && i === info.stages.length - 1 ? ' class="final-node"' : ''}>${esc(info.stage_labels?.[s] || s)}</span>`).join('<b aria-hidden="true">→</b>')}</div><p>${esc(details[key] || info.description)}</p>${finalSection}${representative}<p class="pipeline-help-review">首次运行完成 Match 后，请先审核样本匹配结果，再继续后续分析。</p>`;
+    $('#pipeline-help-content').innerHTML = `<p class="pipeline-help-summary">${esc(info.description)}</p><div class="flow-nodes" aria-label="分析步骤">${(info.stages || []).map((s, i) => `<span${finalStage && i === info.stages.length - 1 ? ' class="final-node"' : ''}>${esc(info.stage_labels?.[s] || s)}</span>`).join('<b aria-hidden="true">→</b>')}</div><p>${esc(details[key] || info.description)}</p>${finalSection}${representative}<p class="pipeline-help-review">${info.requires_match_review === false ? 'CSV 命名为 样本__链.csv，包含 CDR3(pep)、copy、joinedSeq。先扫描并选择链；最终 umi_count 还原原 CSV 的 copy，统计按序列条数计算。' : '首次运行完成 Match 后，请先审核样本匹配结果，再继续后续分析。'}</p>`;
   }
   $('#pipeline-help-open').addEventListener('click', () => { $('#help-pipeline').value = selectedPipeline(); renderHelp(); $('#pipeline-help').showModal(); });
   $('#pipeline-help-close').addEventListener('click', () => $('#pipeline-help').close());
@@ -162,16 +204,36 @@
   async function validatePaths() {
     const button=$('#validate-button'); button.disabled=true;
     try {
-      const body=Object.fromEntries(new FormData($('#new-job-form')).entries());if(!body.barcode_csv)body.barcode_csv=null;
+      const body=taskBody($('#new-job-form'));
       const result=await Submission.api('/api/validate',body);
       $('#validation-summary').textContent=`路径可用 · Dataset: ${result.dataset} · 输出: ${result.output_root}`;
-      const check=await Submission.api(`/api/preflight?pipeline=${encodeURIComponent(body.pipeline)}`);
-      const missing=[...Object.entries(check.commands).filter(([,v])=>!v).map(([k])=>k),...check.missing_modules];
+      const check=await Submission.api(`/api/preflight?${new URLSearchParams({pipeline:body.pipeline,mapping_chains:(body.mapping_chains||[]).join(',')})}`);
+      const missing=[...Object.entries(check.commands).filter(([,v])=>!v).map(([k])=>k),...check.missing_modules,...(check.missing_databases||[])];
       $('#validation-summary').textContent+= missing.length ? `。环境缺项：${missing.join('、')}；请管理员补齐后再分析。` : '。入口工具和 Python 库检查通过；数据库仍需核对。';
     }catch(error){$('#validation-summary').textContent=error.message;}finally{button.disabled=false;}
   }
 
-  $('#new-job-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.classList.add('loading'); try { const body = Object.fromEntries(new FormData(event.target).entries()); if (!body.barcode_csv) body.barcode_csv = null; const result = await Submission.api('/api/jobs', body); resetForm(); closeDrawer(); location.href = `/jobs/${result.id}`; } catch(error) { showMessage(error.message, true); } finally { button.disabled = false; button.classList.remove('loading'); } });
+  $('#new-job-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.classList.add('loading'); try { const body = taskBody(event.target); const result = await Submission.api('/api/jobs', body); resetForm(); closeDrawer(); location.href = `/jobs/${result.id}`; } catch(error) { showMessage(error.message, true); } finally { button.disabled = false; button.classList.remove('loading'); syncMappingSubmit(); } });
+  $('[name="input_path"]').addEventListener('input', clearMappingScan);
+  $('#mapping-chains').addEventListener('change', syncMappingSubmit);
+  $('#mapping-samples').addEventListener('change', syncMappingSubmit);
+  $('#mapping-samples-all').onclick = () => { document.querySelectorAll('#mapping-samples input').forEach(n => n.checked = true); syncMappingSubmit(); };
+  $('#mapping-samples-none').onclick = () => { document.querySelectorAll('#mapping-samples input').forEach(n => n.checked = false); syncMappingSubmit(); };
+  $('#mapping-all').onclick = () => { document.querySelectorAll('#mapping-chains input').forEach(n => n.checked = true); syncMappingSubmit(); };
+  $('#mapping-none').onclick = () => { document.querySelectorAll('#mapping-chains input').forEach(n => n.checked = false); syncMappingSubmit(); };
+  $('#mapping-scan').onclick = async () => {
+    clearMappingScan(); const generation = scanGeneration, path = $('[name="input_path"]').value.trim();
+    $('#mapping-scan').disabled = true; $('#mapping-scan-status').textContent = '正在扫描 CSV 文件…';
+    try {
+      const result = await Submission.api('/api/mapping/scan', {input_path:path});
+      if (generation !== scanGeneration) return;
+      scannedInput = path;
+      $('#mapping-chains').innerHTML = result.chains.map(c => `<label><input type="checkbox" value="${esc(c.chain)}" ${c.chain === 'IGH' ? 'checked' : ''}> ${esc(c.chain)} · ${c.file_count} 个文件</label>`).join('');
+      $('#mapping-samples').innerHTML = (result.samples||[]).map(s=>`<label><input type="checkbox" value="${esc(s.sample_key)}" data-chains="${esc(JSON.stringify(s.chains))}" checked><span><strong>${esc(s.sample_id)}</strong><small>${esc(s.sample_key)} · ${esc(s.chains.join(', '))} · ${s.file_count} 个文件</small></span></label>`).join('');
+      $('#mapping-scan-status').textContent = result.chains.length ? `发现 ${(result.samples||[]).length} 个样本、${result.chains.length} 种链，未识别命名 ${result.unrecognized_files} 个 CSV。样本默认全选，可取消不需要的样本。` : '未找到有效链；文件需命名为 样本__链.csv。';
+    } catch (error) { if (generation === scanGeneration) $('#mapping-scan-status').textContent = error.message; }
+    finally { if (generation === scanGeneration) { $('#mapping-scan').disabled = false; syncMappingSubmit(); } }
+  };
   $('#open-drawer').addEventListener('click', openDrawer); $('#close-drawer').addEventListener('click', closeDrawer); $('#drawer-backdrop').addEventListener('click', closeDrawer); $('#validate-button').addEventListener('click', validatePaths); $('#pipeline').addEventListener('change', updatePipelineFields); $('#refresh-jobs').addEventListener('click', refreshJobs); $('#job-search').addEventListener('input', () => { page = 0; refreshJobs(); }); $('#pipeline-filter').addEventListener('change', () => { page = 0; refreshJobs(); }); $('#page-prev').addEventListener('click', () => { if (page > 0) { page -= 1; refreshJobs(); } }); $('#page-next').addEventListener('click', () => { page += 1; refreshJobs(); }); document.querySelectorAll('.field input').forEach((input) => input.addEventListener('input', () => { const state = document.querySelector(`.path-state[data-for="${input.name}"]`); if (state) state.classList.remove('ok', 'bad'); }));
   document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', () => openPicker(button.dataset.browseKind, button.dataset.browseTarget)));
   $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });

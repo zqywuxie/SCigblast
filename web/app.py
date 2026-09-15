@@ -14,6 +14,7 @@ import csv
 import tempfile
 import shutil
 import shlex
+import sys
 import submission
 import auth
 from datetime import datetime, timezone, timedelta
@@ -30,6 +31,7 @@ from pydantic import BaseModel
 
 APP_DIR = Path(__file__).resolve().parent
 PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent).resolve()
+sys.path.insert(0, str(PIPELINE_ROOT))
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
 DEFAULT_OUTPUT_ROOT = Path(
@@ -350,6 +352,8 @@ class CreateJob(BaseModel):
     ir_input_mode: str = "auto"
     ir_variant: str = "representative"
     run_preprocessing: str = "1"
+    mapping_chains: list[str] = []
+    mapping_samples: list[str] | None = None
 
 
 def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
@@ -359,8 +363,20 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     config = REGISTRY[request.pipeline]
     input_path = validate_input_path(request.input_path, "input_path")
     try:
-        submission_path = (submission.resolve(STATE_ROOT, request.submission_revision)
-                           if request.submission_revision else validate_submission(request.submission_path))
+        if config.get('requires_submission', True):
+            submission_path = (submission.resolve(STATE_ROOT, request.submission_revision)
+                               if request.submission_revision else validate_submission(request.submission_path))
+        else:
+            from mapping.fasta import select_files, discover
+            request.mapping_chains = sorted(set(c.upper() for c in request.mapping_chains))
+            if request.mapping_samples is None:
+                request.mapping_samples = sorted({f['sample_key'] for f in discover(input_path)[0]})
+            else:
+                request.mapping_samples = sorted(set(request.mapping_samples))
+            select_files(input_path, request.mapping_chains, request.mapping_samples)
+            submission_path = ''
+            request.submission_path = request.submission_revision = ''
+            request.barcode_csv = None
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     barcode = validate_barcode(request.barcode_csv, bool(config["requires_barcode"]))
@@ -388,6 +404,12 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
         "SCIGBLAST_OUTPUT_ROOT": str(output_root),
         "SCIGBLAST_RUN_OUTPUT_ROOT": str(output_root),
     }
+    if not config.get('requires_match_review', True):
+        for key in ('SCIGBLAST_MATCH_ONLY_FIRST_RUN', 'SCIGBLAST_RUN_MATCH_ONLY_FIRST_RUN', 'SCIGBLAST_WEB_MATCH_ONLY'):
+            env[key] = '0'
+        env.pop('SCIGBLAST_RUN_SUBMISSION_PATHS', None)
+        env['SCIGBLAST_MAPPING_CHAINS'] = ','.join(request.mapping_chains)
+        env['SCIGBLAST_MAPPING_SAMPLES'] = json.dumps(request.mapping_samples, ensure_ascii=False)
     if barcode:
         env["SCIGBLAST_RUN_BARCODE_CSV"] = str(barcode)
     if request.pipeline == "ir_split":
@@ -463,6 +485,8 @@ def log_path(row: sqlite3.Row) -> Path:
 
 
 def review_ready(row: sqlite3.Row) -> bool:
+    if not REGISTRY[row['pipeline']].get('requires_match_review', True):
+        return False
     if json.loads(row["env_json"]).get("SCIGBLAST_WEB_MATCH_ONLY") != "1":
         return False
     marker = state_dir(row) / ".match_review.done"
@@ -472,6 +496,11 @@ def review_ready(row: sqlite3.Row) -> bool:
                 and bool(summary_files(row)))
     except OSError:
         return False
+
+
+def require_match_pipeline(row):
+    if not REGISTRY[row['pipeline']].get('requires_match_review', True):
+        raise HTTPException(409, 'Mapping 不使用 Match 审核')
 
 
 def pipeline_done(row: sqlite3.Row) -> bool:
@@ -503,7 +532,7 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         marker = state / f".pipeline_stage_{marker_name}.DONE"
         if marker.is_file() and "status=DONE" in marker.read_text(encoding="utf-8", errors="replace"):
             done.append(stage)
-    if '01.match' not in done and summary_files(row) and (row['status'] in {'WAITING_REVIEW', 'SUCCEEDED'} or row['current_stage'] not in {'', None, '01.match'}):
+    if '01.match' in config['stages'] and '01.match' not in done and summary_files(row) and (row['status'] in {'WAITING_REVIEW', 'SUCCEEDED'} or row['current_stage'] not in {'', None, '01.match'}):
         done.insert(0, '01.match')
     current = row["current_stage"] or (done[-1] if done else "")
     progress = 100 if row["status"] in {"SUCCEEDED", "ARCHIVING", "ARCHIVED"} else int(len(done) * 100 / len(config["stages"]))
@@ -513,6 +542,9 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "operator_display_name": operator_display_name,
         "pipeline": row["pipeline"],
         "pipeline_label": config["label"],
+        "requires_match_review": config.get('requires_match_review', True),
+        "mapping_chains": json.loads(row['options_json']).get('mapping_chains', []),
+        "mapping_samples": json.loads(row['options_json']).get('mapping_samples'),
         "dataset": row["dataset"],
         "input_path": row["input_path"],
         "submission_path": row["submission_path"],
@@ -553,7 +585,7 @@ def parse_progress(row: sqlite3.Row) -> tuple[str, int]:
         return row["current_stage"] or "", int(row["progress"] or 0)
     current = row["current_stage"] or ""
     stage_end = 0
-    for match in re.finditer(r"\[(?:IR|10X|BASE|PIG)\s+(\d+)/(\d+)\]", text):
+    for match in re.finditer(r"\[(?:IR|10X|BASE|PIG|MAPPING)\s+(\d+)/(\d+)\]", text):
         number, total = int(match.group(1)), int(match.group(2))
         if total:
             current = config["stages"][min(number - 1, len(config["stages"]) - 1)]
@@ -698,6 +730,8 @@ def job_config(row):
 def result_file(row):
     options = json.loads(row["options_json"])
     stage = "05.igblastn_out"
+    if row['pipeline'] == 'mapping':
+        stage = '02.igblastn_out'
     if row["pipeline"] in {"ir_split", "10x_split"}:
         stage = "06.igblastn_out" if options.get("ir_variant") == "merged" else "07.igblastn_out"
     root = Path(row["output_root"])
@@ -710,6 +744,16 @@ def result_file(row):
 
 def stage_reports(row):
     root, dataset = Path(row['output_root']), row['dataset']
+    if row['pipeline'] == 'mapping':
+        definitions = [('conversion', 'CSV → FASTA', '各文件转换与跳过记录', '01.fasta', 'conversion_summary.csv'),
+                       ('results', 'IgBLAST 比对与筛选', '按 FASTA 记录计数，不按 copy 加权', '02.igblastn_out', 'chain_summary.csv'),
+                       ('umi_count', 'UMI count 整理', '从序列标识还原原 CSV copy', '03.umi_count', 'umi_count_summary.csv')]
+        reports = []
+        for kind, label, description, stage, name in definitions:
+            path = root / stage / dataset / name
+            exists = path.is_file() and is_under(path, [root])
+            reports.append(dict(kind=kind, label=label, description=description, path=str(path) if exists else None, exists=exists))
+        return reports
     entries = [('fastp', 'Fastp 质量过滤', '输入、保留 reads 及保留比例',
                 [root / '02.fastp' / dataset / 'report/fastp_summary.csv'])]
     if row['pipeline'] == 'ir_split':
@@ -741,10 +785,42 @@ def stage_reports(row):
 
 
 def stage_summary_file(row, kind):
+    if kind.startswith('mapping:') and row['pipeline'] == 'mapping':
+        item = next((item for item in mapping_files(row) if item['kind'] == kind), None)
+        return Path(item['path']) if item else None
     if kind == 'match':
         return next(iter(summary_files(row)), None)
     report = next((r for r in stage_reports(row) if r['kind'] == kind), None)
     return Path(report['path']) if report and report['path'] else None
+
+
+def mapping_files(row):
+    """Expose only outputs authorized by this attempt's successful source summaries."""
+    root, dataset = Path(row['output_root']), row['dataset']
+    entries = []
+    specs = [('01.fasta', 'conversion_summary.csv', ['fasta']),
+             ('02.igblastn_out', 'chain_summary.csv', ['raw.tsv', 'filtered.tsv']),
+             ('03.umi_count', 'umi_count_summary.csv', None)]
+    for stage, name, suffixes in specs:
+        summary = root / stage / dataset / name
+        if not summary.is_file() or not is_under(summary, [root]):
+            continue
+        with summary.open(encoding='utf-8-sig', newline='') as handle:
+            for record in csv.DictReader(handle):
+                if record.get('status') != 'OK' or not record.get('source_file'):
+                    continue
+                kinds = suffixes if suffixes is not None else [record.get('kind', '') + '.tsv']
+                for suffix in kinds:
+                    if suffix not in {'fasta', 'raw.tsv', 'filtered.tsv'}:
+                        continue
+                    path = root / stage / dataset / Path(record['source_file']).with_suffix('.' + suffix)
+                    if not path.is_file() or not is_under(path, [root / stage / dataset]):
+                        continue
+                    relative = path.relative_to(root).as_posix()
+                    kind = 'mapping:' + relative
+                    entries.append({'kind': kind, 'path': str(path), 'label': relative,
+                                    'preview': suffix.endswith('.tsv')})
+    return entries
 
 
 def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excluded_keys=None):
@@ -879,6 +955,8 @@ def pipelines() -> dict[str, Any]:
             "description": value.get("description", ""),
             "accent": value.get("accent", "teal"),
             "requires_barcode": value["requires_barcode"],
+            "requires_submission": value.get('requires_submission', True),
+            "requires_match_review": value.get('requires_match_review', True),
             "ir_options": value["ir_options"],
             "stages": value["stages"],
             "stage_labels": value.get("stage_labels", {}),
@@ -895,10 +973,50 @@ def form_defaults():
             'barcode_csv': str(PIPELINE_ROOT / 'reference' / '8bp_barcodes.csv')}
 
 
+@app.post('/api/mapping/scan')
+def scan_mapping(request: dict):
+    auth.require_user()
+    from mapping.fasta import discover, SUPPORTED
+    root = validate_input_path(str(request.get('input_path', '')), 'input_path')
+    try:
+        files, ignored = discover(root)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    samples = {}
+    for file in files:
+        sample = samples.setdefault(file['sample_key'], {'sample_key': file['sample_key'], 'sample_id': file['sample_id'],
+                                                        'chains': set(), 'file_count': 0})
+        sample['chains'].add(file['chain'])
+        sample['file_count'] += 1
+    return {'input_path': str(root), 'samples': [{**s, 'chains': sorted(s['chains'])} for _, s in sorted(samples.items())],
+            'chains': [{'chain': chain, 'file_count': sum(f['chain'] == chain for f in files)}
+                                               for chain in SUPPORTED if any(f['chain'] == chain for f in files)],
+            'unrecognized_files': len(ignored)}
+
+
 @app.get('/api/preflight')
-def preflight(pipeline: str):
+def preflight(pipeline: str, mapping_chains: str = ''):
     if pipeline not in REGISTRY:
         raise HTTPException(400, 'Unknown pipeline')
+    if pipeline == 'mapping':
+        import importlib.util
+        from mapping.pipeline.run_mapping import settings, database_args
+        from mapping.fasta import SUPPORTED
+        config = settings()
+        chains = set(mapping_chains.upper().split(',')) - {''}
+        if not chains or not chains.issubset(SUPPORTED):
+            raise HTTPException(400, '请先扫描并选择有效链')
+        runtime = os.environ.get('SCIGBLAST_RUNTIME_BIN_DIR')
+        commands = {'python': shutil.which(str(Path(runtime) / 'python3') if runtime else sys.executable),
+                    'igblastn': shutil.which(config['SCIGBLAST_IGBLAST_BIN'])}
+        missing = []
+        for chain in sorted(chains):
+            try:
+                database_args(Path(config['SCIGBLAST_IGBLAST_DB_DIR']), chain)
+            except ValueError as exc:
+                missing.append(str(exc))
+        return {'commands': commands, 'missing_modules': [] if importlib.util.find_spec('pandas') else ['pandas'], 'missing_databases': missing,
+                'max_active_jobs': MAX_ACTIVE_JOBS, 'notice': '检查所选 human 链；真实比对由任务执行。'}
     config_path = PIPELINE_ROOT / Path(REGISTRY[pipeline]['runner']).parent / '00.pipeline_config.env'
     settings = {}
     if config_path.is_file():
@@ -1017,6 +1135,7 @@ def download_submission(revision: str, filename: str, original: bool = False):
 def rematch(job_id: str, request: dict):
     with PROCESS_LOCK:
         row = get_job_row(job_id)
+        require_match_pipeline(row)
         if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING", "ARCHIVING", "ARCHIVED"}:
             raise HTTPException(409, "Wait for this attempt to finish")
         token = request.get("revision", "")
@@ -1106,8 +1225,12 @@ def apply_task_policy(request: CreateJob, user: dict) -> None:
 def create_job(request: CreateJob) -> dict[str, Any]:
     user = auth.require_user()
     apply_task_policy(request, user)
-    check_submission_owner(request.submission_revision)
-    if not request.submission_revision:
+    if request.pipeline not in REGISTRY:
+        raise HTTPException(400, 'unknown pipeline')
+    needs_submission = REGISTRY[request.pipeline].get('requires_submission', True)
+    if needs_submission:
+        check_submission_owner(request.submission_revision)
+    if needs_submission and not request.submission_revision:
         source = validate_submission(request.submission_path)
         files = sorted(source.glob("*.xlsx")) if source.is_dir() else [source]
         try:
@@ -1209,7 +1332,8 @@ def delete_job(job_id: str, request: dict):
 def validate_job(request: CreateJob) -> dict[str, Any]:
     """Validate form paths without creating a job or starting a runner."""
     apply_task_policy(request, auth.require_user())
-    check_submission_owner(request.submission_revision)
+    if REGISTRY.get(request.pipeline, {}).get('requires_submission', True):
+        check_submission_owner(request.submission_revision)
     job, _ = build_job(request)
     return {
         "valid": True,
@@ -1313,6 +1437,7 @@ def job_log(job_id: str, offset: int = 0, max_bytes: int = 262144, source: str =
 @app.get("/api/jobs/{job_id}/match-preview")
 def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False, unmarked_only: bool = False, after_key: int = -1) -> dict[str, Any]:
     row = get_job_row(job_id)
+    require_match_pipeline(row)
     files = summary_files(row)
     if not files:
         return {"path": None, "columns": [], "rows": []}
@@ -1428,6 +1553,7 @@ def matched_assignments(path):
 @app.get('/api/jobs/{job_id}/metadata-review')
 def metadata_review(job_id: str):
     row = get_job_row(job_id)
+    require_match_pipeline(row)
     token = json.loads(row['options_json']).get('submission_revision')
     if not token:
         return {'rows': []}
@@ -1482,7 +1608,11 @@ def artifacts(job_id: str) -> dict[str, Any]:
     final_summary = result_file(row)
     if final_summary:
         candidates.append(final_summary)
+    if row['pipeline'] == 'mapping':
+        candidates = [p for p in candidates if p != output / '01.match' / row['dataset']]
+        candidates.extend(output / stage / row['dataset'] for stage in ('01.fasta', '02.igblastn_out', '03.umi_count'))
     return {
+        'mapping_files': mapping_files(row) if row['pipeline'] == 'mapping' else [],
         "output_root": str(output),
         "archive_available": row["status"] == "ARCHIVED" and (output / "results.tar.gz").is_file(),
         "reports": stage_reports(row),
