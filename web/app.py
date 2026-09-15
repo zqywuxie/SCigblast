@@ -500,7 +500,7 @@ def review_ready(row: sqlite3.Row) -> bool:
 
 def require_match_pipeline(row):
     if not REGISTRY[row['pipeline']].get('requires_match_review', True):
-        raise HTTPException(409, 'Mapping 不使用 Match 审核')
+        raise HTTPException(409, 'reMapping 不使用 Match 审核')
 
 
 def pipeline_done(row: sqlite3.Row) -> bool:
@@ -1370,13 +1370,17 @@ def list_jobs(
         clauses.append("pipeline = ?")
         params.append(pipeline)
     if operator:
-        clauses.append("operator LIKE ?")
-        params.append(f"%{operator}%")
+        clauses.append("COALESCE((SELECT display_name FROM users WHERE users.id=jobs.owner_id), operator) = ?")
+        params.append(operator)
     if query:
         clauses.append("(id LIKE ? OR dataset LIKE ? OR input_path LIKE ?)")
         params.extend([f"%{query}%"] * 3)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with db() as connection:
+        operators = [row[0] for row in connection.execute(
+            "SELECT DISTINCT COALESCE((SELECT display_name FROM users WHERE users.id=jobs.owner_id), operator) "
+            "AS name FROM jobs" + owner_where + " ORDER BY name", owner_params
+        ).fetchall()]
         total = connection.execute(f"SELECT COUNT(*) FROM jobs{where}", tuple(params)).fetchone()[0]
         rows = connection.execute(
             f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -1390,7 +1394,7 @@ def list_jobs(
             "FROM jobs" + owner_where, owner_params
         ).fetchone()
     counts = {key: int(stats[key] or 0) for key in ("total", "active", "review", "done")}
-    return {"jobs": [snapshot(row) for row in rows], "total": total, "limit": limit, "offset": offset, "counts": counts, "active_jobs": active_count(), "max_active_jobs": MAX_ACTIVE_JOBS}
+    return {"jobs": [snapshot(row) for row in rows], "operators": operators, "total": total, "limit": limit, "offset": offset, "counts": counts, "active_jobs": active_count(), "max_active_jobs": MAX_ACTIVE_JOBS}
 
 
 @app.get("/api/jobs/{job_id}")

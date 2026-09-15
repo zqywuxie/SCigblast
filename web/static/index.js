@@ -3,7 +3,7 @@
   const statusLabel = { QUEUED: '排队中', RUNNING: '运行中', MATCHING: '匹配中', WAITING_REVIEW: '待审核', SUCCEEDED: '已完成', ARCHIVING: '归档中', ARCHIVED: '已归档', FAILED: '失败', STOPPED: '已停止', STOPPING: '停止中', INTERRUPTED: '已中断', COMPLETED_WITHOUT_MARKER: '需检查' };
   const activeStates = new Set(['QUEUED', 'RUNNING', 'MATCHING', 'STOPPING']);
   const doneStates = new Set(['SUCCEEDED', 'ARCHIVED', 'FAILED', 'STOPPED', 'INTERRUPTED', 'COMPLETED_WITHOUT_MARKER']);
-  let pipelineInfo = {}, allJobs = [], filter = 'all', page = 0, limit = 50, busy = false;
+  let pipelineInfo = {}, allJobs = [], filter = 'all', page = 0, limit = 50, busy = false, refreshPending = false;
 
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const statusText = (value) => statusLabel[value] || value;
@@ -172,6 +172,9 @@
   function formatTime(value) { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
   function renderJobs(data) {
     const jobs = data.jobs || [];
+    const operatorSelect = $('#operator-filter'), selectedOperator = operatorSelect.value;
+    operatorSelect.innerHTML = '<option value="">全部操作者</option>' + [...new Set([...(data.operators || []), selectedOperator].filter(Boolean))].map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+    operatorSelect.value = selectedOperator;
     const query = $('#job-search').value.trim().toLowerCase();
     const visible = jobs.filter((job) => {
       const byFilter = filter === 'active' ? isActive(job) : filter === 'review' ? job.status === 'WAITING_REVIEW' : filter === 'done' ? isDone(job) : true;
@@ -196,7 +199,7 @@
     document.querySelectorAll('[data-action]').forEach((button) => button.addEventListener('click', () => runAction(button.dataset.id, button.dataset.action)));
   }
 
-  async function refreshJobs() { if (busy) return; busy = true; const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (filter === 'active') params.set('status', 'QUEUED,RUNNING,MATCHING,STOPPING'); if (filter === 'review') params.set('status', 'WAITING_REVIEW'); if (filter === 'done') params.set('status', 'SUCCEEDED,ARCHIVED,FAILED,STOPPED,INTERRUPTED,COMPLETED_WITHOUT_MARKER'); if ($('#pipeline-filter').value) params.set('pipeline', $('#pipeline-filter').value); if ($('#job-search').value.trim()) params.set('query', $('#job-search').value.trim()); try { const data = await Submission.api(`/api/jobs?${params}`); allJobs = data.jobs || []; renderJobs(data); } catch(error) { showMessage(error.message,true); } finally { busy = false; } }
+  async function refreshJobs() { if (busy) { refreshPending = true; return; } busy = true; const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (filter === 'active') params.set('status', 'QUEUED,RUNNING,MATCHING,STOPPING'); if (filter === 'review') params.set('status', 'WAITING_REVIEW'); if (filter === 'done') params.set('status', 'SUCCEEDED,ARCHIVED,FAILED,STOPPED,INTERRUPTED,COMPLETED_WITHOUT_MARKER'); if ($('#pipeline-filter').value) params.set('pipeline', $('#pipeline-filter').value); if ($('#operator-filter').value) params.set('operator', $('#operator-filter').value); if ($('#job-search').value.trim()) params.set('query', $('#job-search').value.trim()); try { const data = await Submission.api(`/api/jobs?${params}`); allJobs = data.jobs || []; renderJobs(data); } catch(error) { showMessage(error.message,true); } finally { busy = false; if (refreshPending) { refreshPending = false; refreshJobs(); } } }
 
   async function runAction(id, action) { if (action === 'confirm') { location.href = `/jobs/${id}#match`; return; } if (action === 'stop' && !window.confirm('停止这个任务？中间产物会保留，可稍后续跑。')) return; try { if(action === 'delete') { const job = allJobs.find(j => j.id === id); if(!job || !await Submission.deleteJob(job)) return; } else await Submission.api(`/api/jobs/${id}/${action}`, {}); await refreshJobs(); } catch(error) { alert(error.message); } }
   function showMessage(message, error = false) { const node = $('#form-message'); node.textContent = message; node.classList.toggle('error', error); clearTimeout(showMessage.timer); if (!error) showMessage.timer = setTimeout(() => { node.textContent = ''; node.classList.remove('error'); }, 4500); }
@@ -234,6 +237,7 @@
     } catch (error) { if (generation === scanGeneration) $('#mapping-scan-status').textContent = error.message; }
     finally { if (generation === scanGeneration) { $('#mapping-scan').disabled = false; syncMappingSubmit(); } }
   };
+  $('#operator-filter').addEventListener('change', () => { page = 0; refreshJobs(); });
   $('#open-drawer').addEventListener('click', openDrawer); $('#close-drawer').addEventListener('click', closeDrawer); $('#drawer-backdrop').addEventListener('click', closeDrawer); $('#validate-button').addEventListener('click', validatePaths); $('#pipeline').addEventListener('change', updatePipelineFields); $('#refresh-jobs').addEventListener('click', refreshJobs); $('#job-search').addEventListener('input', () => { page = 0; refreshJobs(); }); $('#pipeline-filter').addEventListener('change', () => { page = 0; refreshJobs(); }); $('#page-prev').addEventListener('click', () => { if (page > 0) { page -= 1; refreshJobs(); } }); $('#page-next').addEventListener('click', () => { page += 1; refreshJobs(); }); document.querySelectorAll('.field input').forEach((input) => input.addEventListener('input', () => { const state = document.querySelector(`.path-state[data-for="${input.name}"]`); if (state) state.classList.remove('ok', 'bad'); }));
   document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', () => openPicker(button.dataset.browseKind, button.dataset.browseTarget)));
   $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });

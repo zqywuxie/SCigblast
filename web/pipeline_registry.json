@@ -1,6 +1,6 @@
 {
   "mapping": {
-    "label": "Mapping",
+    "label": "reMapping",
     "description": "Human 官方 CSV：选择链 → FASTA → IgBLAST → UMI count 整理",
     "accent": "indigo",
     "runner": "mapping/pipeline/run_mapping_pipeline.sh",
