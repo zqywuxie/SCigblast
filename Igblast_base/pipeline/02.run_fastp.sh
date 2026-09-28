@@ -443,19 +443,19 @@ for pid in "${FASTP_PIDS[@]}"; do
     wait_fastp_job "$pid"
 done
 
-if ! "${PYTHON_BIN}" - "$REPORT_DIR" "${REPORT_DIR}/fastp_summary.csv" <<'PY'
+if ! "${PYTHON_BIN}" - "$REPORT_DIR" "${REPORT_DIR}/fastp_summary.csv" "$OUTPUT_DIR" <<'PY'
 import csv,json,os,sys
 from pathlib import Path
-F=['sample','relative_dir','json_path','before_reads','after_reads','reads_retained_pct','reads_discarded','reads_discarded_pct','before_bases','after_bases','bases_retained_pct','low_quality_reads','too_many_n_reads','too_short_reads','too_long_reads','q20_rate_before','q20_rate_after','q20_pct_before','q20_pct_after','q30_rate_before','q30_rate_after','q30_pct_before','q30_pct_after']
+F=['sample','relative_dir','json_path','r1_output','r2_output','before_reads','after_reads','reads_retained_pct','reads_discarded','reads_discarded_pct','before_bases','after_bases','bases_retained_pct','low_quality_reads','too_many_n_reads','too_short_reads','too_long_reads','q20_rate_before','q20_rate_after','q20_pct_before','q20_pct_after','q30_rate_before','q30_rate_after','q30_pct_before','q30_pct_after']
 def n(v):
     try:
         x=float(v or 0); return int(x) if x.is_integer() else x
     except (TypeError,ValueError): return 0
 def p(v,t): return round(v*100/t,4) if t else 0.0
-root,out=Path(sys.argv[1]).resolve(),Path(sys.argv[2]).resolve(); rows=[]
+root,out,data_root=Path(sys.argv[1]).resolve(),Path(sys.argv[2]).resolve(),Path(sys.argv[3]).resolve(); rows=[]
 for q in sorted(root.rglob('*.json')):
     try:
-        d=json.loads(q.read_text(encoding='utf-8')); b=d['summary']['before_filtering']; a=d['summary']['after_filtering']; z=d.get('filtering_result',{}); br,ar=n(b.get('total_reads')),n(a.get('total_reads')); bb,ab=n(b.get('total_bases')),n(a.get('total_bases')); q20b,q20a=n(b.get('q20_rate')),n(a.get('q20_rate')); q30b,q30a=n(b.get('q30_rate')),n(a.get('q30_rate')); rel=q.parent.relative_to(root).as_posix(); rows.append({'sample':q.stem,'relative_dir':'' if rel=='.' else rel,'json_path':q.relative_to(root).as_posix(),'before_reads':br,'after_reads':ar,'reads_retained_pct':p(ar,br),'reads_discarded':br-ar,'reads_discarded_pct':p(br-ar,br),'before_bases':bb,'after_bases':ab,'bases_retained_pct':p(ab,bb),'low_quality_reads':n(z.get('low_quality_reads')),'too_many_n_reads':n(z.get('too_many_N_reads')),'too_short_reads':n(z.get('too_short_reads')),'too_long_reads':n(z.get('too_long_reads')),'q20_rate_before':q20b,'q20_rate_after':q20a,'q20_pct_before':round(q20b*100,4),'q20_pct_after':round(q20a*100,4),'q30_rate_before':q30b,'q30_rate_after':q30a,'q30_pct_before':round(q30b*100,4),'q30_pct_after':round(q30a*100,4)})
+        d=json.loads(q.read_text(encoding='utf-8')); b=d['summary']['before_filtering']; a=d['summary']['after_filtering']; z=d.get('filtering_result',{}); br,ar=n(b.get('total_reads')),n(a.get('total_reads')); bb,ab=n(b.get('total_bases')),n(a.get('total_bases')); q20b,q20a=n(b.get('q20_rate')),n(a.get('q20_rate')); q30b,q30a=n(b.get('q30_rate')),n(a.get('q30_rate')); rel=q.parent.relative_to(root); sample=q.stem; output_dir=data_root/rel; rows.append({'sample':sample,'relative_dir':'' if rel==Path('.') else rel.as_posix(),'json_path':q.relative_to(root).as_posix(),'r1_output':str(output_dir/f'{sample}_R1.fq.gz'),'r2_output':str(output_dir/f'{sample}_R2.fq.gz'),'before_reads':br,'after_reads':ar,'reads_retained_pct':p(ar,br),'reads_discarded':br-ar,'reads_discarded_pct':p(br-ar,br),'before_bases':bb,'after_bases':ab,'bases_retained_pct':p(ab,bb),'low_quality_reads':n(z.get('low_quality_reads')),'too_many_n_reads':n(z.get('too_many_N_reads')),'too_short_reads':n(z.get('too_short_reads')),'too_long_reads':n(z.get('too_long_reads')),'q20_rate_before':q20b,'q20_rate_after':q20a,'q20_pct_before':round(q20b*100,4),'q20_pct_after':round(q20a*100,4),'q30_rate_before':q30b,'q30_rate_after':q30a,'q30_pct_before':round(q30b*100,4),'q30_pct_after':round(q30a*100,4)})
     except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as e: print(f'[fastp-summary] skip {q}: {e}',file=sys.stderr)
 out.parent.mkdir(parents=True,exist_ok=True); tmp=out.with_name('.'+out.name+'.tmp')
 with tmp.open('w',encoding='utf-8',newline='') as h: w=csv.DictWriter(h,fieldnames=F); w.writeheader(); w.writerows(rows)

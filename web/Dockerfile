@@ -35,6 +35,7 @@ COPY IR_split/pipeline/ /opt/scigblast/IR_split/pipeline/
 COPY 10X_split/pipeline/ /opt/scigblast/10X_split/pipeline/
 COPY Igblast_base/pipeline/ /opt/scigblast/Igblast_base/pipeline/
 COPY PigIgblast/pipeline/ /opt/scigblast/PigIgblast/pipeline/
+COPY pipeline_resource_lock.sh /opt/scigblast/pipeline_resource_lock.sh
 COPY mapping/fasta.py /opt/scigblast/mapping/fasta.py
 COPY mapping/pipeline/ /opt/scigblast/mapping/pipeline/
 COPY reference/8bp_barcodes.csv /opt/scigblast/reference/8bp_barcodes.csv

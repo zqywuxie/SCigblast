@@ -258,7 +258,7 @@ load_file_sample_map() {
         elif [[ ",${current}," != *",${sample},"* ]]; then
             FILE_SAMPLE_MAP["$key"]="${current},${sample}"
         fi
-    done < <(python - "$MAPPING_SUMMARY" <<'PY'
+    done < <("${PYTHON_BIN:-python3}" - "$MAPPING_SUMMARY" <<'PY'
 import csv
 import sys
 from pathlib import Path
@@ -328,12 +328,14 @@ collect_samples() {
                 mapped_sample="$(mapped_sample_for_pair "$(basename "$parent_dir")" "$sample_base" || true)"
                 if [[ -n "$mapped_sample" ]]; then
                     sample_name="$mapped_sample"
-                    # Recover the canonical hierarchy for legacy flat split
-                    # output: <Lane>/<pair_stem>/<sample_id>.  This keeps a
-                    # Lane containing many physical pairs from being merged
-                    # into one clean/PANDAseq sample.
-                    relative_parent="${relative_parent}/${sample_base}/${mapped_sample}"
-                    source_type="legacy-lane-flat:${relative_parent}"
+                    # A split result may already be stored in its sample
+                    # directory (for example 10_LF/10_LF_R1.fq.gz). Only add
+                    # the legacy Lane/pair/sample hierarchy when the FASTQ
+                    # stem is a physical pair name, not the sample name.
+                    if [[ "$mapped_sample" != "$sample_base" ]]; then
+                        relative_parent="${relative_parent}/${sample_base}/${mapped_sample}"
+                        source_type="legacy-lane-flat:${relative_parent}"
+                    fi
                 fi
             fi
         fi

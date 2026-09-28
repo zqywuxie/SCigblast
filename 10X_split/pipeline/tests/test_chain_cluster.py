@@ -16,6 +16,22 @@ spec.loader.exec_module(stage)
 
 
 class Stage8Tests(unittest.TestCase):
+    def test_reader_discards_unused_igblast_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'TCR.tsv'
+            pd.DataFrame([dict(
+                sequence_id='ACGT', sequence='ACGTACGT', locus='TRA',
+                productive='T', v_call='TRAV1*01', j_call='TRAJ1*01',
+                v_score='200', v_identity='100', cdr3='ACGT',
+                unused_germline_detail='x' * 10000,
+            )]).to_csv(source, sep='\t', index=False)
+
+            frame = stage._read_one(source, 'auto', '.', 0)
+
+            self.assertNotIn('unused_germline_detail', frame.columns)
+            self.assertEqual(frame['barcode'].tolist(), ['ACGT'])
+            self.assertIn('sequence_alignment', frame.columns)
+
     def test_serial_and_parallel_finish_and_retry_existing_outputs(self):
         for workers in (1, 2):
             with self.subTest(workers=workers), tempfile.TemporaryDirectory() as tmp:

@@ -894,6 +894,60 @@ def merge_umi_rows(existing, new_rows):
     return compact_umi_rows(merged)
 
 
+def replace_umi_samples(existing, new_rows, replaced_samples):
+    """Replace complete reducer snapshots for samples rebuilt from changed input."""
+    replaced = set(replaced_samples)
+    return compact_umi_rows(
+        [row for row in existing if row.get("sample", "") not in replaced] + list(new_rows)
+    )
+
+
+def phase1_input_fingerprints(output_dir):
+    """Read successful per-sample phase1 markers as the reducer input version."""
+    fingerprints = {}
+    output_dir = os.path.abspath(output_dir)
+    for root, _dirs, files in os.walk(output_dir):
+        if ".phase1.DONE" not in files:
+            continue
+        marker_path = os.path.join(root, ".phase1.DONE")
+        try:
+            with open(marker_path, "r", encoding="utf-8") as handle:
+                marker = json.load(handle)
+            if marker.get("status") != "DONE":
+                continue
+            sample = os.path.relpath(root, output_dir).replace(os.sep, "/")
+            fingerprint = json.dumps(
+                {key: marker.get(key) for key in ("input", "size", "mtime_ns", "config_fingerprint")},
+                sort_keys=True, separators=(",", ":"),
+            )
+            fingerprints[sample] = fingerprint
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    return fingerprints
+
+
+def load_reducer_inputs(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+        return saved if isinstance(saved, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def save_reducer_inputs(path, fingerprints):
+    temp = path + f".tmp.{os.getpid()}"
+    try:
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(fingerprints, handle, ensure_ascii=False, sort_keys=True)
+        os.replace(temp, path)
+    finally:
+        try:
+            os.remove(temp)
+        except FileNotFoundError:
+            pass
+
+
 def write_umi_csv(results, path, append=False):
     """Write compact reducer state atomically (gzip when path ends in .gz)."""
     del append  # retained for compatibility with older callers
@@ -1312,6 +1366,13 @@ def phase2_represent(output_dir):
     # merge below will replace it instead of appending duplicates.
     state_path = os.path.join(output_dir, REPRESENTATIVE_STATE)
     legacy_state_path = os.path.join(output_dir, LEGACY_REPRESENTATIVE_STATE)
+    reducer_inputs_path = os.path.join(output_dir, "representative_inputs.json")
+    previous_inputs = load_reducer_inputs(reducer_inputs_path)
+    current_inputs = phase1_input_fingerprints(output_dir)
+    replaced_samples = {
+        sample for sample, fingerprint in current_inputs.items()
+        if sample in previous_inputs and previous_inputs[sample] != fingerprint
+    }
     existing_rows_data = load_umi_rows(state_path)
     legacy_state_loaded = False
     if not existing_rows_data and os.path.isfile(legacy_state_path):
@@ -1337,6 +1398,23 @@ def phase2_represent(output_dir):
     print(f"  Found {len(all_files)} barcode TSVs in {time.time() - t0:.1f}s")
 
     if not all_files:
+        if replaced_samples:
+            print(f"Replacing changed samples without barcode outputs: {sorted(replaced_samples)}")
+            combined_rows = replace_umi_samples(existing_rows_data, [], replaced_samples)
+            write_umi_csv(combined_rows, state_path)
+            write_representative_map(combined_rows, map_path)
+            write_representative_summary(combined_rows, summary_path)
+            for sample in replaced_samples:
+                sample_dir = os.path.realpath(os.path.join(fasta_out_dir, sample))
+                if os.path.commonpath((os.path.realpath(fasta_out_dir), sample_dir)) == os.path.realpath(fasta_out_dir):
+                    shutil.rmtree(sample_dir, ignore_errors=True)
+            if not write_fasta_output(combined_rows, fasta_out_dir):
+                return False
+            write_representative_fasta_manifest(output_dir)
+            committed_inputs = dict(previous_inputs)
+            committed_inputs.update(current_inputs)
+            save_reducer_inputs(reducer_inputs_path, committed_inputs)
+            return True
         if os.path.isfile(map_path):
             representative_files = []
             if os.path.isdir(fasta_out_dir):
@@ -1400,7 +1478,10 @@ def phase2_represent(output_dir):
     # Commit all outputs from one deduplicated snapshot.  Never append directly
     # to the final CSV: an interruption between append and FASTA generation
     # previously left the three outputs inconsistent.
-    combined_rows = merge_umi_rows(existing_rows_data, all_results)
+    if replaced_samples:
+        combined_rows = replace_umi_samples(existing_rows_data, all_results, replaced_samples)
+    else:
+        combined_rows = merge_umi_rows(existing_rows_data, all_results)
     # Commit the complete reducer state first.  It contains source headers and
     # sequences, unlike the compact public map, and is written atomically so a
     # later incremental run cannot drop already-completed samples.
@@ -1411,8 +1492,17 @@ def phase2_represent(output_dir):
     print(f"  Representative summary: {summary_path}")
 
     # Write representative FASTA
-    if write_fasta_output(combined_rows, fasta_out_dir):
-        write_representative_fasta_manifest(output_dir)
+    for sample in replaced_samples:
+        sample_dir = os.path.realpath(os.path.join(fasta_out_dir, sample))
+        if os.path.commonpath((os.path.realpath(fasta_out_dir), sample_dir)) == os.path.realpath(fasta_out_dir):
+            shutil.rmtree(sample_dir, ignore_errors=True)
+    if not write_fasta_output(combined_rows, fasta_out_dir):
+        return False
+    write_representative_fasta_manifest(output_dir)
+    if not any(r.get("error") for r in all_results):
+        committed_inputs = dict(previous_inputs)
+        committed_inputs.update(current_inputs)
+        save_reducer_inputs(reducer_inputs_path, committed_inputs)
 
     # Keep the old full CSV for manual audit by default.  After validating the
     # compact state and public outputs, users may opt in to deleting it with
@@ -1480,8 +1570,31 @@ def _cleanup_empty_tsv_dirs(output_dir):
             pass
 
 
-def phase1_checkpoint_valid(marker_path, fasta_path, sample_out_dir):
-    """Validate a sample checkpoint against its input and metadata outputs."""
+def _phase1_marker_fingerprint(marker):
+    return json.dumps(
+        {key: marker.get(key) for key in ("input", "size", "mtime_ns", "config_fingerprint")},
+        sort_keys=True, separators=(",", ":"),
+    )
+
+
+def phase1_payload_manifest(sample_out_dir):
+    """Return a compact manifest for the per-barcode TSV payload filenames."""
+    tsv_dir = os.path.join(sample_out_dir, BARCODE_TSV_DIRNAME)
+    try:
+        names = sorted(
+            name for name in os.listdir(tsv_dir)
+            if name.endswith(".tsv") and os.path.isfile(os.path.join(tsv_dir, name))
+        )
+    except FileNotFoundError:
+        names = []
+    digest = hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()
+    return len(names), digest
+
+
+def phase1_checkpoint_valid(
+    marker_path, fasta_path, sample_out_dir, output_dir=None, committed_inputs=None
+):
+    """Validate phase1 data, allowing missing TSVs only after phase2 commit."""
     if not os.path.isfile(marker_path):
         return False
     if not all(os.path.isfile(os.path.join(sample_out_dir, name))
@@ -1491,13 +1604,30 @@ def phase1_checkpoint_valid(marker_path, fasta_path, sample_out_dir):
         with open(marker_path, "r", encoding="utf-8") as handle:
             marker = json.load(handle)
         stat = os.stat(fasta_path)
-        return (
+        valid = (
             marker.get("status") == "DONE"
             and marker.get("config_fingerprint") == CONFIG_FINGERPRINT
             and os.path.abspath(str(marker.get("input", ""))) == os.path.abspath(str(fasta_path))
             and int(marker.get("size", -1)) == int(stat.st_size)
             and int(marker.get("mtime_ns", -1)) == int(stat.st_mtime_ns)
         )
+        if not valid:
+            return False
+
+        # Phase 2 commits this input fingerprint only after reducer outputs and
+        # representative FASTA are written. It then removes the TSV payloads;
+        # their absence is expected once this durable commit is present.
+        if output_dir is not None and committed_inputs is not None:
+            sample_key = os.path.relpath(sample_out_dir, output_dir).replace(os.sep, "/")
+            if committed_inputs.get(sample_key) == _phase1_marker_fingerprint(marker):
+                return True
+
+        expected_count = marker.get("payload_tsv_count")
+        expected_digest = marker.get("payload_tsv_names_sha256")
+        if not isinstance(expected_count, int) or not isinstance(expected_digest, str):
+            return False
+        actual_count, actual_digest = phase1_payload_manifest(sample_out_dir)
+        return actual_count == expected_count and actual_digest == expected_digest
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
 
@@ -1537,8 +1667,12 @@ def main():
     print()
 
     all_summary_rows = []
+    rebuilt_samples = set()
     total = len(samples)
     success = 0
+    committed_inputs = load_reducer_inputs(
+        os.path.join(OUTPUT_DIR, "representative_inputs.json")
+    )
 
     for i, (sample, fasta_path, mode, rel_parent) in enumerate(samples, start=1):
         # Use the source-relative sample path as the stable identity in CSVs
@@ -1557,7 +1691,9 @@ def main():
         # A checkpoint is valid only when the sample summary/log are still
         # present.  The runner may remove FASTA payloads, but these small
         # metadata files are retained to prove phase1 really completed.
-        if phase1_checkpoint_valid(sample_marker, fasta_path, sample_out_dir):
+        if phase1_checkpoint_valid(
+            sample_marker, fasta_path, sample_out_dir, OUTPUT_DIR, committed_inputs
+        ):
             print("  [SKIPPED] phase1 checkpoint already complete")
             success += 1
             continue
@@ -1571,13 +1707,17 @@ def main():
             all_summary_rows.extend(summary_rows)
             tmp_marker = sample_marker + ".tmp"
             source_stat = os.stat(fasta_path)
+            payload_tsv_count, payload_tsv_names_sha256 = phase1_payload_manifest(sample_out_dir)
             with open(tmp_marker, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps({
                     "status": "DONE", "input": os.path.abspath(fasta_path),
                     "config_fingerprint": CONFIG_FINGERPRINT,
                     "size": source_stat.st_size, "mtime_ns": source_stat.st_mtime_ns,
+                    "payload_tsv_count": payload_tsv_count,
+                    "payload_tsv_names_sha256": payload_tsv_names_sha256,
                 }, ensure_ascii=False))
             os.replace(tmp_marker, sample_marker)
+            rebuilt_samples.add(sample_key)
             success += 1
         except Exception as e:
             print(f"  [ERROR] {sample_key} 处理失败: {e}")
@@ -1601,9 +1741,13 @@ def main():
                     })
         except (OSError, ValueError):
             existing_rows = []
+        existing_rows = [row for row in existing_rows if row["sample"] not in rebuilt_samples]
         all_summary_rows = existing_rows + all_summary_rows
-    if all_summary_rows:
-        write_summary_csv(global_summary_path, all_summary_rows)
+    # Keep one authoritative summary row per sample/barcode after reprocessing.
+    unique_rows = {}
+    for row in all_summary_rows:
+        unique_rows[(row["sample"], row["cell_barcode"])] = row
+    write_summary_csv(global_summary_path, list(unique_rows.values()))
 
     # Global run log
     phase1_elapsed = time.time() - global_start_time

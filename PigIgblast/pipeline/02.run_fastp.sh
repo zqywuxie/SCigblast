@@ -144,22 +144,23 @@ while (( ${#PIDS[@]} > 0 )); do
   pid="${PIDS[0]}"; PIDS=("${PIDS[@]:1}"); record_result "$pid"; unset 'PID_SAMPLE[$pid]'
 done
 
-"${PYTHON_BIN:-python3}" - "$REPORT" "$SUMMARY" <<'PY'
+"${PYTHON_BIN:-python3}" - "$REPORT" "$SUMMARY" "$DATA" <<'PY'
 import csv,json,sys
 from pathlib import Path
-root=Path(sys.argv[1]); out=Path(sys.argv[2]); rows=[]
+root=Path(sys.argv[1]).resolve(); out=Path(sys.argv[2]); data=Path(sys.argv[3]).resolve(); rows=[]
 for p in root.rglob('*.json'):
     try: d=json.loads(p.read_text(encoding='utf-8'))
     except Exception: continue
     s=d.get('summary',{}); before=s.get('before_filtering',{}); after=s.get('after_filtering',{})
     n1=before.get('total_reads',0); n2=after.get('total_reads',0)
     # paired-end fastp reports one total_reads count for each side in some versions.
-    rows.append({'sample_id':p.parts[-2] if len(p.parts)>1 else '', 'pair_id':p.stem,
+    output_dir=data/p.parent.relative_to(root); rows.append({'sample_id':p.parts[-2] if len(p.parts)>1 else '', 'pair_id':p.stem,
+                 'r1_output':str(output_dir/(p.stem+'_R1.fq.gz')),'r2_output':str(output_dir/(p.stem+'_R2.fq.gz')),
                  'r1_before':n1,'r1_after':n2,'r1_percent':round(100*n2/n1,2) if n1 else 0,
                  'r2_before':before.get('total_reads',0),'r2_after':after.get('total_reads',0),
                  'r2_percent':round(100*after.get('total_reads',0)/before.get('total_reads',1),2) if before.get('total_reads') else 0,
                  'status':'OK','error':''})
-fields=['sample_id','pair_id','r1_before','r1_after','r1_percent','r2_before','r2_after','r2_percent','status','error']
+fields=['sample_id','pair_id','r1_output','r2_output','r1_before','r1_after','r1_percent','r2_before','r2_after','r2_percent','status','error']
 with out.open('w',newline='',encoding='utf-8') as f:
     w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(rows)
 PY

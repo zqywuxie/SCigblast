@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import re
 from pathlib import Path
@@ -68,34 +69,39 @@ def select_files(input_dir: Path, chains: list[str], samples: list[str] | None =
 
 
 def convert(csv_path: Path, fasta_path: Path, header_fields=HEADER_FIELDS, sequence_field=SEQUENCE_FIELD) -> dict:
-    import pandas as pd
-    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False, encoding='utf-8-sig')
-    missing = [c for c in [*header_fields, sequence_field] if c not in df.columns]
-    if missing:
-        raise ValueError(f'缺少列：{missing}')
     fasta_path.parent.mkdir(parents=True, exist_ok=True)
     temp = fasta_path.with_suffix(fasta_path.suffix + '.tmp')
-    written = skipped = 0
+    written = skipped = input_rows = 0
     try:
-        with temp.open('w', encoding='utf-8', newline='\n') as handle:
-            for index, row in df.iterrows():
-                sequence = row[sequence_field].strip()
-                if not sequence or sequence.lower() == 'nan':
-                    skipped += 1
-                    continue
-                first, count = (row[c] for c in header_fields)
-                if not first or not count or re.search(r'\s|[>]', first + count) or '_' in count:
-                    raise ValueError(f'数据行 {index}：无效的 CDR3/copy header 字段')
-                if not re.fullmatch(r'[ACGTRYSWKMBDHVNUacgtryswkmbdhvnu]+', sequence):
-                    raise ValueError(f'数据行 {index}：序列含非核酸 IUPAC 字符')
-                handle.write(f'>{index}_{first}_{count}\n{sequence}\n')
-                written += 1
+        with csv_path.open('r', encoding='utf-8-sig', newline='') as source:
+            reader = csv.DictReader(source)
+            missing = [c for c in [*header_fields, sequence_field] if c not in (reader.fieldnames or [])]
+            if missing:
+                raise ValueError(f'缺少列：{missing}')
+            with temp.open('w', encoding='utf-8', newline='\n') as handle:
+                for index, row in enumerate(reader):
+                    if None in row:
+                        raise ValueError(f'数据行 {index}：CSV 列数不一致')
+                    if not any((value or '').strip() for value in row.values()):
+                        continue
+                    input_rows += 1
+                    sequence = (row.get(sequence_field) or '').strip()
+                    if not sequence or sequence.lower() == 'nan':
+                        skipped += 1
+                        continue
+                    first, count = ((row.get(c) or '') for c in header_fields)
+                    if not first or not count or re.search(r'\s|[>]', first + count) or '_' in count:
+                        raise ValueError(f'数据行 {input_rows - 1}：无效的 CDR3/copy header 字段')
+                    if not re.fullmatch(r'[ACGTRYSWKMBDHVNUacgtryswkmbdhvnu]+', sequence):
+                        raise ValueError(f'数据行 {input_rows - 1}：序列含非核酸 IUPAC 字符')
+                    handle.write(f'>{input_rows - 1}_{first}_{count}\n{sequence}\n')
+                    written += 1
         if not written:
             raise ValueError('没有有效序列')
         os.replace(temp, fasta_path)
     finally:
         temp.unlink(missing_ok=True)
-    return {'input_rows': len(df), 'input_sequences': written, 'skipped_rows': skipped}
+    return {'input_rows': input_rows, 'input_sequences': written, 'skipped_rows': skipped}
 
 
 def csv_to_fasta(csv_path: Path, fasta_path: Path, header_fields=HEADER_FIELDS, sequence_field=SEQUENCE_FIELD) -> int:

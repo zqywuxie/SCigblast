@@ -98,9 +98,9 @@ IR_split 自动识别 raw 和已带 UMI 标签的 presplit 输入，网页无需
 9. “输出文件”优先提供 IR 拆分、10X 预筛选/拆分、PANDAseq、fastp 等阶段统计卡片，可分页、搜索及下载原始 CSV/TSV。默认折叠路径字段，不修改计数定义。参数与记录展示中文操作名和第几次 Match，不显示内部哈希；后台仍保留版本校验。
 10. 非运行任务可在列表或详情点击“删除”，输入 `DELETE` 确认。删除任务记录及其独占的服务器结果目录，不删除原始数据、Submission 或共享工作副本。公共根目录、与其他任务共享/嵌套的输出、符号链接或无法验证归属的目录会被拒绝；不会自动删除任何历史任务。删除不可恢复，需保留的结果请事先备份。
 
-任务默认最多同时运行 2 条 pipeline，具体 fastp、PANDAseq、IgBLAST 并发和内存策略仍由各 pipeline 自己的 `00.pipeline_config.env` 控制。
+Web 启动的任务最多同时运行 1 条 pipeline。具体 fastp、PANDAseq、IgBLAST 并发和内存策略仍由各 pipeline 自己的 `00.pipeline_config.env` 控制。
 
-必须使用单 Web 实例、单 Uvicorn worker。第三条排队，等待审核不占运行位，停止中的进程仍占位。这个限制只管理网页启动的任务，不统计用户直接在终端启动的 pipeline。Compose 的 `300g` 是整个容器共享上限，不是每条任务 300GB；高内存组合未验收前可将 `SCIGBLAST_MAX_ACTIVE_JOBS=1`，代码无论如何最多允许 2。
+必须使用单 Web 实例、单 Uvicorn worker。第二条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前都会获取共享 `flock`，因此 Web 与终端直接启动的任务也会串行。默认锁文件为 `/colddata/SCigblast/results/.scigblast-resource.lock`，必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。
 
 `.env.example` 中 `SCIGBLAST_ALLOWED_*_ROOTS` 是容器内路径，并且必须已被 Compose 挂载；Linux 多根用冒号分隔。设置允许根不会自动增加挂载。路径验证不等于数据库/工具真实运行成功；部署后仍需各类型小数据验收，特别是 cgroup 内存限制。`deploy.sh` 检测到运行/排队任务会拒绝重建；更新期间不要提交新任务。
 

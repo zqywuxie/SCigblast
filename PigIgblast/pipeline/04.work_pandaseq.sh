@@ -36,7 +36,7 @@ command -v "$BIN" >/dev/null 2>&1 || { log "ERROR pandaseq not found: $BIN"; exi
 (( MAX_PARALLEL * THREADS <= THREAD_BUDGET )) || { log "ERROR pandaseq concurrency exceeds thread budget"; exit 1; }
 (( MAX_PARALLEL * MEMORY_PER_SAMPLE_GB <= MEMORY_BUDGET_GB )) || { log "ERROR pandaseq concurrency exceeds memory budget"; exit 1; }
 mkdir -p "$OUT"; printf 'sample_id,pair_id,input_r1,input_r2,input_pairs,merged_sequences,merge_percent,status,error\n' > "$SUMMARY"
-mapfile -t JOBS < <(python3 - "$MANIFEST" <<'PY'
+mapfile -t JOBS < <("${PYTHON_BIN:-python3}" - "$MANIFEST" <<'PY'
 import csv,sys
 seen=set()
 for row in csv.DictReader(open(sys.argv[1],encoding='utf-8')):
@@ -56,6 +56,7 @@ run_pandaseq_one() {
   fingerprint="$(pair_fingerprint "$r1" "$r2")"
   if [[ -s "$fa" && -f "$marker" ]] && grep -qx "version=${PANDASEQ_VERSION}" "$marker" 2>/dev/null && grep -qx "input_fingerprint=${fingerprint}" "$marker" 2>/dev/null; then
     input=$(awk -F= '$1=="input_pairs"{print $2;exit}' "$marker"); merged=$(awk -F= '$1=="merged_sequences"{print $2;exit}' "$marker"); input=${input:-0}; merged=${merged:-0}; pct=$(awk -v a="$merged" -v b="$input" 'BEGIN{printf "%.2f", b?a*100/b:0}')
+    if ! grep -qx 'status=DONE' "$marker" || ! grep -qx "sample_id=${sample}" "$marker" || ! grep -qx "pair_id=${pair}" "$marker"; then marker_tmp="${marker}.tmp.${BASHPID:-$$}"; printf 'status=DONE\nstage=pandaseq\nversion=%s\ninput_fingerprint=%s\ninput_pairs=%s\nmerged_sequences=%s\nsample_id=%s\npair_id=%s\n' "$PANDASEQ_VERSION" "$fingerprint" "$input" "$merged" "$sample" "$pair" > "$marker_tmp"; mv -f "$marker_tmp" "$marker"; fi
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$sample" "$pair" "$r1" "$r2" "$input" "$merged" "$pct" OK '' > "${SUMMARY}.row.${idx}"; return 0
   fi
   log "[pandaseq] ${sample}/${pair}"
@@ -64,7 +65,7 @@ run_pandaseq_one() {
     mv -f "$tmp" "$fa"; merged=$(grep -c '^>' "$fa" || true); input=$(gzip -cd "$r1" | awk 'END{print NR/4}'); pct=$(awk -v a="$merged" -v b="$input" 'BEGIN{printf "%.2f", b?a*100/b:0}')
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$sample" "$pair" "$r1" "$r2" "$input" "$merged" "$pct" OK '' > "${SUMMARY}.row.${idx}"
     marker_tmp="${marker}.tmp.${BASHPID:-$$}"
-    printf 'stage=pandaseq\nversion=%s\ninput_fingerprint=%s\ninput_pairs=%s\nmerged_sequences=%s\n' "$PANDASEQ_VERSION" "$fingerprint" "$input" "$merged" > "$marker_tmp"
+    printf 'status=DONE\nstage=pandaseq\nversion=%s\ninput_fingerprint=%s\ninput_pairs=%s\nmerged_sequences=%s\nsample_id=%s\npair_id=%s\n' "$PANDASEQ_VERSION" "$fingerprint" "$input" "$merged" "$sample" "$pair" > "$marker_tmp"
     mv -f "$marker_tmp" "$marker"
     return 0
   else

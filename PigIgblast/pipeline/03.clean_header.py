@@ -161,13 +161,13 @@ def main():
             marker_text=marker.read_text(encoding='utf-8', errors='ignore') if marker.exists() else ''
             if fingerprint and marker.exists() and f'version={CLEAN_HEADER_VERSION}' in marker_text and f'input_fingerprint={fingerprint}' in marker_text and o1.exists() and o2.exists() and all(is_gzip(p) for p in (o1, o2)):
                 n1,n2=marker_value(marker,'r1_reads',-1),marker_value(marker,'r2_reads',-1)
-                return {'sample_id':row['sample_id'],'pair_id':row['pair_id'],'r1_reads':n1,'r2_reads':n2,'r1_percent':100.0,'r2_percent':100.0,'status':'OK','error':''}
+                return {'sample_id':row['sample_id'],'pair_id':row['pair_id'],'r1_output':str(o1),'r2_output':str(o2),'r1_reads':n1,'r2_reads':n2,'r1_percent':100.0,'r2_percent':100.0,'status':'OK','error':''}
             try:
                 n1=process(r1,o1,1); n2=process(r2,o2,2)
                 atomic_write_text(marker, f'stage=clean_header\nversion={CLEAN_HEADER_VERSION}\ninput_fingerprint={fingerprint}\nr1_reads={n1}\nr2_reads={n2}\n')
-                return {'sample_id':row['sample_id'],'pair_id':row['pair_id'],'r1_reads':n1,'r2_reads':n2,'r1_percent':100.0,'r2_percent':100.0,'status':'OK','error':''}
+                return {'sample_id':row['sample_id'],'pair_id':row['pair_id'],'r1_output':str(o1),'r2_output':str(o2),'r1_reads':n1,'r2_reads':n2,'r1_percent':100.0,'r2_percent':100.0,'status':'OK','error':''}
             except Exception as exc:
-                return {'sample_id':row['sample_id'],'pair_id':row['pair_id'],'r1_reads':0,'r2_reads':0,'r1_percent':0,'r2_percent':0,'status':'ERROR','error':str(exc)}
+                return {'sample_id':row['sample_id'],'pair_id':row['pair_id'],'r1_output':str(o1),'r2_output':str(o2),'r1_reads':0,'r2_reads':0,'r1_percent':0,'r2_percent':0,'status':'ERROR','error':str(exc)}
 
     print(f'[PIG][clean] stage_start total={len(jobs)} max_parallel={CLEAN_MAX_PARALLEL}')
     with ThreadPoolExecutor(max_workers=CLEAN_MAX_PARALLEL) as pool:
@@ -177,7 +177,7 @@ def main():
             print(f"[PIG][clean] progress={done}/{len(jobs)} percent={done*100//max(1,len(jobs))} sample={result['sample_id']} status={result['status']}", flush=True)
     rows.sort(key=lambda r: (r['sample_id'], r['pair_id']))
     SUMMARY.parent.mkdir(parents=True,exist_ok=True)
-    fields=['sample_id','pair_id','r1_reads','r2_reads','r1_percent','r2_percent','status','error']
+    fields=['sample_id','pair_id','r1_output','r2_output','r1_reads','r2_reads','r1_percent','r2_percent','status','error']
     with SUMMARY.open('w',newline='',encoding='utf-8') as fh:
         w=csv.DictWriter(fh,fieldnames=fields); w.writeheader(); w.writerows(rows)
     failed=sum(r['status'] != 'OK' for r in rows)

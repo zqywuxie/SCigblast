@@ -249,11 +249,12 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(alice.get('/api/submissions', params={'revision': token}).status_code, 200)
         self.assertEqual(bob.get('/api/submissions', params={'revision': token}).status_code, 404)
         self.assertEqual(bob.post('/api/submissions/revise', json={'revision': token, 'changes': []}).status_code, 404)
-        body = {'pipeline': 'igblast_base', 'input_path': str(self.raw), 'submission_revision': token, 'output_root': str(self.out/'alice')}
+        body = {'pipeline': 'igblast_base', 'input_path': str(self.raw), 'submission_revision': token}
         self.assertEqual(bob.post('/api/jobs', json=body).status_code, 404)
         self.assertEqual(alice.post('/api/jobs', json=body).status_code, 200)
-        body.update(submission_revision='', submission_path=str(self.source), dataset_label='different')
-        self.assertEqual(bob.post('/api/jobs', json=body).status_code, 409)
+        body.update(submission_revision='', submission_path=str(self.source), dataset_label='different', output_root=str(self.out/'alice'))
+        self.assertEqual(bob.post('/api/jobs', json=body).status_code, 400)
+        self.assertEqual(bob.post('/api/validate', json=body).status_code, 400)
 
     def test_english_names_and_pipeline_filter(self):
         code = self.invite()['code']

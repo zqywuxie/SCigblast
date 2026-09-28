@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 try:
@@ -284,6 +284,13 @@ def write_state(rows: list[dict[str, str]], path: Path) -> None:
         temp.unlink(missing_ok=True)
 
 
+def iter_fasta_records(path: Path):
+    """Yield FASTA records while retaining and closing the owning file handle."""
+    opener = gzip.open if path.suffix.lower() == ".gz" else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+        yield from SeqIO.parse(handle, sequence_format(path))
+
+
 def process_fasta(fasta: Path, sample_id: str, umi_by_read: dict[str, str]):
     """Collect sequence counts per UMI for one source FASTA.
 
@@ -295,7 +302,7 @@ def process_fasta(fasta: Path, sample_id: str, umi_by_read: dict[str, str]):
     quality_by_umi_seq: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
     unmatched = 0
     processed = 0
-    for record in SeqIO.parse(str(fasta), sequence_format(fasta)):
+    for record in iter_fasta_records(fasta):
         processed += 1
         read_key = canonical_id(record.description)
         sidecar_umi = umi_by_read.get(read_key, "")
@@ -551,25 +558,36 @@ def main() -> int:
             return path, rel_sample, groups, headers, quality, unmatched
 
         with ThreadPoolExecutor(max_workers=min(WORKERS, len(files))) as executor:
-            futures = [executor.submit(read_one, fasta) for fasta in files]
-            for future in as_completed(futures):
-                fasta, rel_sample, groups, headers, quality, unmatched = future.result()
-                total_unmatched += unmatched
-                for umi, counts in groups.items():
-                    sample_groups[umi].update(counts)
-                for key, header in headers.items():
-                    previous = sample_headers.get(key)
-                    if not previous or header < previous:
-                        sample_headers[key] = header
-                for key, values in quality.items():
-                    aggregate = sample_quality[key]
-                    aggregate[0] += values[0]
-                    aggregate[1] += values[1]
-                    aggregate[2] += values[2]
-                processed_sources += 1
-                print(f"[IR representative source {processed_sources}/{len(sequence_files)}] "
-                      f"{rel_sample} sample_id={sample_id} UMI={len(groups)} "
-                      f"unmatched={unmatched}", flush=True)
+            file_iter = iter(files)
+            pending = {}
+            for _ in range(min(WORKERS, len(files))):
+                fasta = next(file_iter, None)
+                if fasta is not None:
+                    pending[executor.submit(read_one, fasta)] = fasta
+            while pending:
+                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    pending.pop(future)
+                    fasta, rel_sample, groups, headers, quality, unmatched = future.result()
+                    next_fasta = next(file_iter, None)
+                    if next_fasta is not None:
+                        pending[executor.submit(read_one, next_fasta)] = next_fasta
+                    total_unmatched += unmatched
+                    for umi, counts in groups.items():
+                        sample_groups[umi].update(counts)
+                    for key, header in headers.items():
+                        previous = sample_headers.get(key)
+                        if not previous or header < previous:
+                            sample_headers[key] = header
+                    for key, values in quality.items():
+                        aggregate = sample_quality[key]
+                        aggregate[0] += values[0]
+                        aggregate[1] += values[1]
+                        aggregate[2] += values[2]
+                    processed_sources += 1
+                    print(f"[IR representative source {processed_sources}/{len(sequence_files)}] "
+                          f"{rel_sample} sample_id={sample_id} UMI={len(groups)} "
+                          f"unmatched={unmatched}", flush=True)
 
         rows = representative_rows(
             sample_id, sample_groups, sample_headers, sample_quality,

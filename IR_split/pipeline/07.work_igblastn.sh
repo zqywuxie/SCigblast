@@ -70,7 +70,7 @@ if [[ -f "$CHAIN_SUMMARY" ]]; then
     while IFS=$'\t' read -r _sample _chains; do
         [[ -n "$_sample" && -n "$_chains" ]] || continue
         SAMPLE_CHAIN_MAP["$_sample"]="$_chains"
-    done < <(python -c 'import csv,sys; f=open(sys.argv[1],encoding="utf-8-sig",newline=""); r=csv.DictReader(f); d={}; [d.setdefault(row.get("sample_id",""),set()).update(filter(None,row.get("igblast_chains","").split(","))) for row in r if row.get("sample_id") and row.get("igblast_chains")]; [print(k+"\t"+",".join(sorted(v))) for k,v in d.items()]' "$CHAIN_SUMMARY")
+    done < <("${PYTHON_BIN}" -c 'import csv,sys; f=open(sys.argv[1],encoding="utf-8-sig",newline=""); r=csv.DictReader(f); d={}; [d.setdefault(row.get("sample_id",""),set()).update(filter(None,row.get("igblast_chains","").split(","))) for row in r if row.get("sample_id") and row.get("igblast_chains")]; [print(k+"\t"+",".join(sorted(v))) for k,v in d.items()]' "$CHAIN_SUMMARY")
 fi
 
 # In flat PANDAseq output the FASTA basename is the physical pair stem, not
@@ -91,7 +91,7 @@ load_flat_sample_map() {
         else
             FLAT_SAMPLE_MAP["$pair_stem"]="$sample_id"
         fi
-    done < <(python - "$CHAIN_SUMMARY" <<'PY'
+    done < <("${PYTHON_BIN}" - "$CHAIN_SUMMARY" <<'PY'
 import csv
 import sys
 from pathlib import Path

@@ -1,4 +1,5 @@
 """Exercise the runner's actual marker functions under Bash nounset."""
+import os
 import shutil
 import subprocess
 import tempfile
@@ -6,8 +7,23 @@ import unittest
 from pathlib import Path
 
 
+def has_usable_bash():
+    # Windows' bash.exe is a WSL launcher, not a Bash process that can consume
+    # the Windows temporary paths passed by this test.
+    if os.name != 'posix' or not shutil.which('bash'):
+        return False
+    try:
+        result = subprocess.run(
+            ['bash', '--version'], capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=5,
+        )
+        return result.returncode == 0 and result.stdout.startswith('GNU bash')
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 class StageMarkersTest(unittest.TestCase):
-    @unittest.skipUnless(shutil.which('bash'), 'requires Bash')
+    @unittest.skipUnless(has_usable_bash(), 'requires a usable GNU Bash installation')
     def test_markers_are_stage_scoped_and_resume_checks_work(self):
         runner = Path(__file__).resolve().parents[1] / 'run_pig_pipeline.sh'
         source = runner.read_text(encoding='utf-8')

@@ -218,6 +218,9 @@ PY
     done
     exit "$_batch_status"
 fi
+# Acquire only in the single-dataset worker; batch parents spawn children.
+source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
+scigblast_acquire_resource_lock || exit $?
 # Only match and fastp consume raw FASTQ.  All later stages consume the
 # explicit output directory from the preceding stage.  Edit this hardcoded
 # input path when processing another batch.
@@ -352,7 +355,28 @@ CONFIG_SHA256=""
 SCRIPT_SHA256=""
 
 available_memory_gb() {
-    awk '/^MemAvailable:/ {printf "%d", $2 / 1024 / 1024; found=1; exit} END {if (!found) exit 1}' /proc/meminfo 2>/dev/null
+    awk '
+        /^MemAvailable:/ {host=$2/1024/1024}
+        END {
+            available=host
+            if (system("test -r /sys/fs/cgroup/memory.max -a -r /sys/fs/cgroup/memory.current") == 0) {
+                getline limit < "/sys/fs/cgroup/memory.max"; close("/sys/fs/cgroup/memory.max")
+                getline used < "/sys/fs/cgroup/memory.current"; close("/sys/fs/cgroup/memory.current")
+                if (limit ~ /^[0-9]+$/ && limit < 1152921504606846976 && used ~ /^[0-9]+$/) {
+                    cgroup=(limit-used)/1073741824
+                    if (available == 0 || cgroup < available) available=cgroup
+                }
+            } else if (system("test -r /sys/fs/cgroup/memory/memory.limit_in_bytes -a -r /sys/fs/cgroup/memory/memory.usage_in_bytes") == 0) {
+                getline limit < "/sys/fs/cgroup/memory/memory.limit_in_bytes"; close("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+                getline used < "/sys/fs/cgroup/memory/memory.usage_in_bytes"; close("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+                if (limit ~ /^[0-9]+$/ && limit < 1152921504606846976 && used ~ /^[0-9]+$/) {
+                    cgroup=(limit-used)/1073741824
+                    if (available == 0 || cgroup < available) available=cgroup
+                }
+            }
+            if (available > 0) printf "%d", available; else exit 1
+        }
+    ' /proc/meminfo 2>/dev/null
 }
 memory_guard() {
     local label="$1" requested_gb="$2" available_gb
@@ -670,6 +694,14 @@ cleanup_stage() {
     esac
 }
 
+reset_generated_stage() {
+    local path="${1%/}"
+    case "$path" in
+        "${OUTPUT_ROOT}"/*) [[ ! -d "$path" ]] || rm -rf -- "$path" ;;
+        *) echo "refusing to reset unexpected path: $path" >&2; return 1 ;;
+    esac
+}
+
 archive_igblast_batches() {
     local batches="${IGBLAST_OUTPUT_DIR}/.batches"
     [[ -d "$batches" ]] || return 0
@@ -833,6 +865,7 @@ fi
 CLEAN_RERAN=0
 if ! stage_done "04.clean"; then
     CLEAN_RERAN=1
+    reset_generated_stage "${CLEAN_DIR}"
     run_monitored_stage "clean header" "$CLEAN_REQUIRED_GB" env \
     SCIGBLAST_IR_MAPPING_SUMMARY="${MAPPING_SUMMARY}" \
     bash "${SCRIPT_DIR}/04.clean_header.sh" \
@@ -852,6 +885,7 @@ fi
 PANDASEQ_RERAN=0
 if ! stage_done "05.pandaseq"; then
     PANDASEQ_RERAN=1
+    reset_generated_stage "${PANDASEQ_DIR}"
     remove_legacy_flat_pandaseq_output
     run_monitored_stage "PANDAseq" "$PANDASEQ_REQUIRED_GB" env \
     SCIGBLAST_PANDASEQ_OUTPUT_FORMAT="${PANDASEQ_OUTPUT_FORMAT}" \
@@ -875,6 +909,10 @@ if ! stage_done "06.representative"; then
     # Never leave an older DONE marker able to resurrect stale representative
     # files if this run fails before publishing a new result.
     rm -f "${STATE_DIR}/.pipeline_stage_06.representative.DONE"
+    # This directory is a materialized index of the current PANDAseq
+    # inventory. Rebuild it so removed/renamed samples cannot leave empty
+    # representative FASTAs that the recursive IgBLAST scanner would ingest.
+    reset_generated_stage "${REPRESENTATIVE_DIR}/representative_fasta"
     run_monitored_stage "IR representative" "$REPRESENTATIVE_REQUIRED_GB" env \
     SCIGBLAST_IR_REP_INPUT="${PANDASEQ_DIR}" \
     SCIGBLAST_IR_REP_OUTPUT="${REPRESENTATIVE_DIR}" \

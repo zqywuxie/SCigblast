@@ -40,7 +40,10 @@ DEFAULT_OUTPUT_ROOT = Path(
 # Compatibility with the original .env: web_output was a shared task root.
 if DEFAULT_OUTPUT_ROOT == Path('/colddata/zqy/SCigblast/results/web_output').resolve():
     DEFAULT_OUTPUT_ROOT = DEFAULT_OUTPUT_ROOT.parent
-MAX_ACTIVE_JOBS = min(2, max(1, int(os.environ.get("SCIGBLAST_MAX_ACTIVE_JOBS", "2"))))
+# Pipeline memory guards are cgroup-aware, but they do not reserve budget
+# across runner processes. Keep Web-launched work serialized until that shared
+# reservation protocol is implemented and validated on Linux.
+MAX_ACTIVE_JOBS = 1
 
 
 def load_registry() -> dict[str, dict[str, Any]]:
@@ -338,6 +341,21 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_SUMMARY_REVISION_CACHE: dict[tuple[str, int, int, int], str] = {}
+
+
+def summary_revision(path: Path) -> str:
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    digest = _SUMMARY_REVISION_CACHE.get(key)
+    if digest is None:
+        digest = sha256_file(path)
+        if len(_SUMMARY_REVISION_CACHE) >= 128:
+            _SUMMARY_REVISION_CACHE.clear()
+        _SUMMARY_REVISION_CACHE[key] = digest
+    return digest
 
 
 class CreateJob(BaseModel):
@@ -714,6 +732,18 @@ def summary_files(row: sqlite3.Row) -> list[str]:
     return result
 
 
+def summary_file_signature(files: list[str]) -> list[list[Any]]:
+    signature = []
+    for value in files:
+        path = Path(value)
+        try:
+            stat = path.stat()
+            signature.append([str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns])
+        except OSError:
+            signature.append([str(path), None, None, None])
+    return signature
+
+
 def job_config(row):
     config = dict(REGISTRY[row["pipeline"]])
     config["stages"] = list(config["stages"])
@@ -808,7 +838,15 @@ def mapping_files(row):
             for record in csv.DictReader(handle):
                 if record.get("status") != "OK" or not record.get("source_file"):
                     continue
-                path = root / stage / dataset / Path(record["source_file"]).with_suffix(".tsv")
+                source = Path(record["source_file"])
+                path = root / stage / dataset / source.with_suffix(".tsv")
+                if not path.is_file() and stage == "03.umi_count":
+                    # Older mapping attempts stored the final filtered table
+                    # separately. Expose it as the final result, but never
+                    # surface its raw companion as a downloadable artifact.
+                    legacy_filtered = root / stage / dataset / source.with_suffix(".filtered.tsv")
+                    if legacy_filtered.is_file():
+                        path = legacy_filtered
                 if not path.is_file() or not is_under(path, [root / stage / dataset]):
                     continue
                 relative = path.relative_to(root).as_posix()
@@ -818,16 +856,40 @@ def mapping_files(row):
     return entries
 
 
-def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excluded_keys=None):
+def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excluded_keys=None,
+               review_state=None):
     rows, counts, matched = [], {"total": 0, "ok": 0, "error": 0}, 0
     pairs, samples = set(), set()
     note = ''
+    current_assignments = set()
+    validated_keys = set()
+    next_unmarked = None
+    first_unmarked = None
+    ordinal = 0
+    review_marked = review_state.get('marked', set()) if review_state else set()
+    after_key = int(review_state.get('after_key', -1)) if review_state else -1
+    requested_keys = review_state.get('validate_keys', set()) if review_state else set()
+    if review_state is not None:
+        review_state.setdefault('marked_count', 0)
     with path.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t" if path.suffix == ".tsv" else ",")
         for index, item in enumerate(reader):
             if not any(str(v or "").strip() for v in item.values()):
                 note = ''
                 continue
+            row_key = str(index)
+            if row_key in requested_keys:
+                validated_keys.add(row_key)
+            if review_state is not None:
+                if row_key in review_marked:
+                    review_state['marked_count'] += 1
+                else:
+                    candidate = {'row_key': row_key, 'offset': ordinal}
+                    if first_unmarked is None:
+                        first_unmarked = candidate
+                    if next_unmarked is None and index > after_key:
+                        next_unmarked = candidate
+                ordinal += 1
             if 'note' in item:
                 note = item.get('note') or note
                 item['note'] = note
@@ -839,6 +901,10 @@ def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excl
                 pairs.add(pair)
                 if ok:
                     samples.add((pair, item.get("sample_id", "")))
+            if item.get('status') == 'OK':
+                fields = ('sample_id', 'file_path', 'r1_path', 'r2_path', 'pair_id', 'barcode_name',
+                          'barcode_sequence', 'igblast_chains', 'chains', 'chain', 'species')
+                current_assignments.add(json.dumps([item.get(k, '') for k in fields], ensure_ascii=False))
             if excluded_keys is not None and str(index) in excluded_keys:
                 continue
             if errors_only and ok:
@@ -846,11 +912,18 @@ def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excl
             if query and query.casefold() not in " ".join(str(v or "") for v in item.values()).casefold():
                 continue
             if max(0, offset) <= matched < max(0, offset) + min(200, max(1, limit)):
-                rows.append({**item, "_row_key": str(index)})
+                rows.append({**item, "_row_key": row_key})
             matched += 1
-    return {"path": str(path), "columns": reader.fieldnames or [], "rows": rows,
-            "counts": {**counts, "file_pairs": len(pairs), "matched_samples": len(samples)},
-            "total": matched, "offset": max(0, offset)}
+    result = {"path": str(path), "columns": reader.fieldnames or [], "rows": rows,
+              "counts": {**counts, "file_pairs": len(pairs), "matched_samples": len(samples)},
+              "total": matched, "offset": max(0, offset)}
+    if review_state is not None:
+        review_state['total'] = counts['total']
+        review_state['next_unmarked'] = next_unmarked or first_unmarked
+        if requested_keys:
+            result['_validated_keys'] = validated_keys
+        result['_current_assignments'] = current_assignments
+    return result
 
 
 app = FastAPI(title="SCigblast Pipeline Runner", version="0.1.0")
@@ -1155,20 +1228,17 @@ def rematch(job_id: str, request: dict):
 def annotate_match(job_id: str, request: dict):
     with PROCESS_LOCK:
         row = get_job_row(job_id)
-        result = match_preview(job_id)
-        if request.get("revision") != result.get("revision") or row["status"] != "WAITING_REVIEW":
-            raise HTTPException(409, "Review is not current")
-        label = request.get("label", "")
-        if label not in {"", "已核对", "待补资料"}:
-            raise HTTPException(400, "Invalid review label")
         keys = request.get('row_keys', [request.get('row_key')])
         if not isinstance(keys, list) or not 1 <= len(keys) <= 5000 or any(not isinstance(k, str) or not k.isdecimal() for k in keys):
             raise HTTPException(400, 'Select between 1 and 5000 valid rows')
+        label = request.get("label", "")
+        if label not in {"", "已核对", "待补资料"}:
+            raise HTTPException(400, "Invalid review label")
         keys = set(keys)
-        with Path(result['path']).open(encoding='utf-8-sig', newline='') as handle:
-            valid = {str(i) for i, record in enumerate(csv.DictReader(handle))
-                     if any(str(v or '').strip() for v in record.values())}
-        if not keys <= valid:
+        result = match_preview(job_id, _validate_keys=keys)
+        if request.get("revision") != result.get("revision") or row["status"] != "WAITING_REVIEW":
+            raise HTTPException(409, "Review is not current")
+        if not keys <= result.pop('_valid_requested_keys'):
             raise HTTPException(400, 'Selection contains rows not in this Match revision')
         with db() as connection:
             connection.executemany(
@@ -1402,7 +1472,9 @@ def get_job(job_id: str) -> dict[str, Any]:
     row = get_job_row(job_id)
     options = json.loads(row['options_json'])
     options.pop('approved_assignments', None)
-    return {"job": snapshot(row), "options": options, "actions": actions_for(job_id), "match_summary": summary_files(row)}
+    files = summary_files(row)
+    return {"job": snapshot(row), "options": options, "actions": actions_for(job_id),
+            "match_summary": files, "match_summary_signature": summary_file_signature(files)}
 
 
 def actions_for(job_id: str) -> list[dict[str, Any]]:
@@ -1434,7 +1506,7 @@ def job_log(job_id: str, offset: int = 0, max_bytes: int = 262144, source: str =
 
 
 @app.get("/api/jobs/{job_id}/match-preview")
-def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False, unmarked_only: bool = False, after_key: int = -1) -> dict[str, Any]:
+def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False, unmarked_only: bool = False, after_key: int = -1, _validate_keys=None) -> dict[str, Any]:
     row = get_job_row(job_id)
     require_match_pipeline(row)
     files = summary_files(row)
@@ -1442,28 +1514,28 @@ def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = ""
         return {"path": None, "columns": [], "rows": []}
     path = Path(files[0])
     try:
-        result = read_table(path, offset, limit, query, errors_only)
-        result["revision"] = f"{row['attempt_no']}:{sha256_file(path)}"
+        revision = f"{row['attempt_no']}:{summary_revision(path)}"
         options = json.loads(row['options_json'])
-        current = matched_assignments(path)
-        previous = set(options.get('approved_assignments', []))
-        result['changes'] = {'new_ok_records': len(current - previous), 'removed_or_changed_ok_records': len(previous - current)}
         with db() as connection:
-            annotations = connection.execute("SELECT * FROM reviews WHERE job_id=? AND revision=?", (job_id, result["revision"])).fetchall()
-        result["reviews"] = {r["row_key"]: {"label": r["label"], "note": r["note"]} for r in annotations}
-        with path.open(encoding='utf-8-sig', newline='') as handle:
-            keys = {str(i) for i, record in enumerate(csv.DictReader(handle))
-                    if any(str(v or '').strip() for v in record.values())}
+            annotations = connection.execute("SELECT * FROM reviews WHERE job_id=? AND revision=?", (job_id, revision)).fetchall()
         marked = {r['row_key'] for r in annotations if r['label'] in {'已核对', '待补资料'}}
-        result['review_counts'] = {'total': len(keys), 'marked': len(keys & marked),
-                                   'unmarked': len(keys - marked)}
-        if unmarked_only:
-            filtered = read_table(path, offset, limit, query, errors_only, excluded_keys=marked)
-            result.update({k: filtered[k] for k in ('rows', 'total', 'offset')})
-        ordered = sorted(keys, key=int)
-        missing = sorted(keys - marked, key=int)
-        target = next((key for key in missing if int(key) > after_key), missing[0] if missing else None)
-        result['next_unmarked'] = {'row_key': target, 'offset': ordered.index(target)} if target is not None else None
+        review_state = {'marked': marked, 'after_key': after_key,
+                        'validate_keys': set(_validate_keys or ())}
+        result = read_table(path, offset, limit, query, errors_only,
+                            excluded_keys=marked if unmarked_only else None,
+                            review_state=review_state)
+        current = result.pop('_current_assignments')
+        valid_requested = result.pop('_validated_keys', set())
+        previous = set(options.get('approved_assignments', []))
+        result['revision'] = revision
+        result['changes'] = {'new_ok_records': len(current - previous), 'removed_or_changed_ok_records': len(previous - current)}
+        result["reviews"] = {r["row_key"]: {"label": r["label"], "note": r["note"]} for r in annotations}
+        marked = {r['row_key'] for r in annotations if r['label'] in {'已核对', '待补资料'}}
+        result['review_counts'] = {'total': review_state['total'], 'marked': review_state['marked_count'],
+                                   'unmarked': review_state['total'] - review_state['marked_count']}
+        result['next_unmarked'] = review_state['next_unmarked']
+        if _validate_keys:
+            result['_valid_requested_keys'] = valid_requested
         return result
     except (OSError, csv.Error) as exc:
         raise HTTPException(500, f"cannot read match summary: {exc}") from exc

@@ -53,7 +53,7 @@ if [[ -f "$CHAIN_SUMMARY" ]]; then
     while IFS=$'\t' read -r _sample _chains; do
         [[ -n "$_sample" && -n "$_chains" ]] || continue
         SAMPLE_CHAIN_MAP["$_sample"]="$_chains"
-    done < <(python -c 'import csv,sys; f=open(sys.argv[1],encoding="utf-8-sig",newline=""); r=csv.DictReader(f); d={}; [d.setdefault(row.get("sample_id",""),set()).update(filter(None,row.get("igblast_chains","").split(","))) for row in r if row.get("status","").upper()=="OK" and row.get("sample_id") and row.get("igblast_chains")]; [print(k+"\t"+",".join(sorted(v))) for k,v in d.items()]' "$CHAIN_SUMMARY")
+    done < <("${PYTHON_BIN}" -c 'import csv,sys; f=open(sys.argv[1],encoding="utf-8-sig",newline=""); r=csv.DictReader(f); d={}; [d.setdefault(row.get("sample_id",""),set()).update(filter(None,row.get("igblast_chains","").split(","))) for row in r if row.get("status","").upper()=="OK" and row.get("sample_id") and row.get("igblast_chains")]; [print(k+"\t"+",".join(sorted(v))) for k,v in d.items()]' "$CHAIN_SUMMARY")
 fi
 
 chain_allowed_for_sample() {

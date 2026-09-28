@@ -61,13 +61,13 @@ run_one(){
   if [[ ! -s "$r1" || ! -s "$r2" ]]; then printf '%s,%s,0,0,0,ERROR,missing_canonical_clean_FASTQ\n' "$sample" "$pair" > "$row_file"; return 1; fi
   fingerprint=$(printf '%s\0%s\0%s\0%s\0%s' "$r1" "$r2" "$(stat -c '%s:%Y' "$r1")" "$(stat -c '%s:%Y' "$r2")" "$THREADS" | sha256sum | awk '{print $1}')
   if [[ -s "$fasta" && -s "$marker" ]]&&grep -qx 'status=DONE' "$marker"&&grep -qx "job_fingerprint=${fingerprint}" "$marker"; then
-    input_pairs=$(awk -F= '$1=="input_pairs"{print $2}' "$marker"); merged=$(awk -F= '$1=="merged_sequences"{print $2}' "$marker"); input_pairs=${input_pairs:-0}; merged=${merged:-0}; pct=$(awk -v a="$merged" -v b="$input_pairs" 'BEGIN{printf "%.2f",b?a*100/b:0}'); printf '%s,%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; log "skip sample=${sample} pair=${pair}"; return 0
+    input_pairs=$(awk -F= '$1=="input_pairs"{print $2}' "$marker"); merged=$(awk -F= '$1=="merged_sequences"{print $2}' "$marker"); input_pairs=${input_pairs:-0}; merged=${merged:-0}; pct=$(awk -v a="$merged" -v b="$input_pairs" 'BEGIN{printf "%.2f",b?a*100/b:0}'); printf '%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; log "skip sample=${sample} pair=${pair}"; return 0
   fi
   tmp="${fasta}.tmp.${BASHPID}"
   if "$PANDASEQ_BIN" -f "$r1" -r "$r2" -B -w "$tmp" -T "$THREADS" > "$logfile" 2>&1; then
     mv -f "$tmp" "$fasta"; merged=$(grep -c '^>' "$fasta" || true); input_pairs=$(gzip -cd "$r1" | awk 'END{print int(NR/4)}'); pct=$(awk -v a="$merged" -v b="$input_pairs" 'BEGIN{printf "%.2f",b?a*100/b:0}')
     { printf 'status=DONE\nmanifest_schema_version=2\nstage=pandaseq\nversion=%s\njob_fingerprint=%s\ninput_pairs=%s\nmerged_sequences=%s\noutput_naming_schema=baseline_pair_sample_v2\nsample_id=%s\npair_id=%s\n' "$STAGE_VERSION" "$fingerprint" "$input_pairs" "$merged" "$sample" "$pair"; } > "${marker}.tmp.${BASHPID}"; mv -f "${marker}.tmp.${BASHPID}" "$marker"
-    printf '%s,%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; return 0
+    printf '%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; return 0
   fi
   rm -f "$tmp"; printf '%s,%s,0,0,0,ERROR,pandaseq_failed\n' "$sample" "$pair" > "$row_file"; return 1
 }

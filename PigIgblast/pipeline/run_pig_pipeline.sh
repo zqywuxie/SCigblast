@@ -96,6 +96,8 @@ if (( ${#_inputs[@]} )); then
   done
   exit "$_batch_status"
 fi
+source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
+scigblast_acquire_resource_lock || exit $?
 DATASET_LABEL="${SCIGBLAST_DATASET_LABEL:-}"
 if [[ -z "$DATASET_LABEL" && -n "${RAW_INPUT_DIR:-}" ]]; then
   DATASET_LABEL="$(basename "${RAW_INPUT_DIR%/}" | tr -cs 'A-Za-z0-9._-' '_')"
@@ -124,7 +126,26 @@ MEMORY_POLL_SECONDS="${SCIGBLAST_MEMORY_POLL_SECONDS:-${MEMORY_POLL_SECONDS:-5}}
 [[ "$MEMORY_STOP_THRESHOLD_GB" =~ ^[0-9]+$ ]] || { echo "[PIG] ERROR MEMORY_STOP_THRESHOLD_GB must be a non-negative integer" >&2; exit 2; }
 [[ "$MEMORY_POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "[PIG] ERROR MEMORY_POLL_SECONDS must be a positive integer" >&2; exit 2; }
 available_memory_gb(){
-  awk '/^MemAvailable:/ {printf "%d", $2 / 1024 / 1024; found=1; exit} END {if (!found) exit 1}' /proc/meminfo 2>/dev/null
+  awk '
+    /^MemAvailable:/ {host=$2/1024/1024}
+    END {
+      available=host
+      if (system("test -r /sys/fs/cgroup/memory.max -a -r /sys/fs/cgroup/memory.current") == 0) {
+        getline limit < "/sys/fs/cgroup/memory.max"; close("/sys/fs/cgroup/memory.max")
+        getline used < "/sys/fs/cgroup/memory.current"; close("/sys/fs/cgroup/memory.current")
+        if (limit ~ /^[0-9]+$/ && limit < 1152921504606846976 && used ~ /^[0-9]+$/) {
+          cgroup=(limit-used)/1073741824; if (available == 0 || cgroup < available) available=cgroup
+        }
+      } else if (system("test -r /sys/fs/cgroup/memory/memory.limit_in_bytes -a -r /sys/fs/cgroup/memory/memory.usage_in_bytes") == 0) {
+        getline limit < "/sys/fs/cgroup/memory/memory.limit_in_bytes"; close("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        getline used < "/sys/fs/cgroup/memory/memory.usage_in_bytes"; close("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        if (limit ~ /^[0-9]+$/ && limit < 1152921504606846976 && used ~ /^[0-9]+$/) {
+          cgroup=(limit-used)/1073741824; if (available == 0 || cgroup < available) available=cgroup
+        }
+      }
+      if (available > 0) printf "%d", available; else exit 1
+    }
+  ' /proc/meminfo 2>/dev/null
 }
 memory_guard(){
   local label="$1" requested_gb="$2" available_gb
@@ -266,11 +287,73 @@ hash_file(){ if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk 
 CONFIG_SHA256="$(hash_file "${SCRIPT_DIR}/00.pipeline_config.env")"
 stage_script(){ case "$1" in fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; clean) printf '%s/03.clean_header.py\n' "$SCRIPT_DIR";; pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; igblast) printf '%s/05.work_igblastn.py\n' "$SCRIPT_DIR";; esac; }
 stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; } | sha256sum | awk '{print $1}'; }
+stage_summary_rows(){
+  "${PYTHON_BIN}" - "$1" "$2" <<'PY'
+import csv,sys
+path,delimiter=sys.argv[1],sys.argv[2]
+try:
+    with open(path,encoding='utf-8-sig',newline='') as handle:
+        rows=list(csv.DictReader(handle,delimiter=delimiter))
+    if not rows or any(row.get('status') and row['status'].strip().upper()!='OK' for row in rows): raise ValueError()
+    print(len(rows))
+except (OSError,ValueError,csv.Error):
+    raise SystemExit(1)
+PY
+}
+stage_artifacts_ready(){
+  "${PYTHON_BIN}" - "$1" "$2" "${@:3}" <<'PY'
+import csv,sys
+from pathlib import Path
+summary,delimiter,*specs=sys.argv[1:]
+try:
+    with open(summary,encoding='utf-8-sig',newline='') as handle:
+        rows=list(csv.DictReader(handle,delimiter=delimiter))
+    if not rows: raise ValueError()
+    for row in rows:
+        if row.get('status') and row['status'].strip().upper()!='OK': raise ValueError()
+        for spec in specs:
+            mode,column=spec.split(':',1) if ':' in spec else ('nonempty',spec)
+            value=(row.get(column) or '').strip()
+            if not value: raise ValueError()
+            path=Path(value)
+            if not path.is_file() or (mode=='nonempty' and path.stat().st_size==0): raise ValueError()
+    print(len(rows))
+except (OSError,ValueError,csv.Error):
+    raise SystemExit(1)
+PY
+}
+stage_pandaseq_ready(){
+  "${PYTHON_BIN}" - "$1" "$2" <<'PY'
+import csv,re,sys
+from pathlib import Path
+summary,root=Path(sys.argv[1]),Path(sys.argv[2])
+def safe(value): return re.sub(r'[^A-Za-z0-9._-]+','_',str(value)).strip('_') or 'unnamed'
+try:
+    with summary.open(encoding='utf-8-sig',newline='') as handle:
+        rows=list(csv.DictReader(handle))
+    if not rows: raise ValueError()
+    artifacts=set()
+    for marker in root.rglob('.DONE'):
+        values=dict(line.split('=',1) for line in marker.read_text(encoding='utf-8',errors='replace').splitlines() if '=' in line)
+        sample,pair=values.get('sample_id',''),values.get('pair_id','')
+        if not sample or not pair:
+            # Older successful markers can be associated by their summary row
+            # only when the output file exists at the known sample/pair path.
+            continue
+        fasta=marker.parent/(safe(pair)+'_merged.fasta')
+        if fasta.is_file(): artifacts.add((sample,pair))
+    for row in rows:
+        if row.get('status','').strip().upper()!='OK' or (row.get('sample_id',''),row.get('pair_id','')) not in artifacts: raise ValueError()
+    print(len(rows))
+except (OSError,ValueError,csv.Error):
+    raise SystemExit(1)
+PY
+}
 stage_output_ready(){ case "$1" in
-  fastp) [[ -d "$(stage_root 02.fastp)/data" && -d "$(stage_root 02.fastp)/report" ]] && [[ -n "$(find "$(stage_root 02.fastp)/data" -type f \( -name '*.fq.gz' -o -name '*.fastq.gz' \) -print -quit 2>/dev/null)" ]];;
-  clean) [[ -n "$(find "$(stage_root 03.clean_data)" -type f \( -name '*.fq.gz' -o -name '*.fastq.gz' \) -print -quit 2>/dev/null)" ]];;
-  pandaseq) [[ -n "$(find "$(stage_root 04.pandaseq)" -type f \( -name '*.fa' -o -name '*.fasta' \) -print -quit 2>/dev/null)" ]];;
-  igblast) [[ -s "$(stage_root 05.igblastn_out)/chain_summary.csv" || -s "$(stage_root 05.igblastn_out)/igblastn_run_summary.tsv" ]];;
+  fastp) local root rows files; root="$(stage_root 02.fastp)"; [[ -d "$root/data" && -d "$root/report" && -s "$root/report/fastp_summary.csv" ]] || return 1; rows="$(stage_artifacts_ready "$root/report/fastp_summary.csv" ',' r1_output r2_output)" || return 1; files="$(find "$root/data" -type f \( -name '*.fq.gz' -o -name '*.fastq.gz' \) 2>/dev/null | wc -l)"; (( files >= rows * 2 ));;
+  clean) local root rows files; root="$(stage_root 03.clean_data)"; [[ -s "$root/clean_summary.csv" ]] || return 1; rows="$(stage_artifacts_ready "$root/clean_summary.csv" ',' r1_output r2_output)" || return 1; files="$(find "$root" -type f \( -name '*.fq.gz' -o -name '*.fastq.gz' \) 2>/dev/null | wc -l)"; (( files >= rows * 2 ));;
+  pandaseq) local root rows files; root="$(stage_root 04.pandaseq)"; [[ -s "$root/pandaseq_summary.csv" ]] || return 1; rows="$(stage_pandaseq_ready "$root/pandaseq_summary.csv" "$root")" || return 1; files="$(find "$root" -type f \( -name '*.fa' -o -name '*.fasta' \) 2>/dev/null | wc -l)"; (( files >= rows ));;
+  igblast) local root summary delimiter rows files; root="$(stage_root 05.igblastn_out)"; [[ -s "$root/chain_summary.csv" || -s "$root/igblastn_run_summary.tsv" ]] || return 1; if [[ -s "$root/chain_summary.csv" ]]; then summary="$root/chain_summary.csv"; delimiter=','; else summary="$root/igblastn_run_summary.tsv"; delimiter=$'\t'; fi; rows="$(stage_artifacts_ready "$summary" "$delimiter" output_path)" || return 1; files="$(find "$root/.tasks" -type f -name '*.tsv' 2>/dev/null | wc -l)"; (( files >= rows ));;
   *) return 1;; esac; }
 MAPPING_SHA256="unknown"
 stage_done(){

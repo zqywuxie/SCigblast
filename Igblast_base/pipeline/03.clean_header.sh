@@ -107,8 +107,9 @@ root,out=Path(sys.argv[1]),Path(sys.argv[2]); rows=[]
 for marker in sorted(root.rglob('.DONE')):
     values=dict(line.split('=',1) for line in marker.read_text(encoding='utf-8',errors='ignore').splitlines() if '=' in line)
     if values.get('stage')!='clean' or values.get('status')!='DONE': continue
-    rows.append({'sample_id':values.get('sample_id', marker.parent.name),'pair_id':values.get('pair_id', marker.parent.parent.name),'status':'OK','error':'','output_dir':marker.parent.relative_to(root).as_posix()})
-fields=['sample_id','pair_id','status','error','output_dir']; tmp=out.with_suffix(out.suffix+'.tmp')
+    r1=sorted(marker.parent.glob('*_R1.fq.gz')); r2=sorted(marker.parent.glob('*_R2.fq.gz'))
+    rows.append({'sample_id':values.get('sample_id', marker.parent.name),'pair_id':values.get('pair_id', marker.parent.parent.name),'status':'OK','error':'','output_dir':marker.parent.relative_to(root).as_posix(),'r1_output':str(r1[0]) if r1 else '', 'r2_output':str(r2[0]) if r2 else ''})
+fields=['sample_id','pair_id','status','error','output_dir','r1_output','r2_output']; tmp=out.with_suffix(out.suffix+'.tmp')
 with tmp.open('w',encoding='utf-8',newline='') as fh: writer=csv.DictWriter(fh,fieldnames=fields); writer.writeheader(); writer.writerows(rows)
 os.replace(tmp,out)
 PY

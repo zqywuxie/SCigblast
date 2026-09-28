@@ -156,11 +156,12 @@ def main():
                     for line_no, line in enumerate(src):
                         if first or line_no > 0: out.write(line)
                 first=False
-    fields=["sample_id","pair_id","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","status","error"]
+    fields=["sample_id","pair_id","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","status","error","output_path"]
     with SUMMARY.open("w", encoding="utf-8", newline="") as fh:
         writer=csv.DictWriter(fh, fieldnames=fields, delimiter="\t"); writer.writeheader()
         for result in sorted(results, key=lambda r:(r["sample_id"],r["pair_id"],r["chain"])):
             n=result["input_sequences"]; mapped=int(result["mapped_rows"]); productive=int(result["productive_rows"]); filtered=int(result["output_rows"])
+            result["output_path"] = str(result.get("path") or "")
             result.update(mapped_seqs=mapped, unmapped_seqs=max(n-mapped,0), productive_seqs=productive, productive_percent=f"{productive*100/n:.2f}" if n else "0.00", filtered_seqs=filtered, mapping_percent=f"{mapped*100/n:.2f}" if n else "0.00", filtered_percent=f"{filtered*100/n:.2f}" if n else "0.00")
             result["retained_percent"]=result["filtered_percent"]; writer.writerow({key:result.get(key,"") for key in fields})
     with (OUTPUT / "chain_summary.csv").open("w", encoding="utf-8", newline="") as fh:

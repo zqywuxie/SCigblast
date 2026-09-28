@@ -60,6 +60,16 @@ class MappingWebTests(unittest.TestCase):
         (self.fixture.raw/'B__IGH.csv').unlink()
         self.assertEqual(self.client.post('/api/jobs',json=self.body).status_code,400)
 
+    def test_legacy_mapping_exposes_filtered_but_not_raw_output(self):
+        jid = self.create(); row = self.web.get_job_row(jid)
+        root = Path(row['output_root'])/'03.umi_count'/row['dataset']; root.mkdir(parents=True)
+        (root/'umi_count_summary.csv').write_text('source_file,status\nA__IGH.csv,OK\n')
+        (root/'A__IGH.filtered.tsv').write_text('sequence_id\tumi_count\n0_C_11\t11\n')
+        (root/'A__IGH.raw.tsv').write_text('sequence_id\tumi_count\n0_C_11\t12\n')
+        files = self.web.mapping_files(row)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(Path(files[0]['path']).name, 'A__IGH.filtered.tsv')
+
     def test_three_stage_completion_and_file_access(self):
         jid = self.create(); row = self.web.get_job_row(jid)
         state = self.web.state_dir(row); state.mkdir(parents=True)

@@ -85,6 +85,9 @@ OUTPUT_FIELDS = [
         }
     ],
 ]
+READ_FIELDS = frozenset(
+    (*AIRR_FIELDS, "barcode", "sequence_id", "umi_counts", "umi_count")
+)
 
 BAD_CALLS = {
     "",
@@ -222,20 +225,19 @@ def _parse_counts(series: pd.Series, source: str) -> pd.Series:
 
 
 def _read_one(path: Path, sep: str, merge_group_id: str, order_start: int) -> pd.DataFrame:
-    chunks = []
-    rows_read = 0
-    reader = pd.read_csv(
-        path,
-        sep=_separator(path, sep),
-        dtype=str,
-        keep_default_na=False,
-        chunksize=max(1, int(READ_CHUNK_ROWS)),
-    )
-    for chunk in reader:
-        chunks.append(chunk)
-        rows_read += len(chunk)
-        _progress(f"reading file={path.name} rows={rows_read:,}")
-    frame = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+    try:
+        # Grouping is global later in this stage, so retain one frame, but
+        # discard IgBLAST columns that neither the filter nor output needs.
+        frame = pd.read_csv(
+            path,
+            sep=_separator(path, sep),
+            dtype=str,
+            keep_default_na=False,
+            usecols=lambda column: str(column).lstrip("\ufeff").strip()
+            in READ_FIELDS,
+        )
+    except pd.errors.EmptyDataError:
+        frame = pd.DataFrame()
     _progress(f"read complete file={path.name} rows={len(frame):,}")
     frame.columns = [str(column).lstrip("\ufeff").strip() for column in frame.columns]
 
@@ -280,6 +282,9 @@ def read_inputs(paths: Iterable[Path], sep: str, merge_group_id: str) -> pd.Data
         order += len(frame)
     if not frames:
         raise ValueError("at least one input file is required")
+    if len(frames) == 1:
+        # The standard stage-8 path reads one file; avoid copying it via concat.
+        return frames[0]
     return pd.concat(frames, ignore_index=True)
 
 
@@ -660,6 +665,7 @@ def process_one_file(source: Path, input_dir: Path, output_dir: Path) -> tuple[P
             merge_group_id = source.parent.name or "."
     raw = read_inputs([source], INPUT_SEPARATOR, merge_group_id)
     filtered, stats = airr_filter(raw)
+    del raw
     _progress(
         f"AIRR filter complete file={source.name} "
         f"input={stats['input_rows']:,} retained={stats['airr_filtered_rows']:,}"
@@ -671,6 +677,7 @@ def process_one_file(source: Path, input_dir: Path, output_dir: Path) -> tuple[P
         dominant_ratio=DOMINANT_RATIO,
         min_alt_fraction=MIN_ALT_FRACTION,
     )
+    del filtered
 
     output_path = output_path_for(source, input_dir, output_dir)
     output_sep = "\t" if output_path.name.lower().endswith((".tsv", ".tsv.gz")) else ","

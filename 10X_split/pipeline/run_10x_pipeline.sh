@@ -104,6 +104,8 @@ if (( ${#_inputs[@]} )); then
     done
     exit "$_batch_status"
 fi
+source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
+scigblast_acquire_resource_lock || exit $?
 mkdir -p "$OUTPUT_ROOT"
 RAW_INPUT_DIR="${SCIGBLAST_RAW_INPUT_DIR:-/colddata/zqy/XYFY_HZJ1}"
 if [[ -n "${SCIGBLAST_SUBMISSION_XLSX:-}" && -d "${SCIGBLAST_SUBMISSION_XLSX}" ]]; then
@@ -158,7 +160,28 @@ MATCH_REVIEW_MARKER="${STATE_DIR}/.match_review.done"
 MAPPING_SHA256=""
 
 available_memory_gb() {
-    awk '/^MemAvailable:/ {printf "%d", $2 / 1024 / 1024; found=1; exit} END {if (!found) exit 1}' /proc/meminfo 2>/dev/null
+    awk '
+        /^MemAvailable:/ {host=$2/1024/1024}
+        END {
+            available=host
+            if (system("test -r /sys/fs/cgroup/memory.max -a -r /sys/fs/cgroup/memory.current") == 0) {
+                getline limit < "/sys/fs/cgroup/memory.max"; close("/sys/fs/cgroup/memory.max")
+                getline used < "/sys/fs/cgroup/memory.current"; close("/sys/fs/cgroup/memory.current")
+                if (limit ~ /^[0-9]+$/ && limit < 1152921504606846976 && used ~ /^[0-9]+$/) {
+                    cgroup=(limit-used)/1073741824
+                    if (available == 0 || cgroup < available) available=cgroup
+                }
+            } else if (system("test -r /sys/fs/cgroup/memory/memory.limit_in_bytes -a -r /sys/fs/cgroup/memory/memory.usage_in_bytes") == 0) {
+                getline limit < "/sys/fs/cgroup/memory/memory.limit_in_bytes"; close("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+                getline used < "/sys/fs/cgroup/memory/memory.usage_in_bytes"; close("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+                if (limit ~ /^[0-9]+$/ && limit < 1152921504606846976 && used ~ /^[0-9]+$/) {
+                    cgroup=(limit-used)/1073741824
+                    if (available == 0 || cgroup < available) available=cgroup
+                }
+            }
+            if (available > 0) printf "%d", available; else exit 1
+        }
+    ' /proc/meminfo 2>/dev/null
 }
 memory_guard() {
     local label="$1" requested_gb="$2" available_gb

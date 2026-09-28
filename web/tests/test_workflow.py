@@ -52,8 +52,15 @@ class WorkflowTests(unittest.TestCase):
         self.temp.cleanup()
 
     def create(self, dataset='batch', pipeline='igblast_base'):
-        r = self.client.post('/api/jobs', json={'pipeline':pipeline, 'operator':'test', 'input_path':str(self.raw), 'submission_revision':self.view['revision'], 'output_root':str(self.out), 'dataset_label':dataset})
-        self.assertEqual(r.status_code,200,r.text);return r.json()['id']
+        r = self.client.post('/api/jobs', json={'pipeline':pipeline, 'operator':'test', 'input_path':str(self.raw), 'submission_revision':self.view['revision'], 'dataset_label':dataset})
+        self.assertEqual(r.status_code,200,r.text)
+        # Historical shared-root fixture, inserted internally (new HTTP jobs
+        # can no longer request this layout).
+        jid = r.json()['id']
+        env = json.loads(web.get_job_row(jid)['env_json'])
+        env.update(SCIGBLAST_OUTPUT_ROOT=str(self.out), SCIGBLAST_RUN_OUTPUT_ROOT=str(self.out))
+        web.update_job(jid, output_root=str(self.out), env_json=json.dumps(env))
+        return jid
 
     def mark_all(self, jid):
         data = self.client.get(f'/api/jobs/{jid}/match-preview', params={'limit': 200}).json()
@@ -145,7 +152,7 @@ class WorkflowTests(unittest.TestCase):
         self.mark_all(jid)
         self.assertEqual(self.client.post(f'/api/jobs/{jid}/confirm-match',json={'revision':r['revision']}).status_code,200)
         self.assertEqual(json.loads(web.get_job_row(jid)['env_json'])['SCIGBLAST_WEB_MATCH_ONLY'],'0')
-        self.assertEqual(self.client.post('/api/jobs',json={'pipeline':'igblast_base','operator':'test','input_path':str(self.raw),'submission_revision':self.view['revision'],'output_root':str(self.out),'dataset_label':'batch'}).status_code,409)
+        self.assertEqual(self.client.post('/api/jobs',json={'pipeline':'igblast_base','operator':'test','input_path':str(self.raw),'submission_revision':self.view['revision'],'output_root':str(self.out),'dataset_label':'batch'}).status_code,400)
 
     def test_rematch_allows_new_but_blocks_changed_assignments(self):
         jid=self.create();p=self.match(jid,1)
@@ -183,7 +190,7 @@ class WorkflowTests(unittest.TestCase):
             threads=[threading.Thread(target=web.schedule) for _ in range(8)]
             for t in threads:t.start()
             for t in threads:t.join()
-        self.assertEqual(len(calls),2);self.assertEqual(len(set(calls)),2)
+        self.assertEqual(len(calls),web.MAX_ACTIVE_JOBS);self.assertEqual(len(set(calls)),web.MAX_ACTIVE_JOBS)
         self.patches[-1].start()
 
     def test_all_error_cannot_continue_and_queue_can_stop(self):
