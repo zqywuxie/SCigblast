@@ -685,6 +685,15 @@ def write_summary(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def main() -> int:
+    manifest = os.environ.get('SCIGBLAST_INPUT_MANIFEST', '')
+    if manifest:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from pipeline_input_manifest import match_rows
+        rows = match_rows(manifest, 'igblast_base', INPUT_DIR)
+        validate_pairs(rows)
+        write_summary(OUTPUT_SUMMARY, rows)
+        print(f"[match] directory samples={len(rows)}", file=sys.stderr)
+        return 0
     submission_paths = [Path(item) for item in SUBMISSION_PATHS_VALUE.splitlines() if item.strip()] or [SUBMISSION_XLSX]
     print(f"[match] workbooks={len(submission_paths)}", file=sys.stderr, flush=True)
     if NO_BARCODE:

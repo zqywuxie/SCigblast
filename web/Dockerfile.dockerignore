@@ -7,6 +7,11 @@
 !web/check_runtime.py
 !web/check_bundle.py
 !web/app.py
+!web/preflight.py
+!web/table_preview.py
+!web/process_identity.py
+!web/artifact_download.py
+!web/mapping_results.py
 !web/auth.py
 !web/manage_users.py
 !web/submission.py
@@ -14,6 +19,8 @@
 !web/templates/*.html
 !web/static/*.css
 !web/static/*.js
+!web/static/demos/README.txt
+!web/static/demos/scigblast-teaching-v1.zip
 !IR_split/pipeline/**/*.py
 !IR_split/pipeline/**/*.sh
 !IR_split/pipeline/00.pipeline_config.env
@@ -33,3 +40,8 @@
 !mapping/pipeline/00.pipeline_config.env
 
 !web/archive_results.py
+!pipeline_resource_lock.sh
+!pipeline_igblast_cache.py
+!pipeline_parallel.py
+!pipeline_input_manifest.py
+!web/input_manifest.py

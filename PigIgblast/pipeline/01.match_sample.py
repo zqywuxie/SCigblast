@@ -308,6 +308,24 @@ def empty_row(pair: str, r1: Path | None, r2: Path | None) -> dict[str, str]:
 
 
 def main() -> int:
+    manifest = os.environ.get('SCIGBLAST_INPUT_MANIFEST', '')
+    if manifest:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from pipeline_input_manifest import match_rows
+        rows = match_rows(manifest, 'pig_igblast', RAW)
+        OUT.mkdir(parents=True, exist_ok=True)
+        destinations = {OUT / 'sample_manifest.csv', OUT / 'match_summary.csv'}
+        if MATCH_OUTPUT:
+            destinations.add(Path(MATCH_OUTPUT))
+        for destination in destinations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temp = destination.with_suffix(destination.suffix + '.tmp')
+            with temp.open('w', encoding='utf-8', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=FIELDS)
+                writer.writeheader(); writer.writerows(rows)
+            os.replace(temp, destination)
+        print(f"[PIG][match] directory samples={len(rows)}")
+        return 0
     configured_submissions = [Path(item) for item in SUBMISSION_PATHS_VALUE.splitlines() if item.strip()] or [SUBMISSION]
     if not RAW.is_dir() or not any(item.exists() for item in configured_submissions):
         print(f"[PIG][match] missing input/submission: {RAW} {SUBMISSION}", file=sys.stderr); return 2

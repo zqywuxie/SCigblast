@@ -18,6 +18,12 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
 
+def available_dependencies(pipeline, env, chains=None, **kwargs):
+    """These API fixtures simulate an installed runtime; helper tests check real discovery."""
+    return {'valid': True, 'errors': [], 'warnings': [], 'commands': {},
+            'missing_modules': [], 'missing_databases': [], 'stage': kwargs.get('stage', 'match')}
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -35,6 +41,7 @@ class WorkflowTests(unittest.TestCase):
                         patch.object(web, 'PIPELINE_ROOT', Path(__file__).resolve().parents[2]),
                         patch.object(web, 'DEFAULT_OUTPUT_ROOT', self.out),
                         patch.dict(os.environ, {k: str(self.root) for k in ('SCIGBLAST_ALLOWED_INPUT_ROOTS', 'SCIGBLAST_ALLOWED_SUBMISSION_ROOTS', 'SCIGBLAST_ALLOWED_OUTPUT_ROOTS')}),
+                        patch.object(web.runtime_preflight, 'check_dependencies', side_effect=available_dependencies),
                         patch.object(web, 'schedule')]
         for p in self.patches: p.start()
         web.PROCESSES.clear(); web.init_db()
@@ -128,12 +135,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotIn('SCIGBLAST_ADMIN_PASSWORD', actual)
             self.assertEqual(actual['PATH'], '/opt/conda/bin:/usr/bin')
             self.assertEqual(actual['SCIGBLAST_RUNTIME_BIN_DIR'], runtime)
-            with patch.object(web.shutil, 'which', side_effect=lambda command: command), \
-                    patch.object(web.subprocess, 'run') as run:
-                run.return_value.returncode = 0
-                run.return_value.stdout = '[]'
-                result = self.client.get('/api/preflight?pipeline=pig_igblast').json()
-                self.assertEqual(result['commands']['igblastn'], str(Path(runtime) / 'igblastn'))
+            with patch.object(web.runtime_preflight, 'check_dependencies', side_effect=available_dependencies) as check:
+                result = self.client.get('/api/preflight?pipeline=pig_igblast&stage=analysis').json()
+                self.assertEqual(result['stage'], 'analysis')
+                self.assertEqual(check.call_args.args[0], 'pig_igblast')
 
     def test_upload_and_bad_files(self):
         r=self.client.post('/api/submissions/upload?filename=test.xlsx',content=self.source.read_bytes());self.assertEqual(r.status_code,200)

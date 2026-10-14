@@ -798,11 +798,22 @@ def load_map(path):
     if not d:
         raise ValueError(f"representative map empty: {path}")
     return d
+fasta_counts={}
 def count_fasta(path):
     if not path.is_file():
         return 0
     try:
-        return sum(1 for line in path.open(encoding='utf-8',errors='ignore') if line.startswith('>'))
+        # Chain-local symlinks share one batch input. Count that input once
+        # during this postprocess run, while retaining legacy/missing fallbacks.
+        source=path.resolve(); stat=path.stat()
+        version=(stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
+        cached=fasta_counts.get(source)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        with path.open(encoding='utf-8',errors='ignore') as handle:
+            count=sum(1 for line in handle if line.startswith('>'))
+        fasta_counts[source]=(version,count)
+        return count
     except OSError:
         return 0
 def count_batch_input(batch):

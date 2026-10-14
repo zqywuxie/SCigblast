@@ -4,10 +4,15 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from pipeline_igblast_cache import task_fingerprint
+from pipeline_parallel import FastaCountCache
 
 
 class DatabaseArgsTest(unittest.TestCase):
@@ -20,7 +25,9 @@ class DatabaseArgsTest(unittest.TestCase):
             ns = dict(Path=Path, re=re, os=os, tempfile=tempfile, hashlib=hashlib,
                       subprocess=subprocess, INPUT=root/'input', OUTPUT=root/'output',
                       DB_ROOT=root/'db', VERSION='pig_chain', RAW_INPUT_ROOT=None,
-                      BIN='igblastn', THREADS=2, BAD_V={'', '*'})
+                      BIN='igblastn', THREADS=2, BAD_V={'', '*'},
+                      FASTA_COUNTS=FastaCountCache(),
+                      task_fingerprint=task_fingerprint, DEPENDENCIES={'chains': {'TRA': 'test-dependencies'}})
             exec(compile(functions, str(source), 'exec'), ns)
             fasta = root/'input'/'pair'/'sample'/'pair_merged.fasta'
             fasta.parent.mkdir(parents=True)

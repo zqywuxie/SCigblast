@@ -14,13 +14,18 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from pipeline_parallel import bounded_completed
+
 if __package__:
     from ..fasta import convert, select_files
     from .umi_count import organize
+    from .resources import worker_budget
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from fasta import convert, select_files
     from umi_count import organize
+    from resources import worker_budget
 
 BAD_V = {'', '*', '-', 'NA', 'N/A', 'NONE', 'NULL', 'NO_HIT', 'UNMAPPED', 'NOT_FOUND'}
 TCR = {'TRA', 'TRB', 'TRD', 'TRG'}
@@ -171,14 +176,9 @@ def run(input_dir: Path, output: Path, dataset: str, chains: list[str], config=N
     done('01.fasta', conversion)
 
     print('[MAPPING 2/3] IgBLAST', flush=True)
-    threads = int(config['SCIGBLAST_IGBLAST_THREADS'])
-    requested = int(config['SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS'])
-    budget = int(config['SCIGBLAST_PARALLEL_THREAD_BUDGET'])
-    memory = min(300, int(config['SCIGBLAST_MEMORY_BUDGET_GB']))
-    per_job = int(config['SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB'])
-    if min(threads, requested, budget, memory, per_job) < 1 or threads > budget or per_job > memory:
-        raise ValueError('Mapping 并发配置超出线程/内存预算')
-    workers = min(requested, budget // threads, memory // per_job)
+    resources = worker_budget(config)
+    workers, threads = resources['workers'], resources['threads']
+    print('[MAPPING] resource_budget=' + json.dumps(resources, ensure_ascii=False), flush=True)
     binary = shutil.which(config['SCIGBLAST_IGBLAST_BIN'])
 
     def map_one(item):
@@ -215,9 +215,10 @@ def run(input_dir: Path, output: Path, dataset: str, chains: list[str], config=N
         return row
 
     usable = [r for r in conversion if r['status'] == 'OK']
+    results = [None] * len(usable)
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        for index, row in enumerate(executor.map(map_one, usable), 1):
-            results.append(row)
+        for index, (source_index, row) in enumerate(bounded_completed(executor, map_one, usable, workers*2), 1):
+            results[source_index] = row
             print(f"[MAPPING] percent={index*100//len(usable)} source={row['source_file']} status={row['status']}", flush=True)
     write_table(airr_root / 'chain_summary.csv', results, identity + ['species', 'input_sequences', 'raw_rows', 'mapped_rows', 'productive_rows', 'output_rows', 'mapping_percent', 'retained_percent', 'status', 'error'])
     done('02.igblast', results)

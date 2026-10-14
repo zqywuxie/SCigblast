@@ -26,10 +26,13 @@ done
 exec "${PYTHON_BIN:-python3}" - <<'PY'
 from __future__ import annotations
 import csv, hashlib, os, re, shutil, subprocess, sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 PIPELINE = Path(os.environ["SCIGBLAST_BASE_PIPELINE_DIR"])
+sys.path.insert(0, str(PIPELINE.parents[1]))
+from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
+from pipeline_parallel import FastaCountCache, bounded_completed
 ROOT = Path(os.environ["OUTPUT_ROOT"])
 RAW_ROOT = Path(os.environ["RAW_INPUT_DIR"]).resolve() if os.environ.get("RAW_INPUT_DIR") else None
 DATASET_LABEL = os.environ.get("SCIGBLAST_DATASET_LABEL", "").strip()
@@ -44,10 +47,9 @@ THREAD_BUDGET = max(1, int(os.environ.get("SCIGBLAST_PARALLEL_THREAD_BUDGET", "1
 MEMORY_BUDGET = max(1, int(os.environ.get("SCIGBLAST_MEMORY_BUDGET_GB", "300")))
 MEMORY_PER_JOB = max(1, int(os.environ.get("SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB", "48")))
 MAX_JOBS = max(1, min(REQUESTED, THREAD_BUDGET // THREADS or 1, MEMORY_BUDGET // MEMORY_PER_JOB or 1))
-BIN = shutil.which(os.environ.get("SCIGBLAST_IGBLAST_BIN", "igblastn"))
-if not BIN:
-    candidate = DB_ROOT / "bin/igblastn"
-    BIN = str(candidate) if candidate.is_file() else None
+BIN = resolve_binary(os.environ.get("SCIGBLAST_IGBLAST_BIN", "igblastn"), DB_ROOT, "base")
+DEPENDENCIES = {}
+FASTA_COUNTS = FastaCountCache()
 BAD_V = {"", "*", "-", "NA", "N/A", "NONE", "NULL", "NO_HIT", "UNMAPPED", "NOT_FOUND"}
 TCR = {"TRA", "TRB", "TRD", "TRG"}
 SUPPORTED = TCR | {"IGH", "IGK", "IGL"}
@@ -80,10 +82,7 @@ def blastdb_exists(prefix: Path) -> bool:
     return any(prefix.parent.glob(prefix.name + ".*"))
 
 def count_fasta(source: Path) -> int:
-    try:
-        with source.open(encoding="utf-8", errors="ignore") as handle:
-            return sum(line.startswith(">") for line in handle)
-    except OSError: return 0
+    return FASTA_COUNTS.count(source)
 
 def valid_v(value: str) -> bool:
     return value.strip().upper() not in BAD_V
@@ -124,12 +123,17 @@ def run_task(job: tuple[str, str, str, str, str]):
               "raw_rows":0,"mapped_rows":0,"productive_rows":0,"output_rows":0,"mapping_percent":"0.00","retained_percent":"0.00",
               "status":"ERROR","error":"","path":None,"parent":str(parent)}
     if not fasta.is_file(): result["error"]="missing merged FASTA"; return result
-    stat=fasta.stat(); fingerprint=hashlib.sha256(f"{fasta}|{stat.st_size}|{stat.st_mtime_ns}|{chain}|{SPECIES}|{THREADS}|productive+v1".encode()).hexdigest()
-    if marker.is_file() and filtered.is_file():
-        cached=dict(line.split("=",1) for line in marker.read_text(encoding="utf-8",errors="ignore").splitlines() if "=" in line)
-        if cached.get("status")=="DONE" and cached.get("job_fingerprint")==fingerprint:
-            for name in ("raw_rows","mapped_rows","productive_rows","output_rows"): result[name]=int(cached.get(name,0))
-            result.update(status="OK",path=filtered); return result
+    fingerprint=task_fingerprint(fasta, DEPENDENCIES["chains"][chain])
+    try:
+        if marker.is_file() and filtered.is_file() and os.environ.get("SCIGBLAST_FORCE_RERUN") != "1":
+            cached=dict(line.split("=",1) for line in marker.read_text(encoding="utf-8",errors="ignore").splitlines() if "=" in line)
+            if cached.get("status")=="DONE" and cached.get("job_fingerprint")==fingerprint:
+                for name in ("raw_rows","mapped_rows","productive_rows","output_rows"): result[name]=int(cached.get(name,0))
+                result.update(status="OK",path=filtered); return result
+    except (OSError, ValueError):
+        pass
+    marker.unlink(missing_ok=True)
+    filtered.unlink(missing_ok=True)
     v,j=database(chain,"V"),database(chain,"J")
     if not blastdb_exists(v) or not blastdb_exists(j): result["error"]="missing V/J database"; return result
     aux=DB_ROOT / "optional_file" / f"{SPECIES}_gl.aux"
@@ -147,9 +151,14 @@ def run_task(job: tuple[str, str, str, str, str]):
     try:
         raw_n,mapped,productive,out_n=filter_airr(raw,filtered); raw.unlink(missing_ok=True)
         result.update(raw_rows=raw_n,mapped_rows=mapped,productive_rows=productive,output_rows=out_n,status="OK",path=filtered)
-        marker.write_text("\n".join(("status=DONE","manifest_schema_version=2",f"job_fingerprint={fingerprint}",f"raw_rows={raw_n}",f"mapped_rows={mapped}",f"productive_rows={productive}",f"output_rows={out_n}"))+"\n",encoding="utf-8")
+        marker_temp=Path(str(marker)+".tmp")
+        marker_temp.write_text("\n".join(("status=DONE","manifest_schema_version=2",f"job_fingerprint={fingerprint}",f"dependency_fingerprint={DEPENDENCIES['chains'][chain]}",f"raw_rows={raw_n}",f"mapped_rows={mapped}",f"productive_rows={productive}",f"output_rows={out_n}"))+"\n",encoding="utf-8")
+        os.replace(marker_temp,marker)
     except Exception as exc:
-        result["error"]=str(exc); raw.unlink(missing_ok=True); filtered.unlink(missing_ok=True)
+        result.update(status="ERROR",error=str(exc),path=None)
+        raw.unlink(missing_ok=True); filtered.unlink(missing_ok=True)
+        filtered.with_suffix(filtered.suffix+".tmp").unlink(missing_ok=True)
+        Path(str(marker)+".tmp").unlink(missing_ok=True)
     return result
 
 def merge_group(paths: list[Path], destination: Path):
@@ -164,8 +173,9 @@ def merge_group(paths: list[Path], destination: Path):
     os.replace(temp,destination)
 
 def main() -> int:
+    global DEPENDENCIES, FASTA_COUNTS
+    FASTA_COUNTS = FastaCountCache()
     if not MANIFEST.is_file(): raise SystemExit("missing canonical sample_manifest.csv")
-    if not BIN: raise SystemExit("igblastn not found")
     jobs=[]; seen=set()
     with MANIFEST.open(encoding="utf-8-sig",newline="") as handle:
         for row in csv.DictReader(handle):
@@ -178,11 +188,21 @@ def main() -> int:
                     seen.add(task_key); jobs.append((key[0],key[1],chain,key[2],row.get("species","") or SPECIES))
     if not jobs: raise SystemExit("no valid sample-specific Chain tasks in manifest")
     OUTPUT.mkdir(parents=True,exist_ok=True); results=[]
+    # Invalidate only aggregates owned by this invocation, before any task can
+    # fail. Compact successful task outputs remain available for resume.
+    for sample,pair,chain,raw_r1,_ in jobs:
+        rel_stage=stage_dir(relative_parent(raw_r1),safe(Path(str(pair).replace("\\","/")).name),safe(sample))
+        (OUTPUT/rel_stage/("TCR.tsv" if chain in TCR else "BCR.tsv")).unlink(missing_ok=True)
+    for name in ("igblast_summary.tsv","chain_summary.csv"):
+        (OUTPUT/name).unlink(missing_ok=True)
+    if not shutil.which(BIN): raise SystemExit("igblastn not found")
+    DEPENDENCIES=dependency_snapshot(mode="base",db_root=DB_ROOT,binary=BIN,species=SPECIES,
+        database_version=SPECIES,threads=THREADS,chains=[job[2] for job in jobs],
+        implementation=PIPELINE/"05.work_igblastn.sh",inherited=os.environ.get("SCIGBLAST_IGBLAST_DEPENDENCIES",""))
     print(f"[BASE][igblast] stage_start total={len(jobs)} requested_workers={REQUESTED} effective_workers={MAX_JOBS} threads_per_worker={THREADS} memory_per_worker_gb={MEMORY_PER_JOB}",flush=True)
     with ThreadPoolExecutor(max_workers=MAX_JOBS) as executor:
-        futures=[executor.submit(run_task,job) for job in jobs]
-        for index,future in enumerate(as_completed(futures),1):
-            result=future.result(); results.append(result); print(f"[BASE][igblast] progress={index}/{len(jobs)} percent={index*100//len(jobs)} sample={result['sample_id']}/{result['pair_id']}/{result['chain']} status={result['status']}",flush=True)
+        for index,(_,result) in enumerate(bounded_completed(executor,run_task,jobs,MAX_JOBS*2),1):
+            results.append(result); print(f"[BASE][igblast] progress={index}/{len(jobs)} percent={index*100//len(jobs)} sample={result['sample_id']}/{result['pair_id']}/{result['chain']} status={result['status']}",flush=True)
     grouped={}
     for result in results:
         if result["status"]!="OK" or not result["path"]: continue
@@ -194,6 +214,7 @@ def main() -> int:
     fields=["sample_id","pair_id","species","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","status","error","output_path"]
     for result in results:
         n=result["input_sequences"]; mapped=int(result["mapped_rows"]); productive=int(result["productive_rows"]); filtered=int(result["output_rows"])
+        result["output_path"]=str(result.get("path") or "")
         result.update(mapped_seqs=mapped, unmapped_seqs=max(n-mapped,0), productive_seqs=productive, productive_percent=f"{productive*100/n:.2f}" if n else "0.00", filtered_seqs=filtered, mapping_percent=f"{mapped*100/n:.2f}" if n else "0.00", filtered_percent=f"{filtered*100/n:.2f}" if n else "0.00")
         result["retained_percent"]=result["filtered_percent"]
     for destination,delimiter in ((OUTPUT/"igblast_summary.tsv","\t"),(OUTPUT/"chain_summary.csv",",")):

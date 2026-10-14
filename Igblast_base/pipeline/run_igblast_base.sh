@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+DIRECTORY_MANIFEST="${SCIGBLAST_RUN_INPUT_MANIFEST:-}"
+DIRECTORY_MANIFEST_HASH="${SCIGBLAST_RUN_INPUT_MANIFEST_HASH:-}"
+export SCIGBLAST_INPUT_MANIFEST="$DIRECTORY_MANIFEST" SCIGBLAST_INPUT_MANIFEST_HASH="$DIRECTORY_MANIFEST_HASH"
+
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BRANCH_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
@@ -223,7 +227,7 @@ hash_file() {
 CONFIG_SHA256="$(hash_file "$CONFIG_FILE" 2>/dev/null || printf unknown)"
 MAPPING_SHA256="unknown"
 stage_script(){ case "$1" in 02.fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; 03.clean) printf '%s/03.clean_header.sh\n' "$SCRIPT_DIR";; 04.pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; 05.igblast) printf '%s/05.work_igblastn.sh\n' "$SCRIPT_DIR";; esac; }
-stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; } | sha256sum | awk '{print $1}'; }
+stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; hash_file "${SCRIPT_DIR}/../../pipeline_input_manifest.py"; fi; if [[ "$1" == 05.igblast ]]; then printf '%s\n' "${SCIGBLAST_IGBLAST_DEPENDENCIES:-missing}"; fi; } | sha256sum | awk '{print $1}'; }
 stage_summary_rows(){
   "${PYTHON_BIN}" - "$1" "$2" <<'PY'
 import csv,sys
@@ -353,6 +357,7 @@ SCIGBLAST_MATCH_SUBMISSION="${SUBMISSION_PATH:-}" \
 SCIGBLAST_MATCH_NO_BARCODE="${SCIGBLAST_MATCH_NO_BARCODE:-1}" \
 SCIGBLAST_BASE_DEFAULT_CHAINS="${SCIGBLAST_BASE_DEFAULT_CHAINS:-}" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/01.match_sample.py" || MATCH_STATUS=$?
+if [[ -n "$DIRECTORY_MANIFEST" && "$MATCH_STATUS" != 0 ]]; then echo "Directory input verification failed" >&2; exit "$MATCH_STATUS"; fi
 [[ -s "$SUMMARY" ]] || { echo "[BASE] match did not produce summary" >&2; exit "${MATCH_STATUS:-1}"; }
 MAPPING_SHA256="$(hash_file "$SUMMARY" 2>/dev/null || printf unknown)"
 if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "${SCIGBLAST_MATCH_ONLY_FIRST_RUN:-${MATCH_ONLY_FIRST_RUN:-1}}" == "1" && ! -f "${STATE_DIR}/.match_review.done" ) ]]; then
@@ -405,6 +410,15 @@ if (( PANDASEQ_RERAN )); then
 fi
 
 echo "[BASE 5/5] IgBLAST"
+# Resolve the actual tool/reference dependencies once for both the stage DONE
+# check and its child tasks. Other stages keep their existing fingerprints.
+SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${BRANCH_ROOT}/../pipeline_igblast_cache.py" \
+  --mode base --manifest "$SUMMARY" \
+  --db-root "${SCIGBLAST_IGBLAST_DB_DIR:-/data/scAnalyis/Scigblast/igblast}" \
+  --binary "${SCIGBLAST_IGBLAST_BIN:-igblastn}" \
+  --species "${SCIGBLAST_IGBLAST_SPECIES:-human}" --database-version "${SCIGBLAST_IGBLAST_SPECIES:-human}" \
+  --threads "${SCIGBLAST_IGBLAST_THREADS:-8}" --implementation "${SCRIPT_DIR}/05.work_igblastn.sh")"
+export SCIGBLAST_IGBLAST_DEPENDENCIES
 if ! stage_done 05.igblast; then
   run_monitored_stage "IgBLAST" "$IGBLAST_REQUIRED_GB" bash "${SCRIPT_DIR}/05.work_igblastn.sh" --data-dir "$PANDASEQ_DIR" --output-dir "$IGBLAST_DIR" \
     --input-mode pandaseq --db-dir "${SCIGBLAST_IGBLAST_DB_DIR:-/data/scAnalyis/Scigblast/igblast}" \

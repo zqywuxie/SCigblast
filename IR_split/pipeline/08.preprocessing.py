@@ -506,6 +506,26 @@ def read_one(task: dict[str, str], umi_index: RepresentativeIndex | None, umi_mo
         return task, None, {}, f"{type(exc).__name__}: {exc}"
 
 
+def read_sample(sample_tasks: list[dict[str, str]], umi_index: RepresentativeIndex | None, umi_mode: str) -> tuple[dict[str, tuple[dict[str, str], pd.DataFrame]], list[str], list[dict[str, int | str]]]:
+    # Keep Future results and the final loop frame out of main(): once items
+    # is released, no reader references should retain this sample's tables.
+    items: dict[str, tuple[dict[str, str], pd.DataFrame]] = {}
+    errors: list[str] = []
+    sample_stats: list[dict[str, int | str]] = []
+    with ThreadPoolExecutor(max_workers=min(FILTER_WORKERS, len(sample_tasks))) as executor:
+        futures = [executor.submit(read_one, task, umi_index, umi_mode) for task in sample_tasks]
+        for future in as_completed(futures):
+            task, frame, stats, error = future.result()
+            if error:
+                errors.append(f"{task['source']}: {error}")
+            elif task["receptor"] in items:
+                errors.append(f"duplicate {task['receptor']} source")
+            elif frame is not None:
+                items[task["receptor"]] = (task, frame)
+                sample_stats.append(stats)
+    return items, errors, sample_stats
+
+
 def one_row(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame()
@@ -666,23 +686,8 @@ def main() -> int:
                     manifest_rows.append(manifest)
                     print(f"[IR preprocessing] memory_paused sample={sample} available={available:.1f}GB", file=sys.stderr, flush=True)
                     break
-                items: dict[str, tuple[dict[str, str], pd.DataFrame]] = {}
-                errors: list[str] = []
-                sample_stats: list[dict[str, int | str]] = []
                 print(f"[IR preprocessing] read sample={sample} files={len(sample_tasks)}", flush=True)
-                with ThreadPoolExecutor(max_workers=min(FILTER_WORKERS, len(sample_tasks))) as executor:
-                    root_index = umi_indexes.get(key[0])
-                    root_mode = umi_modes.get(key[0], "row_contract")
-                    futures = [executor.submit(read_one, task, root_index, root_mode) for task in sample_tasks]
-                    for future in as_completed(futures):
-                        task, frame, stats, error = future.result()
-                        if error:
-                            errors.append(f"{task['source']}: {error}")
-                        elif task["receptor"] in items:
-                            errors.append(f"duplicate {task['receptor']} source")
-                        elif frame is not None:
-                            items[task["receptor"]] = (task, frame)
-                            sample_stats.append(stats)
+                items, errors, sample_stats = read_sample(sample_tasks, umi_indexes.get(key[0]), umi_modes.get(key[0], "row_contract"))
                 result, model_errors = compute_sample(items, sample, batch)
                 errors.extend(model_errors)
                 try:

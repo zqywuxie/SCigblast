@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+DIRECTORY_MANIFEST="${SCIGBLAST_RUN_INPUT_MANIFEST:-}"
+DIRECTORY_MANIFEST_HASH="${SCIGBLAST_RUN_INPUT_MANIFEST_HASH:-}"
+export SCIGBLAST_INPUT_MANIFEST="$DIRECTORY_MANIFEST" SCIGBLAST_INPUT_MANIFEST_HASH="$DIRECTORY_MANIFEST_HASH"
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PIPELINE_DIR="$SCRIPT_DIR"
 BRANCH_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
@@ -228,25 +232,38 @@ run_monitored_stage(){
   return "$stage_status"
 }
 preflight_db(){
-  local root="${DB_ROOT:-}" version="${PIG_DB_VERSION:-pig_new}" base aux chain part
-  if [[ "$IGBLAST_BIN" == */* || "$IGBLAST_BIN" == *\\* ]]; then
-    [[ -x "$IGBLAST_BIN" ]] || { echo "[PIG] ERROR IGBLAST_BIN is not executable: $IGBLAST_BIN" >&2; exit 2; }
+  local root="${DB_ROOT:-}" version="${PIG_DB_VERSION:-pig_new}" base aux chain part chains
+  local binary="${SCIGBLAST_IGBLAST_BIN-${IGBLAST_BIN:-igblastn}}"
+  if [[ "$binary" == */* || "$binary" == *\\* ]]; then
+    [[ -x "$binary" ]] || { echo "[PIG] ERROR IgBLAST is not executable: $binary" >&2; exit 2; }
   else
-    command -v "$IGBLAST_BIN" >/dev/null 2>&1 || { echo "[PIG] ERROR IGBLAST_BIN not found: $IGBLAST_BIN" >&2; exit 2; }
+    command -v "$binary" >/dev/null 2>&1 || { echo "[PIG] ERROR IgBLAST not found: $binary" >&2; exit 2; }
   fi
   [[ -n "$root" && -d "$root" ]] || { echo "[PIG] ERROR DB_ROOT does not exist: $root" >&2; exit 2; }
   base="${root}/database_251117/${version}"
   [[ -d "$base" ]] || { echo "[PIG] ERROR pig database directory does not exist: $base" >&2; exit 2; }
   aux="${root}/optional_file/pig.aux"
   [[ -s "$aux" ]] || { echo "[PIG] ERROR missing/empty pig auxiliary file: $aux" >&2; exit 2; }
-  for chain in TRA TRB; do
+  # Match decides the usable chains. Requiring unrelated TRA/TRB references
+  # would reject a valid IGH-only run before its first analysis stage.
+  chains="$("${PYTHON_BIN}" - "$(stage_root 01.match)/sample_manifest.csv" <<'PY'
+import csv, sys
+with open(sys.argv[1], encoding='utf-8-sig', newline='') as handle:
+    chains = sorted({chain for row in csv.DictReader(handle) if row.get('status') == 'OK'
+                     for chain in row.get('igblast_chains', '').split(',') if chain})
+if not chains:
+    raise SystemExit('no usable Pig samples/chains in sample_manifest.csv')
+print('\n'.join(chains))
+PY
+)" || exit 2
+  while IFS= read -r chain; do
     for part in V D J; do
       [[ -e "${base}/${chain}/pig_gl_${chain}_${part}.nhr" || -e "${base}/${chain}/pig_gl_${chain}_${part}.nin" ]] || {
         echo "[PIG] ERROR missing pig ${chain} ${part} BLAST prefix under ${base}/${chain}" >&2; exit 2;
       }
     done
-  done
-  echo "[PIG] database preflight OK: root=${root} version=${version}"
+  done <<< "$chains"
+  echo "[PIG] database preflight OK: root=${root} version=${version} binary=${binary}"
 }
 echo "$$" > "$PID_FILE"; trap 'rm -f "$PID_FILE"' EXIT
 terminate_children(){
@@ -286,7 +303,7 @@ stage_root(){ printf '%s/%s/%s\n' "$OUTPUT_ROOT" "$1" "$DATASET_LABEL"; }
 hash_file(){ if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else printf unknown; fi; }
 CONFIG_SHA256="$(hash_file "${SCRIPT_DIR}/00.pipeline_config.env")"
 stage_script(){ case "$1" in fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; clean) printf '%s/03.clean_header.py\n' "$SCRIPT_DIR";; pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; igblast) printf '%s/05.work_igblastn.py\n' "$SCRIPT_DIR";; esac; }
-stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; } | sha256sum | awk '{print $1}'; }
+stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; hash_file "${SCRIPT_DIR}/../../pipeline_input_manifest.py"; fi; if [[ "$1" == igblast ]]; then printf '%s\n' "${SCIGBLAST_IGBLAST_DEPENDENCIES:-missing}"; fi; } | sha256sum | awk '{print $1}'; }
 stage_summary_rows(){
   "${PYTHON_BIN}" - "$1" "$2" <<'PY'
 import csv,sys
@@ -384,6 +401,7 @@ SCIGBLAST_MATCH_SUBMISSION="${SUBMISSION_XLSX:-}" \
 SCIGBLAST_SUBMISSION_PATHS="${SCIGBLAST_SUBMISSION_PATHS:-}" \
 SCIGBLAST_MATCH_OUTPUT="${OUTPUT_ROOT}/01.match/${DATASET_LABEL}/sample_manifest.csv" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/01.match_sample.py" || MATCH_STATUS=$?
+if [[ -n "$DIRECTORY_MANIFEST" && "$MATCH_STATUS" != 0 ]]; then echo "Directory input verification failed" >&2; exit "$MATCH_STATUS"; fi
 MAPPING_SHA256="$(hash_file "${OUTPUT_ROOT}/01.match/${DATASET_LABEL}/sample_manifest.csv" 2>/dev/null || printf unknown)"
 if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "$MATCH_ONLY_FIRST_RUN" == "1" && ! -f "$MATCH_REVIEW_MARKER" ) ]]; then
   marker_tmp="${MATCH_REVIEW_MARKER}.tmp.${BASHPID:-$$}"
@@ -420,5 +438,11 @@ if ! stage_done pandaseq; then
   run_stage pandaseq "$PANDASEQ_REQUIRED_GB" bash "${SCRIPT_DIR}/04.work_pandaseq.sh"
   rm -f "${STATE_DIR}/.pipeline_stage_igblast.DONE"
 else echo "[PIG] reusing completed pandaseq stage"; fi
+SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${SCRIPT_DIR}/../../pipeline_igblast_cache.py" \
+  --mode pig --manifest "$(stage_root 01.match)/sample_manifest.csv" \
+  --db-root "$DB_ROOT" --binary "${SCIGBLAST_IGBLAST_BIN:-$IGBLAST_BIN}" \
+  --species pig --database-version "$PIG_DB_VERSION" \
+  --threads "${SCIGBLAST_IGBLAST_THREADS:-${IGBLAST_THREADS:-16}}" --implementation "${SCRIPT_DIR}/05.work_igblastn.py")"
+export SCIGBLAST_IGBLAST_DEPENDENCIES
 run_stage igblast "$IGBLAST_REQUIRED_GB" "${PYTHON_BIN}" "${SCRIPT_DIR}/05.work_igblastn.py"
 echo "[PIG] pipeline completed"

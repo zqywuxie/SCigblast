@@ -1,7 +1,9 @@
 """Exercise the runner's actual marker functions under Bash nounset."""
 import os
+import csv
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +25,47 @@ def has_usable_bash():
 
 
 class StageMarkersTest(unittest.TestCase):
+    @unittest.skipUnless(has_usable_bash(), 'requires a usable GNU Bash installation')
+    def test_preflight_uses_manifest_chains_and_stage_binary_priority(self):
+        runner = Path(__file__).resolve().parents[1] / 'run_pig_pipeline.sh'
+        source = runner.read_text(encoding='utf-8')
+        function = source[source.index('preflight_db(){'):source.index('echo "$$" > "$PID_FILE"')]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            database = root/'db/database_251117/pig_chain/IGH'
+            database.mkdir(parents=True)
+            for part in ('V', 'D', 'J'):
+                (database/f'pig_gl_IGH_{part}.nin').write_text('fixture', encoding='utf-8')
+            aux = root/'db/optional_file/pig.aux'
+            aux.parent.mkdir()
+            aux.write_text('fixture', encoding='utf-8')
+            manifest = root/'sample_manifest.csv'
+            with manifest.open('w', encoding='utf-8', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=['status', 'igblast_chains'])
+                writer.writeheader()
+                writer.writerows([{'status': 'OK', 'igblast_chains': 'IGH'},
+                                  {'status': 'ERROR', 'igblast_chains': 'TRA,TRB'}])
+            script = '''set -euo pipefail
+DB_ROOT="$1/db"
+PIG_DB_VERSION=pig_chain
+PYTHON_BIN="$2"
+SCIGBLAST_IGBLAST_BIN="$2"
+IGBLAST_BIN="$1/does-not-exist"
+stage_root(){ printf '%s' "$TEST_ROOT"; }
+TEST_ROOT="$1"
+''' + function + '\npreflight_db\n'
+            def check():
+                return subprocess.run(['bash', '-c', script, 'test', str(root), sys.executable],
+                                      capture_output=True, text=True)
+            result = check()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('database preflight OK', result.stdout)
+            # The usable chain still requires D, including a VJ placeholder.
+            (database/'pig_gl_IGH_D.nin').unlink()
+            result = check()
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('missing pig IGH D', result.stderr)
+
     @unittest.skipUnless(has_usable_bash(), 'requires a usable GNU Bash installation')
     def test_markers_are_stage_scoped_and_resume_checks_work(self):
         runner = Path(__file__).resolve().parents[1] / 'run_pig_pipeline.sh'

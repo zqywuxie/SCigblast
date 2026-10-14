@@ -27,6 +27,8 @@ CLI 输入和输出不得相互嵌套。默认每个 IgBLAST 进程 8 线程、�
 
 CLI 可附加 `--samples sampleA subdir/sampleB` 只处理指定样本键；省略时默认全部样本。网页将具体样本键以 JSON 数组保存到 `SCIGBLAST_MAPPING_SAMPLES`，显式空选择不允许提交。
 
+实际比对并行度还受主机可用内存、cgroup v1/v2 限制及使用量、CPU 配额和进程亲和性约束。运行保留有效内存上限的 5%（至少 256 MiB）；余量后无法容纳一个配置的比对进程时明确停止并报告原因。CPU 配额较小时会降低每进程线程数。日志中的 `resource_budget` 给出实际 worker、线程及可用预算；`SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB` 是单 worker 内存估计，不是硬性 RSS 限制。资源检查使用标准库，不增加 pandas 等依赖。
+
 ## 输出与续跑
 
 - `01.fasta/<dataset>/`：FASTA、`conversion_summary.csv`。

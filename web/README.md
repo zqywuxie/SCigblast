@@ -100,6 +100,16 @@ IR_split 自动识别 raw 和已带 UMI 标签的 presplit 输入，网页无需
 
 Web 启动的任务最多同时运行 1 条 pipeline。具体 fastp、PANDAseq、IgBLAST 并发和内存策略仍由各 pipeline 自己的 `00.pipeline_config.env` 控制。
 
+`SCIGBLAST_MAX_ACTIVE_JOBS` 不是可调参数，旧 `.env` 中该值不会改变串行行为。界面“进行中”还包括正在归档的任务，但归档不会占用分析运行位。
+
+创建和出队启动均执行当前阶段的环境检查：四条 FASTQ 流程首次只匹配样本，确认分析/续跑时检查比对工具、Python 依赖及 Match 中实际链的数据库；reMapping 直接检查所选 human 链和比对环境。页面路径检查不能替代服务端启动检查。
+
+详情默认读取本次 attempt 的日志和进度；启动失败、等待共享资源锁分别显示原因。Web 进程单独重启后若旧 runner 仍存活，先核验任务进程标识，禁止重复续跑；用户可停止核验通过的上次执行。旧任务缺少身份标识时不会凭历史 PID 杀进程，应由管理员核实状态。
+
+普通 CSV/TSV 预览使用有界读取；总数未知时显示已读取记录和“继续加载/继续查找”，不会为了首屏重复扫描大表。文件更新后游标失效，重新从首页加载。Match 审核仍基于完整清单与版本校验。reMapping 优先提供 03 UMI count 样本结果，FASTA 不提供预览或下载。
+
+Base/Pig 的 stage 与 task 缓存共同验证 IgBLAST 工具、参考库 sidecar、aux 和参数版本；参考文件保留大小/修改时间替换时，应更新各分支配置的 `SCIGBLAST_IGBLAST_REFERENCE_VERSION`。部署修改需重建镜像；新版本首次遇到旧缓存会重新验证/执行相应阶段。
+
 必须使用单 Web 实例、单 Uvicorn worker。第二条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前都会获取共享 `flock`，因此 Web 与终端直接启动的任务也会串行。默认锁文件为 `/colddata/SCigblast/results/.scigblast-resource.lock`，必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。
 
 `.env.example` 中 `SCIGBLAST_ALLOWED_*_ROOTS` 是容器内路径，并且必须已被 Compose 挂载；Linux 多根用冒号分隔。设置允许根不会自动增加挂载。路径验证不等于数据库/工具真实运行成功；部署后仍需各类型小数据验收，特别是 cgroup 内存限制。`deploy.sh` 检测到运行/排队任务会拒绝重建；更新期间不要提交新任务。
@@ -161,3 +171,26 @@ docker compose up -d --no-build
 新部署的输入和 Submission 浏览范围均为 `/colddata/SCigblast/data`；测试数据放在 `data/web_test/20260909`，配套 Excel 放在其 `submission` 子目录。新任务输出由服务器分配到 `/colddata/SCigblast/results/姓名_短编号/Pipeline类型/北京时间/`，网页不提供输出路径选择，API 也拒绝自定义输出路径。已有部署请同步设置 `.env` 的 `SCIGBLAST_ALLOWED_INPUT_ROOTS` 和 `SCIGBLAST_ALLOWED_SUBMISSION_ROOTS`。
 
 迁移部署保留 `/colddata/zqy/SCigblast/results` 作为同一 results 目录的容器兼容挂载；已有 `.env` 的输出根路径可继续使用该别名，以保持历史任务及归档的路径一致。
+## 结果浏览与阶段内并发优化（2026-10-05）
+
+- reMapping 按实际输入文件显示“样本 × 链”结果，每页 50 条，支持搜索、链/处理状态筛选、跨页多选和 ZIP 下载。全选只作用于当前页可下载的文件；ZIP 内保留原文件内容与相对目录。02 结果在对应样本行的次级入口，阶段统计折叠，FASTA 不提供预览或下载。
+- 状态统计分为处理完成、结果为空、处理失败、尚未完成和已归档，依据已有摘要；缺失文件在当前页单独提示并禁用下载。新任务保存创建时实际选中的文件清单；历史任务没有该快照时明确提示仅能依据现有摘要展示，不把不存在的样本/链组合算作缺失。
+- CSV 输入行数、进入比对序列条数和最终序列条数来自已有摘要。保留比例为最终条数 / 进入比对条数；没有分母或历史摘要缺字段时显示 `—`，不把 copy 总和当作序列条数。
+- 当前页面中，每个结果保留查询、分页、字段和滚动位置；文件更新后自动重置游标并提示。隐藏页面停止轮询，恢复可见时立即更新；活跃任务状态每 5 秒、非活跃任务每 30 秒刷新。
+- 同一浏览器标签页刷新或返回任务后，恢复当前用户的任务页签、样本筛选、列表页码、当前文件、表格查询、每页数量和字段选择。表格从第一页读取最新文件；下载勾选需要重新选择。浏览偏好按用户和任务隔离，任务续跑后重置，浏览器存储不可用时仍可正常浏览。
+- Base/Pig/reMapping 使用原 worker 和 IgBLAST 线程配置，有界提交任务（最多 worker × 2）；Base/Pig 同次执行内共用 FASTA 计数。分析阶段、筛选、输出命名、表结构和最终排序不变。
+- `web/mapping_results.py` 以摘要文件版本、执行 attempt 和选择范围构建限额索引，预览/下载只实时核验目标文件。页面调用 `artifacts?include_mapping_files=false` 和分页 `/mapping-results`，避免传输完整文件清单；旧的全量接口仍兼容已有调用。
+- 新增 `pipeline_parallel.py`、`web/artifact_download.py`、`web/mapping_results.py` 和静态组件均由 Docker 白名单打包；发布方式仍是重建镜像。
+## 流程介绍与合成教学包
+
+Base / Pig 新建任务支持“扫描目录，无需 Submission”：选择服务器输入根并扫描，有效配对默认全选；统一设置多条 Chain，点击“应用 Chain 到已选样本”，也可展开每个样本的 Chain 修改。样本可改名；同目录配对缺端、重复读端或空文件不参与选择。仍先执行 Match 并审核，再开始分析。IR / 10X 继续使用 Submission。
+
+目录扫描只读取名称和元信息，不解压读取全部 FASTQ；最多检查 20000 个文件、5000 项配对。沿用流程配置的扩展名和读端后缀，支持 vendor counter。不同目录或 lane 不自动合并；Pig 不同目录同名配对因现有输出语义会阻止提交。目录模式不再要求 Pig 文件名含 Dual Index；物种固定为 pig，Base 沿用其物种配置。
+
+服务器将实际选择保存为独立不可变输入清单（`state/input_manifests`），扫描快照绑定用户/流程/输入根，24 小时有效，每位用户保留最多 16 个。检查、创建、启动和续跑校验所选文件的大小与 mtime_ns；发生改变时需重新扫描，不自动纳入后来新增的文件。此指纹用于变更检测，不是内容哈希。任务详情“编辑资料 / 重新 Match”可恢复目录选择，重新扫描时新增配对默认不选；已批准的样本分配仍受现有确认限制。
+
+首页“流程介绍与示例”按流程显示输入要求、阶段、主要结果、操作练习和检查点；可直接转入对应流程的新建任务窗口。处理细节默认折叠。下载入口为 `/static/demos/scigblast-teaching-v1.zip`，教程为 `/static/demos/README.txt`。
+
+教学包完全合成：2 个样本、3 份 reMapping CSV（6 条序列）、2 对 FASTQ（各 20 对 reads）、4 份 Submission XLSX 及 Barcode CSV。用户需将文件解压到服务器允许的路径，并将 Submission 的 Note 占位路径改为实际输入路径。网页不自动上传或提交任务。FASTQ 用于练习到 Match 审核，不模拟 IR/10X 建库结构；reMapping 随机序列也可能无有效注释，不能用作完整分析或生物学准确性验证。
+
+维护时运行 `python web/tools/build_teaching_demo.py` 重新生成 ZIP，再运行 `python -m unittest discover -s web/tests -p test_teaching_demo.py -v`：直接验证发布包的 FASTQ 格式、真实 CSV 转换和四条流程的 Match。`web/Dockerfile.dockerignore` 明确允许打包上述两个静态文件；镜像更新仍需重建。

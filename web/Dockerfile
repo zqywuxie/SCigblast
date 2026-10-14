@@ -27,6 +27,8 @@ COPY web/check_runtime.py /app/check_runtime.py
 RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
 
 COPY web/archive_results.py web/app.py web/submission.py web/auth.py web/manage_users.py web/pipeline_registry.json /app/
+COPY web/preflight.py web/table_preview.py web/process_identity.py web/artifact_download.py web/mapping_results.py /app/
+COPY web/input_manifest.py /app/
 COPY web/templates /app/templates
 COPY web/static /app/static
 
@@ -36,6 +38,9 @@ COPY 10X_split/pipeline/ /opt/scigblast/10X_split/pipeline/
 COPY Igblast_base/pipeline/ /opt/scigblast/Igblast_base/pipeline/
 COPY PigIgblast/pipeline/ /opt/scigblast/PigIgblast/pipeline/
 COPY pipeline_resource_lock.sh /opt/scigblast/pipeline_resource_lock.sh
+COPY pipeline_igblast_cache.py /opt/scigblast/pipeline_igblast_cache.py
+COPY pipeline_parallel.py /opt/scigblast/pipeline_parallel.py
+COPY pipeline_input_manifest.py /opt/scigblast/pipeline_input_manifest.py
 COPY mapping/fasta.py /opt/scigblast/mapping/fasta.py
 COPY mapping/pipeline/ /opt/scigblast/mapping/pipeline/
 COPY reference/8bp_barcodes.csv /opt/scigblast/reference/8bp_barcodes.csv

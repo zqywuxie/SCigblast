@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from threading import Event
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
@@ -27,6 +28,11 @@ class MappingTests(unittest.TestCase):
         self.config = runner.settings()
         self.config.update(SCIGBLAST_IGBLAST_BIN=sys.executable, SCIGBLAST_IGBLAST_DB_DIR=str(self.db))
         self.calls = []
+        # Synthetic IgBLAST does not allocate production memory; keep fixtures
+        # independent of the host/container running the conversion tests.
+        budget = patch.object(runner, 'worker_budget', return_value={'workers': 2, 'threads': 8})
+        budget.start()
+        self.addCleanup(budget.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -136,6 +142,38 @@ class MappingTests(unittest.TestCase):
         self.calls.clear(); self.assertEqual(self.execute(), 0); self.assertEqual(self.calls, [])
         self.source(content='CDR3(pep),copy,joinedSeq\nCAR,9,ACGTACGT\n')
         self.assertEqual(self.execute(), 0); self.assertEqual(len(self.calls), 1)
+
+    def test_parallel_outputs_match_serial_with_slow_first_file(self):
+        for name in ('A__IGH.csv', 'B__TRB.csv', 'nested/C__IGH.csv', 'nested/D__TRB.csv', 'Z__IGH.csv'):
+            self.source(name)
+        self.database('IGH'); self.database('TRB')
+        observed = []
+        for workers in (1, 3):
+            output = self.root/f'output-{workers}'
+            release_first = Event()
+            if workers == 1:
+                release_first.set()
+            log = io.StringIO()
+
+            def slow_first(args, **kwargs):
+                query = Path(args[args.index('-query')+1])
+                if query.name == 'A__IGH.fasta':
+                    if not release_first.wait(5):
+                        raise TimeoutError('later task did not complete')
+                result = self.fake_igblast(args, **kwargs)
+                if query.name == 'B__TRB.fasta':
+                    release_first.set()
+                return result
+
+            with patch.object(runner, 'worker_budget', return_value={'workers': workers, 'threads': 8}), \
+                    patch.object(runner.subprocess, 'run', side_effect=slow_first), redirect_stdout(log):
+                self.assertEqual(runner.run(self.input, output, 'batch', ['IGH', 'TRB'], self.config), 0)
+            observed.append({str(p.relative_to(output)): p.read_bytes() for p in output.rglob('*')
+                             if p.is_file() and p.suffix in {'.fasta', '.tsv', '.csv'}})
+            with (output/'02.igblastn_out/batch/chain_summary.csv').open() as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([r['source_file'] for r in rows], sorted(r['source_file'] for r in rows))
+        self.assertEqual(observed[0], observed[1])
 
     def test_umi_failure_resumes_without_mapping(self):
         self.source(); self.database('IGH')

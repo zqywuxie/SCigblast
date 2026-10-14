@@ -17,13 +17,18 @@ import shlex
 import sys
 import submission
 import auth
+import preflight as runtime_preflight
+from table_preview import read_preview
+from process_identity import group_state, signal_group
+from artifact_download import stream_zip
+import mapping_results
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -32,6 +37,8 @@ from pydantic import BaseModel
 APP_DIR = Path(__file__).resolve().parent
 PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent).resolve()
 sys.path.insert(0, str(PIPELINE_ROOT))
+import input_manifest
+import pipeline_input_manifest
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
 DEFAULT_OUTPUT_ROOT = Path(
@@ -55,6 +62,8 @@ REGISTRY = load_registry()
 PROCESS_LOCK = threading.RLock()
 PROCESSES: dict[str, subprocess.Popen[bytes]] = {}
 STOP_REQUESTED: set[str] = set()
+DOWNLOAD_TICKETS: dict[str, dict] = {}
+DOWNLOAD_LOCK = threading.Lock()
 
 
 def now() -> str:
@@ -119,6 +128,9 @@ def init_db() -> None:
             """
         )
         auth.init_schema(connection)
+        columns = {column[1] for column in connection.execute('PRAGMA table_info(jobs)')}
+        if 'execution_json' not in columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
 
 
 def update_job(job_id: str, **values: Any) -> None:
@@ -370,6 +382,9 @@ class CreateJob(BaseModel):
     ir_input_mode: str = "auto"
     ir_variant: str = "representative"
     run_preprocessing: str = "1"
+    sample_source: str = "submission"
+    input_scan_id: str = ""
+    input_assignments: list[dict] = []
     mapping_chains: list[str] = []
     mapping_samples: list[str] | None = None
 
@@ -380,8 +395,25 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
         raise HTTPException(400, "unknown pipeline")
     config = REGISTRY[request.pipeline]
     input_path = validate_input_path(request.input_path, "input_path")
+    mapping_inputs = None
+    directory_value = None
+    if request.sample_source not in {'submission', 'directory'}:
+        raise HTTPException(400, '未知样本信息来源')
+    if request.sample_source == 'directory':
+        if not config.get('supports_directory_input'):
+            raise HTTPException(400, '此流程不支持目录识别模式')
+        if request.submission_path or request.submission_revision or request.barcode_csv:
+            raise HTTPException(400, '目录模式不接受 Submission 或 Barcode 参数')
+        try:
+            scan = input_manifest.get_scan(STATE_ROOT, request.input_scan_id, auth.require_user()['id'], request.pipeline, input_path)
+            effective, _ = runtime_preflight.effective_config(request.pipeline, {}, PIPELINE_ROOT)
+            directory_value = pipeline_input_manifest.assign(scan, request.input_assignments, request.pipeline, effective.get('SCIGBLAST_IGBLAST_SPECIES', 'human'))
+        except (ValueError, OSError) as exc:
+            raise HTTPException(400, str(exc)) from exc
     try:
-        if config.get('requires_submission', True):
+        if directory_value is not None:
+            submission_path = ''
+        elif config.get('requires_submission', True):
             submission_path = (submission.resolve(STATE_ROOT, request.submission_revision)
                                if request.submission_revision else validate_submission(request.submission_path))
         else:
@@ -391,7 +423,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
                 request.mapping_samples = sorted({f['sample_key'] for f in discover(input_path)[0]})
             else:
                 request.mapping_samples = sorted(set(request.mapping_samples))
-            select_files(input_path, request.mapping_chains, request.mapping_samples)
+            mapping_inputs, _, _ = select_files(input_path, request.mapping_chains, request.mapping_samples)
             submission_path = ''
             request.submission_path = request.submission_revision = ''
             request.barcode_csv = None
@@ -441,6 +473,14 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     # Preserve the container's tool PATH and configured Python environment.
     env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     runner_hash = sha256_file(runner)
+    options = request.model_dump()
+    if mapping_inputs is not None:
+        # UI completeness only: the runner's selection and output contract are unchanged.
+        options['mapping_inputs'] = mapping_inputs
+    if directory_value is not None:
+        options['input_assignments'] = [{key: row[key] for key in ('id', 'sample_id', 'chains')} for row in directory_value['rows']]
+        options['directory_manifest'] = directory_value
+        options['directory_manifest_hash'] = pipeline_input_manifest.digest(directory_value)
     job = {
         "id": uuid.uuid4().hex[:16],
         "operator": request.operator.strip(),
@@ -450,7 +490,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
         "submission_path": str(submission_path),
         "barcode_csv": str(barcode) if barcode else None,
         "output_root": str(output_root),
-        "options_json": json.dumps(request.model_dump(), ensure_ascii=False),
+        "options_json": json.dumps(options, ensure_ascii=False),
         "env_json": json.dumps(env, ensure_ascii=False),
         "runner_path": str(runner),
         "runner_hash": runner_hash,
@@ -502,6 +542,55 @@ def log_path(row: sqlite3.Row) -> Path:
     return Path(row["output_root"]) / "logs" / row["dataset"] / "pipeline.log"
 
 
+def execution_metadata(row):
+    return json.loads(dict(row).get('execution_json') or '{}')
+
+
+def attempt_log(row):
+    """Return this attempt's log and byte boundary; legacy attempt zero stays readable."""
+    launcher = STATE_ROOT / 'jobs' / row['id'] / f"launcher-{row['attempt_no']}.log"
+    metadata = execution_metadata(row)
+    if row['pipeline'] == 'mapping' and metadata:
+        path = log_path(row)
+        try:
+            stat = path.stat()
+            previous = metadata.get('runtime_log', {})
+            start = previous.get('size', 0) if stat.st_ino == previous.get('inode') else 0
+            if stat.st_size < start:
+                start = 0
+            if stat.st_size > start:
+                return path, start
+        except OSError:
+            pass
+    if launcher.is_file() or metadata or row['attempt_no']:
+        return launcher, 0
+    return log_path(row), 0
+
+
+def attempt_tail(row):
+    path, start = attempt_log(row)
+    try:
+        with path.open('rb') as handle:
+            handle.seek(max(start, path.stat().st_size - 250_000))
+            return handle.read(250_000).decode('utf-8', errors='replace')
+    except OSError:
+        return ''
+
+
+def execution_phase(row, text=None):
+    if row['status'] == 'QUEUED':
+        return 'queued', '等待调度'
+    if row['status'] not in {'RUNNING', 'MATCHING', 'STOPPING'}:
+        return '', ''
+    if text is None:
+        text = attempt_tail(row)
+    if 'waiting for shared pipeline resource lock' in text and 'acquired shared pipeline resource lock' not in text:
+        return 'waiting_resource', '等待运行资源，已有任务正在使用分析资源'
+    if row['current_stage'] or 'acquired shared pipeline resource lock' in text or re.search(r'\[(IR|10X|BASE|PIG|MAPPING)(?:\s|\])', text):
+        return 'running', '正在分析'
+    return 'starting', '正在启动本次执行'
+
+
 def review_ready(row: sqlite3.Row) -> bool:
     if not REGISTRY[row['pipeline']].get('requires_match_review', True):
         return False
@@ -539,9 +628,12 @@ def pipeline_done(row: sqlite3.Row) -> bool:
 
 
 def snapshot(row: sqlite3.Row) -> dict[str, Any]:
-    with db() as connection:
-        owner = connection.execute('SELECT display_name FROM users WHERE id=?', (row['owner_id'],)).fetchone()
-    operator_display_name = owner['display_name'] if owner else row['operator']
+    if 'operator_display_name' in row.keys():
+        operator_display_name = row['operator_display_name']
+    else:
+        with db() as connection:
+            owner = connection.execute('SELECT display_name FROM users WHERE id=?', (row['owner_id'],)).fetchone()
+        operator_display_name = owner['display_name'] if owner else row['operator']
     config = job_config(row)
     state = state_dir(row)
     done = []
@@ -554,6 +646,12 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         done.insert(0, '01.match')
     current = row["current_stage"] or (done[-1] if done else "")
     progress = 100 if row["status"] in {"SUCCEEDED", "ARCHIVING", "ARCHIVED"} else int(len(done) * 100 / len(config["stages"]))
+    phase, status_detail = execution_phase(row)
+    if phase in {'starting', 'waiting_resource'}:
+        current = ''
+    recovered_state = group_state(row['pgid'], execution_metadata(row).get('process_token')) if row['status'] == 'INTERRUPTED' and row['pgid'] else 'gone'
+    if recovered_state != 'gone':
+        status_detail = '上次执行仍存在，请先停止该次执行' if recovered_state == 'verified' else '无法核验上次进程身份，请联系管理员检查后再续跑'
     return {
         "id": row["id"],
         "operator": row["operator"],
@@ -561,6 +659,9 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "pipeline": row["pipeline"],
         "pipeline_label": config["label"],
         "requires_match_review": config.get('requires_match_review', True),
+        "sample_source": json.loads(row['options_json']).get('sample_source', 'submission'),
+        "input_sample_count": len(json.loads(row['options_json']).get('input_assignments', [])),
+        "directory_manifest_hash": json.loads(row['options_json']).get('directory_manifest_hash', ''),
         "mapping_chains": json.loads(row['options_json']).get('mapping_chains', []),
         "mapping_samples": json.loads(row['options_json']).get('mapping_samples'),
         "dataset": row["dataset"],
@@ -569,6 +670,10 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "barcode_csv": row["barcode_csv"],
         "output_root": row["output_root"],
         "status": row["status"],
+        "execution_phase": phase,
+        "status_detail": status_detail,
+        "can_stop_recovered": recovered_state == 'verified',
+        "resume_blocked": recovered_state != 'gone',
         "current_stage": current,
         "progress": progress,
         "stage_progress": int(row["progress"] or 0),
@@ -594,13 +699,9 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
 
 def parse_progress(row: sqlite3.Row) -> tuple[str, int]:
     config = job_config(row)
-    path = log_path(row)
-    try:
-        with path.open("rb") as handle:
-            handle.seek(max(0, path.stat().st_size - 250_000))
-            text = handle.read(250_000).decode("utf-8", errors="replace")
-    except OSError:
-        return row["current_stage"] or "", int(row["progress"] or 0)
+    text = attempt_tail(row)
+    if execution_phase(row, text)[0] in {'starting', 'waiting_resource'}:
+        return '', 0
     current = row["current_stage"] or ""
     stage_end = 0
     for match in re.finditer(r"\[(?:IR|10X|BASE|PIG|MAPPING)\s+(\d+)/(\d+)\]", text):
@@ -623,12 +724,59 @@ def parse_progress(row: sqlite3.Row) -> tuple[str, int]:
 
 def active_count() -> int:
     with PROCESS_LOCK:
-        return len(PROCESSES)
+        with db() as connection:
+            recovered = connection.execute("SELECT * FROM jobs WHERE pgid IS NOT NULL AND status IN ('INTERRUPTED','STOPPING')").fetchall()
+        return len(PROCESSES) + sum(row['id'] not in PROCESSES and
+            group_state(row['pgid'], execution_metadata(row).get('process_token')) != 'gone' for row in recovered)
+
+
+def job_preflight(row, *, analysis=False, env=None):
+    environment = dict(env) if env is not None else json.loads(row['env_json'])
+    options = json.loads(row['options_json'])
+    if options.get('sample_source') == 'directory':
+        try:
+            validate_input_path(row['input_path'], 'input_path')
+            if options.get('directory_manifest_path'):
+                value = input_manifest.load(STATE_ROOT, options['directory_manifest_path'], options['directory_manifest_hash'])
+            else:
+                value = options['directory_manifest']
+                pipeline_input_manifest.verify(value)
+            if value['pipeline'] != row['pipeline'] or value['input_path'] != row['input_path']:
+                raise ValueError('目录清单与任务配置不匹配')
+        except (ValueError, OSError, HTTPException) as exc:
+            message = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            return {'valid': False, 'errors': [{'code': 'directory_input_changed', 'field': 'input_path', 'message': message, 'blocking': True}],
+                    'warnings': [], 'stage': 'analysis' if analysis else 'match'}
+    if os.environ.get('SCIGBLAST_RUNTIME_BIN_DIR'):
+        environment['SCIGBLAST_RUNTIME_BIN_DIR'] = os.environ['SCIGBLAST_RUNTIME_BIN_DIR']
+        environment['PATH'] = os.environ.get('PATH', '')
+    stage = 'analysis' if analysis or row['pipeline'] == 'mapping' or environment.get('SCIGBLAST_WEB_MATCH_ONLY') != '1' else 'match'
+    chains = set(json.loads(row['options_json']).get('mapping_chains', []))
+    if stage == 'analysis' and row['pipeline'] != 'mapping':
+        for filename in summary_files(row)[:1]:
+            with Path(filename).open(encoding='utf-8-sig', newline='') as handle:
+                for item in csv.DictReader(handle):
+                    if item.get('status') == 'OK':
+                        chains.update(filter(None, re.split(r'[,;\s]+', item.get('igblast_chains') or item.get('chains') or item.get('chain') or '')))
+    result = runtime_preflight.check_dependencies(row['pipeline'], environment, chains,
+                                                  pipeline_root=PIPELINE_ROOT, stage=stage)
+    result['max_active_jobs'] = MAX_ACTIVE_JOBS
+    return result
+
+
+def require_job_dependencies(row, *, analysis=False, env=None):
+    checked = job_preflight(row, analysis=analysis, env=env)
+    if not checked['valid']:
+        raise HTTPException(400, checked)
+    return checked
 
 
 def launch_job(job_id: str) -> bool:
     row = get_job_row(job_id)
     if row["status"] != "QUEUED" or job_id in PROCESSES:
+        return False
+    if group_state(row['pgid'], execution_metadata(row).get('process_token')) != 'gone':
+        update_job(job_id, status='INTERRUPTED', last_error='上次执行尚未确认退出，不能重复启动')
         return False
     env = json.loads(row["env_json"])
     env = {str(key): str(value) for key, value in env.items()}
@@ -640,12 +788,29 @@ def launch_job(job_id: str) -> bool:
         env["SCIGBLAST_RUNTIME_BIN_DIR"] = os.environ["SCIGBLAST_RUNTIME_BIN_DIR"]
         env["PATH"] = os.environ["PATH"]
     attempt = int(row["attempt_no"] or 0) + 1
+    token = uuid.uuid4().hex
+    env['SCIGBLAST_WEB_PROCESS_TOKEN'] = token
+    metadata = {'process_token': token}
+    try:
+        stat = log_path(row).stat()
+        metadata['runtime_log'] = {'inode': stat.st_ino, 'size': stat.st_size}
+    except OSError:
+        pass
+    update_job(job_id, attempt_no=attempt, started_at=now(), ended_at=None,
+               current_stage='', progress=0, pid=None, pgid=None,
+               execution_json=json.dumps(metadata), exit_code=None, last_error=None)
     try:
         destination = STATE_ROOT / "jobs" / job_id
         destination.mkdir(parents=True, exist_ok=True)
         if env.get('SCIGBLAST_WEB_MATCH_ONLY') == '1':
             (state_dir(row) / '.match_review.done').unlink(missing_ok=True)
         with (destination / f"launcher-{attempt}.log").open("ab") as launcher:
+            checked = job_preflight(row, env=env)
+            if not checked['valid']:
+                message = '；'.join(issue['message'] for issue in checked['errors'])
+                launcher.write(f'启动检查失败：{message}\n'.encode('utf-8'))
+                update_job(job_id, status='FAILED', ended_at=now(), exit_code=127, last_error=message)
+                return False
             process = subprocess.Popen(
                 ["bash", row["runner_path"]], cwd=str(Path(row["runner_path"]).parent),
                 env=env, stdin=subprocess.DEVNULL, stdout=launcher, stderr=launcher,
@@ -653,11 +818,16 @@ def launch_job(job_id: str) -> bool:
             )
         pgid = process.pid
     except OSError as exc:
+        try:
+            with (destination / f'launcher-{attempt}.log').open('a', encoding='utf-8') as launcher:
+                launcher.write(f'启动失败：{exc}\n')
+        except OSError:
+            pass
         update_job(job_id, status="FAILED", ended_at=now(), exit_code=127, last_error=str(exc))
         return False
     with PROCESS_LOCK:
         PROCESSES[job_id] = process
-    update_job(job_id, status="RUNNING", attempt_no=attempt, pid=process.pid, pgid=pgid, started_at=now(), ended_at=None, exit_code=None, last_error=None)
+    update_job(job_id, status="RUNNING", pid=process.pid, pgid=pgid)
     threading.Thread(target=watch_job, args=(job_id, process), daemon=True).start()
     return True
 
@@ -772,6 +942,11 @@ def result_file(row):
     return None
 
 
+def file_version(path):
+    stat = Path(path).stat()
+    return f'{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}'
+
+
 def stage_reports(row):
     root, dataset = Path(row['output_root']), row['dataset']
     if row['pipeline'] == 'mapping':
@@ -782,7 +957,8 @@ def stage_reports(row):
         for kind, label, description, stage, name in definitions:
             path = root / stage / dataset / name
             exists = path.is_file() and is_under(path, [root])
-            reports.append(dict(kind=kind, label=label, description=description, path=str(path) if exists else None, exists=exists))
+            reports.append(dict(kind=kind, label=label, description=description, path=str(path) if exists else None,
+                                exists=exists, file_version=file_version(path) if exists else None))
         return reports
     entries = [('fastp', 'Fastp 质量过滤', '输入、保留 reads 及保留比例',
                 [root / '02.fastp' / dataset / 'report/fastp_summary.csv'])]
@@ -810,13 +986,14 @@ def stage_reports(row):
     for kind, label, description, candidates in entries:
         path = next((p for p in candidates if p and p.is_file() and is_under(p, [root])), None)
         reports.append({'kind': kind, 'label': label, 'description': description,
-                        'path': str(path) if path else None, 'exists': bool(path)})
+                        'path': str(path) if path else None, 'exists': bool(path),
+                        'file_version': file_version(path) if path else None})
     return reports
 
 
 def stage_summary_file(row, kind):
     if kind.startswith('mapping:') and row['pipeline'] == 'mapping':
-        item = next((item for item in mapping_files(row) if item['kind'] == kind), None)
+        item = mapping_results.lookup(row, kind)
         return Path(item['path']) if item else None
     if kind == 'match':
         return next(iter(summary_files(row)), None)
@@ -825,39 +1002,13 @@ def stage_summary_file(row, kind):
 
 
 def mapping_files(row):
-    """Expose only outputs authorized by this attempt's successful source summaries."""
-    root, dataset = Path(row['output_root']), row['dataset']
-    entries = []
-    specs = [("03.umi_count", "umi_count_summary.csv"),
-             ("02.igblastn_out", "chain_summary.csv")]
-    for stage, name in specs:
-        summary = root / stage / dataset / name
-        if not summary.is_file() or not is_under(summary, [root]):
-            continue
-        with summary.open(encoding="utf-8-sig", newline="") as handle:
-            for record in csv.DictReader(handle):
-                if record.get("status") != "OK" or not record.get("source_file"):
-                    continue
-                source = Path(record["source_file"])
-                path = root / stage / dataset / source.with_suffix(".tsv")
-                if not path.is_file() and stage == "03.umi_count":
-                    # Older mapping attempts stored the final filtered table
-                    # separately. Expose it as the final result, but never
-                    # surface its raw companion as a downloadable artifact.
-                    legacy_filtered = root / stage / dataset / source.with_suffix(".filtered.tsv")
-                    if legacy_filtered.is_file():
-                        path = legacy_filtered
-                if not path.is_file() or not is_under(path, [root / stage / dataset]):
-                    continue
-                relative = path.relative_to(root).as_posix()
-                entries.append({"kind": "mapping:" + relative, "path": str(path),
-                                "stage": stage, "label": Path(record["source_file"]).with_suffix("").as_posix(),
-                                "preview": True})
-    return entries
+    return mapping_results.files(row)
 
 
 def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excluded_keys=None,
-               review_state=None):
+               review_state=None, cursor=''):
+    if review_state is None:
+        return read_preview(path, offset, limit, query, errors_only, cursor)
     rows, counts, matched = [], {"total": 0, "ok": 0, "error": 0}, 0
     pairs, samples = set(), set()
     note = ''
@@ -1023,6 +1174,7 @@ def pipelines() -> dict[str, Any]:
             "description": value.get("description", ""),
             "accent": value.get("accent", "teal"),
             "requires_barcode": value["requires_barcode"],
+            "supports_directory_input": value.get('supports_directory_input', False),
             "requires_submission": value.get('requires_submission', True),
             "requires_match_review": value.get('requires_match_review', True),
             "ir_options": value["ir_options"],
@@ -1041,6 +1193,90 @@ def form_defaults():
             'barcode_csv': str(PIPELINE_ROOT / 'reference' / '8bp_barcodes.csv')}
 
 
+def bind_directory_manifest(job):
+    options = json.loads(job['options_json'])
+    value = options.pop('directory_manifest', None)
+    if value is None:
+        return
+    path, digest = input_manifest.publish(STATE_ROOT, value)
+    options.update(directory_manifest_path=path, directory_manifest_hash=digest)
+    env = json.loads(job['env_json'])
+    env.update(SCIGBLAST_RUN_INPUT_MANIFEST=path, SCIGBLAST_RUN_INPUT_MANIFEST_HASH=digest)
+    env.pop('SCIGBLAST_RUN_SUBMISSION_PATHS', None)
+    job.update(options_json=json.dumps(options, ensure_ascii=False), env_json=json.dumps(env))
+
+
+@app.post('/api/input/scan')
+def scan_input(request: dict):
+    user = auth.require_user()
+    pipeline = request.get('pipeline', '')
+    if not isinstance(pipeline, str) or not REGISTRY.get(pipeline, {}).get('supports_directory_input'):
+        raise HTTPException(400, '此流程不支持目录识别')
+    root = validate_input_path(str(request.get('input_path', '')), 'input_path')
+    try:
+        config, folder = runtime_preflight.effective_config(pipeline, {}, PIPELINE_ROOT)
+        config = pipeline_input_manifest.read_scan_config(folder / '00.pipeline_config.env', config)
+        rows = pipeline_input_manifest.scan(root, config)
+        token = input_manifest.save_scan(STATE_ROOT, user['id'], pipeline, root, rows)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {'scan_id': token, 'total': len(rows), 'valid_count': sum(r['valid'] for r in rows), 'chains': list(pipeline_input_manifest.CHAINS)}
+
+
+@app.get('/api/input/scan/{token}')
+def input_scan_page(token: str, pipeline: str, input_path: str, offset: int = 0, limit: int = 50):
+    root = validate_input_path(input_path, 'input_path')
+    try:
+        value = input_manifest.get_scan(STATE_ROOT, token, auth.require_user()['id'], pipeline, root)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    offset, limit = max(0, offset), min(200, max(1, limit))
+    return {'total': len(value['rows']), 'rows': value['rows'][offset:offset+limit]}
+
+
+@app.get('/api/jobs/{job_id}/input-assignments')
+def input_assignments(job_id: str):
+    row = get_job_row(job_id)
+    options = json.loads(row['options_json'])
+    if options.get('sample_source') != 'directory':
+        raise HTTPException(400, '任务不是目录识别模式')
+    # Editing starts with a new scan; this view only restores saved assignments.
+    return {'pipeline': row['pipeline'], 'input_path': row['input_path'], 'dataset_label': row['dataset'],
+            'assignments': options['input_assignments']}
+
+
+@app.post('/api/jobs/{job_id}/input-rematch')
+def input_rematch(job_id: str, request: CreateJob):
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING', 'ARCHIVED'}:
+            raise HTTPException(409, '请等待当前任务执行结束')
+        if json.loads(row['options_json']).get('sample_source') != 'directory':
+            raise HTTPException(400, '任务不是目录识别模式')
+        if request.sample_source != 'directory' or request.pipeline != row['pipeline'] or Path(request.input_path).resolve() != Path(row['input_path']).resolve():
+            raise HTTPException(400, '重新匹配不能修改任务流程或输入根')
+        apply_task_policy(request, auth.require_user())
+        request.dataset_label = row['dataset']
+        updated, _ = build_job(request)
+        previous = json.loads(row['options_json'])
+        updated_options = json.loads(updated['options_json'])
+        if 'approved_assignments' in previous:
+            updated_options['approved_assignments'] = previous['approved_assignments']
+        updated['options_json'] = json.dumps(updated_options, ensure_ascii=False)
+        require_job_dependencies(updated)
+        bind_directory_manifest(updated)
+        env = json.loads(row['env_json'])
+        new_env = json.loads(updated['env_json'])
+        for key in ('SCIGBLAST_RUN_INPUT_MANIFEST', 'SCIGBLAST_RUN_INPUT_MANIFEST_HASH'):
+            env[key] = new_env[key]
+        env.update(SCIGBLAST_WEB_MATCH_ONLY='1', SCIGBLAST_RUN_MATCH_ONLY_FIRST_RUN='1')
+        env.pop('SCIGBLAST_RUN_SUBMISSION_PATHS', None)
+        update_job(job_id, status='QUEUED', last_error=None, options_json=updated['options_json'], env_json=json.dumps(env))
+        add_action(job_id, row['operator'], 'rematch', '更新目录样本与 Chain 分配')
+    schedule()
+    return snapshot(get_job_row(job_id))
+
+
 @app.post('/api/mapping/scan')
 def scan_mapping(request: dict):
     auth.require_user()
@@ -1053,69 +1289,24 @@ def scan_mapping(request: dict):
     samples = {}
     for file in files:
         sample = samples.setdefault(file['sample_key'], {'sample_key': file['sample_key'], 'sample_id': file['sample_id'],
-                                                        'chains': set(), 'file_count': 0})
+                                                        'chains': set(), 'chain_counts': {}, 'file_count': 0})
         sample['chains'].add(file['chain'])
+        sample['chain_counts'][file['chain']] = sample['chain_counts'].get(file['chain'], 0) + 1
         sample['file_count'] += 1
     return {'input_path': str(root), 'samples': [{**s, 'chains': sorted(s['chains'])} for _, s in sorted(samples.items())],
             'chains': [{'chain': chain, 'file_count': sum(f['chain'] == chain for f in files)}
                                                for chain in SUPPORTED if any(f['chain'] == chain for f in files)],
-            'unrecognized_files': len(ignored)}
+            'unrecognized_files': len(ignored), 'ignored_files': [str(path) for path in ignored]}
 
 
 @app.get('/api/preflight')
-def preflight(pipeline: str, mapping_chains: str = ''):
+def preflight(pipeline: str, mapping_chains: str = '', stage: str = 'match'):
     if pipeline not in REGISTRY:
         raise HTTPException(400, 'Unknown pipeline')
-    if pipeline == 'mapping':
-        import importlib.util
-        from mapping.pipeline.run_mapping import settings, database_args
-        from mapping.fasta import SUPPORTED
-        config = settings()
-        chains = set(mapping_chains.upper().split(',')) - {''}
-        if not chains or not chains.issubset(SUPPORTED):
-            raise HTTPException(400, '请先扫描并选择有效链')
-        runtime = os.environ.get('SCIGBLAST_RUNTIME_BIN_DIR')
-        commands = {'python': shutil.which(str(Path(runtime) / 'python3') if runtime else sys.executable),
-                    'igblastn': shutil.which(config['SCIGBLAST_IGBLAST_BIN'])}
-        missing = []
-        for chain in sorted(chains):
-            try:
-                database_args(Path(config['SCIGBLAST_IGBLAST_DB_DIR']), chain)
-            except ValueError as exc:
-                missing.append(str(exc))
-        return {'commands': commands, 'missing_modules': [] if importlib.util.find_spec('pandas') else ['pandas'], 'missing_databases': missing,
-                'max_active_jobs': MAX_ACTIVE_JOBS, 'notice': '检查所选 human 链；真实比对由任务执行。'}
-    config_path = PIPELINE_ROOT / Path(REGISTRY[pipeline]['runner']).parent / '00.pipeline_config.env'
-    settings = {}
-    if config_path.is_file():
-        for line in config_path.read_text(encoding='utf-8').splitlines():
-            match = re.match(r'^(PYTHON_BIN|SCIGBLAST_PANDASEQ_BIN|SCIGBLAST_IGBLAST_BIN|IGBLAST_BIN)=(.*)$', line)
-            if match:
-                value = shlex.split(match[2], comments=True)
-                if len(value) == 1:
-                    settings[match[1]] = value[0]
-    commands = {'python': settings.get('PYTHON_BIN', 'python3'), 'fastp': 'fastp',
-                'pandaseq': settings.get('SCIGBLAST_PANDASEQ_BIN', 'pandaseq'),
-                'igblastn': settings.get('IGBLAST_BIN', settings.get('SCIGBLAST_IGBLAST_BIN', 'igblastn'))}
-    if os.environ.get('SCIGBLAST_RUNTIME_BIN_DIR'):
-        runtime = Path(os.environ['SCIGBLAST_RUNTIME_BIN_DIR'])
-        commands = {name: str(runtime / ('python3' if name == 'python' else name)) for name in commands}
-    checks = {name: shutil.which(command) for name, command in commands.items()}
-    modules = ['openpyxl']
-    if pipeline in {'ir_split', '10x_split'}:
-        modules += ['Bio', 'pandas', 'numpy']
-    if pipeline == 'ir_split':
-        modules += ['parmap', 'skbio']
-    missing = []
-    if checks['python']:
-        code = 'import importlib.util,json; print(json.dumps([m for m in ' + repr(modules) + ' if importlib.util.find_spec(m) is None]))'
-        try:
-            result = subprocess.run([checks['python'], '-c', code], capture_output=True, text=True, timeout=15)
-            missing = json.loads(result.stdout) if result.returncode == 0 else ['Python 环境检查失败']
-        except (OSError, subprocess.TimeoutExpired, ValueError):
-            missing = ['Python 环境检查失败']
-    return {'commands': checks, 'missing_modules': missing, 'max_active_jobs': MAX_ACTIVE_JOBS,
-            'notice': '仅检查入口工具和 Python 库；数据库路径及 cgroup 内存仍需在 Linux 部署验收。300g 是整个容器共享上限。'}
+    checked = runtime_preflight.check_dependencies(pipeline, {},
+        set(mapping_chains.upper().split(',')) - {''}, pipeline_root=PIPELINE_ROOT,
+        stage='analysis' if pipeline == 'mapping' else stage)
+    return {**checked, 'max_active_jobs': MAX_ACTIVE_JOBS}
 
 
 @app.get("/api/browse")
@@ -1206,6 +1397,8 @@ def rematch(job_id: str, request: dict):
         require_match_pipeline(row)
         if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING", "ARCHIVING", "ARCHIVED"}:
             raise HTTPException(409, "Wait for this attempt to finish")
+        if json.loads(row['options_json']).get('sample_source') == 'directory':
+            raise HTTPException(400, '请使用目录样本编辑入口重新匹配')
         token = request.get("revision", "")
         check_submission_owner(token)
         try:
@@ -1250,17 +1443,17 @@ def annotate_match(job_id: str, request: dict):
 
 
 @app.get("/api/jobs/{job_id}/results")
-def results(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False):
+def results(job_id: str, offset: int = 0, limit: int = 50, query: str = "", errors_only: bool = False, cursor: str = ''):
     path = result_file(get_job_row(job_id))
-    return read_table(path, offset, limit, query, errors_only) if path else {"path": None, "rows": [], "columns": [], "total": 0}
+    return read_table(path, offset, limit, query, errors_only, cursor=cursor) if path else {"path": None, "rows": [], "columns": [], "total": 0, 'has_more': False, 'scan_complete': True}
 
 
 @app.get('/api/jobs/{job_id}/stage-summary')
-def stage_summary(job_id: str, kind: str, offset: int = 0, limit: int = 50, query: str = ''):
+def stage_summary(job_id: str, kind: str, offset: int = 0, limit: int = 50, query: str = '', cursor: str = ''):
     path = stage_summary_file(get_job_row(job_id), kind)
     if not path:
         return {'path': None, 'rows': [], 'columns': [], 'total': 0}
-    return read_table(Path(path), offset, limit, query)
+    return read_table(Path(path), offset, limit, query, cursor=cursor)
 
 
 @app.get("/api/jobs/{job_id}/download")
@@ -1275,6 +1468,57 @@ def download_result(job_id: str, kind: str = "results"):
     if path is None or not is_under(Path(path), [Path(row["output_root"])]):
         raise HTTPException(404, "Summary not available")
     return FileResponse(path, filename=Path(path).name)
+
+
+class MappingDownload(BaseModel):
+    kinds: list[str]
+
+
+@app.post('/api/jobs/{job_id}/mapping-download')
+def prepare_mapping_download(job_id: str, request: MappingDownload):
+    row = get_job_row(job_id)
+    if row['pipeline'] != 'mapping':
+        raise HTTPException(400, '此下载仅适用于 reMapping 最终 UMI count 结果')
+    kinds = list(dict.fromkeys(request.kinds))
+    if not kinds or len(kinds) > 10000:
+        raise HTTPException(400, '请选择 1 至 10000 个最终结果文件')
+    index = mapping_results.inventory(row)
+    items = [mapping_results.lookup(row, kind, index) for kind in kinds]
+    if any(item is None or item['stage'] != '03.umi_count' for item in items):
+        raise HTTPException(404, '所选最终结果已不可用，请刷新结果列表')
+    token = uuid.uuid4().hex
+    with DOWNLOAD_LOCK:
+        now_tick = time.monotonic()
+        for expired in [key for key, value in DOWNLOAD_TICKETS.items() if value['expires'] <= now_tick]:
+            DOWNLOAD_TICKETS.pop(expired, None)
+        while len(DOWNLOAD_TICKETS) >= 32:
+            DOWNLOAD_TICKETS.pop(next(iter(DOWNLOAD_TICKETS)))
+        DOWNLOAD_TICKETS[token] = {'job_id': job_id, 'user_id': auth.require_user()['id'],
+                                   'expires': now_tick + 120, 'files': items}
+    return {'url': f'/api/jobs/{job_id}/mapping-download?token={token}',
+            'file_count': len(items), 'expires_in': 120}
+
+
+@app.get('/api/jobs/{job_id}/mapping-download')
+def mapping_download(job_id: str, token: str):
+    row = get_job_row(job_id)
+    with DOWNLOAD_LOCK:
+        ticket = DOWNLOAD_TICKETS.get(token)
+        if ticket and ticket['expires'] <= time.monotonic():
+            DOWNLOAD_TICKETS.pop(token, None)
+            ticket = None
+    if not ticket or ticket['job_id'] != job_id or ticket['user_id'] != auth.require_user()['id']:
+        raise HTTPException(404, '下载链接已失效，请重新选择下载')
+    selected = ticket['files']
+    index = mapping_results.inventory(row)
+    current = [mapping_results.lookup(row, item['kind'], index) for item in selected]
+    if any(latest is None or latest['stage'] != '03.umi_count' or latest['file_version'] != previous['file_version']
+           for latest, previous in zip(current, selected)):
+        raise HTTPException(409, '结果文件已变化，请刷新结果列表后重新下载')
+    base = Path(row['output_root']) / '03.umi_count' / row['dataset']
+    files = [(Path(item['path']), Path(item['path']).relative_to(base).as_posix()) for item in selected]
+    return StreamingResponse(stream_zip(files), media_type='application/zip',
+        headers={'Content-Disposition': f'attachment; filename="UMI_count_{job_id}.zip"'})
 
 
 def apply_task_policy(request: CreateJob, user: dict) -> None:
@@ -1292,7 +1536,7 @@ def create_job(request: CreateJob) -> dict[str, Any]:
     apply_task_policy(request, user)
     if request.pipeline not in REGISTRY:
         raise HTTPException(400, 'unknown pipeline')
-    needs_submission = REGISTRY[request.pipeline].get('requires_submission', True)
+    needs_submission = request.sample_source == 'submission' and REGISTRY[request.pipeline].get('requires_submission', True)
     if needs_submission:
         check_submission_owner(request.submission_revision)
     if needs_submission and not request.submission_revision:
@@ -1304,6 +1548,7 @@ def create_job(request: CreateJob) -> dict[str, Any]:
             raise HTTPException(400, str(exc)) from exc
     job, _ = build_job(request)
     job['owner_id'] = user['id']
+    require_job_dependencies(job)
     with PROCESS_LOCK:
         if not request.output_root:
             base = Path(job['output_root'])
@@ -1324,7 +1569,14 @@ def create_job(request: CreateJob) -> dict[str, Any]:
             collision = connection.execute("SELECT id FROM jobs WHERE output_root=? AND dataset=?", (job["output_root"], job["dataset"])).fetchone()
         if collision:
             raise HTTPException(409, f"Output/dataset already belongs to job {collision['id']}; use its rematch/resume or choose another output")
-        insert_job(job)
+        bind_directory_manifest(job)
+        try:
+            insert_job(job)
+        except Exception:
+            manifest = json.loads(job['options_json']).get('directory_manifest_path')
+            if manifest:
+                Path(manifest).unlink(missing_ok=True)
+            raise
     add_action(job["id"], job["operator"], "create", json.dumps(request.model_dump(), ensure_ascii=False))
     schedule()
     return snapshot(get_job_row(job["id"]))
@@ -1397,11 +1649,12 @@ def delete_job(job_id: str, request: dict):
 def validate_job(request: CreateJob) -> dict[str, Any]:
     """Validate form paths without creating a job or starting a runner."""
     apply_task_policy(request, auth.require_user())
-    if REGISTRY.get(request.pipeline, {}).get('requires_submission', True):
+    if request.sample_source == 'submission' and REGISTRY.get(request.pipeline, {}).get('requires_submission', True):
         check_submission_owner(request.submission_revision)
     job, _ = build_job(request)
+    checked = job_preflight(job)
     return {
-        "valid": True,
+        **checked,
         "pipeline": job["pipeline"],
         "dataset": job["dataset"],
         "input_path": job["input_path"],
@@ -1453,12 +1706,13 @@ def list_jobs(
         ).fetchall()]
         total = connection.execute(f"SELECT COUNT(*) FROM jobs{where}", tuple(params)).fetchone()[0]
         rows = connection.execute(
-            f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT jobs.*, COALESCE((SELECT display_name FROM users WHERE users.id=jobs.owner_id), operator) "
+            f"AS operator_display_name FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
         stats = connection.execute(
             "SELECT COUNT(*) AS total, "
-            "SUM(CASE WHEN status IN ('QUEUED','RUNNING','MATCHING','STOPPING') THEN 1 ELSE 0 END) AS active, "
+            "SUM(CASE WHEN status IN ('QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING') THEN 1 ELSE 0 END) AS active, "
             "SUM(CASE WHEN status = 'WAITING_REVIEW' THEN 1 ELSE 0 END) AS review, "
             "SUM(CASE WHEN status IN ('SUCCEEDED','ARCHIVED','FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER') THEN 1 ELSE 0 END) AS done "
             "FROM jobs" + owner_where, owner_params
@@ -1472,8 +1726,12 @@ def get_job(job_id: str) -> dict[str, Any]:
     row = get_job_row(job_id)
     options = json.loads(row['options_json'])
     options.pop('approved_assignments', None)
+    options.pop('mapping_inputs', None)
+    options.pop('directory_manifest_path', None)
     files = summary_files(row)
-    return {"job": snapshot(row), "options": options, "actions": actions_for(job_id),
+    detail = snapshot(row)
+    detail['input_assignments'] = options.get('input_assignments', [])
+    return {"job": detail, "options": options, "actions": actions_for(job_id),
             "match_summary": files, "match_summary_signature": summary_file_signature(files)}
 
 
@@ -1486,23 +1744,22 @@ def actions_for(job_id: str) -> list[dict[str, Any]]:
 @app.get("/api/jobs/{job_id}/log")
 def job_log(job_id: str, offset: int = 0, max_bytes: int = 262144, source: str = '') -> JSONResponse:
     row = get_job_row(job_id)
-    path = log_path(row)
-    if not path.is_file():
-        path = STATE_ROOT / "jobs" / job_id / f"launcher-{row['attempt_no']}.log"
+    path, boundary = attempt_log(row)
     try:
-        size = path.stat().st_size
-        identity = f"{row['attempt_no']}:{path}"
+        stat = path.stat()
+        size = stat.st_size - boundary
+        identity = f"{row['attempt_no']}:{path}:{stat.st_ino}:{boundary}"
         reset = source != identity or offset < 0 or offset > size
         read_from = 0 if reset else offset
         max_bytes = max(4096, min(max_bytes, 1_048_576))
         with path.open("rb") as handle:
-            handle.seek(read_from)
+            handle.seek(boundary + read_from)
             payload = handle.read(max_bytes)
         next_offset = read_from + len(payload)
         content = payload.decode("utf-8", errors="replace")
     except OSError:
-        return JSONResponse({"content": "pipeline log not created yet\n", "next_offset": 0, "reset": True, "size": 0})
-    return JSONResponse({"content": content, "next_offset": next_offset, "reset": reset, "size": size, "source": identity})
+        return JSONResponse({"content": "本次执行日志尚未生成\n", "next_offset": 0, "reset": True, "size": 0, 'attempt_no': row['attempt_no']})
+    return JSONResponse({"content": content, "next_offset": next_offset, "reset": reset, "size": size, "source": identity, 'attempt_no': row['attempt_no']})
 
 
 @app.get("/api/jobs/{job_id}/match-preview")
@@ -1533,6 +1790,7 @@ def match_preview(job_id: str, offset: int = 0, limit: int = 50, query: str = ""
         marked = {r['row_key'] for r in annotations if r['label'] in {'已核对', '待补资料'}}
         result['review_counts'] = {'total': review_state['total'], 'marked': review_state['marked_count'],
                                    'unmarked': review_state['total'] - review_state['marked_count']}
+        result['pending_count'] = sum(r['label'] == '待补资料' for r in annotations)
         result['next_unmarked'] = review_state['next_unmarked']
         if _validate_keys:
             result['_valid_requested_keys'] = valid_requested
@@ -1562,6 +1820,7 @@ def confirm_match(job_id: str, request: dict) -> dict[str, Any]:
         options['approved_assignments'] = sorted(assignments)
         env = json.loads(row["env_json"])
         env.update(SCIGBLAST_WEB_MATCH_ONLY="0", SCIGBLAST_RUN_MATCH_ONLY_FIRST_RUN="0")
+        require_job_dependencies(row, analysis=True, env=env)
         update_job(job_id, status="QUEUED", last_error=None, env_json=json.dumps(env), options_json=json.dumps(options))
         add_action(job_id, row["operator"], "confirm-match", match["revision"])
     schedule()
@@ -1574,6 +1833,9 @@ def resume_job(job_id: str) -> dict[str, Any]:
         row = get_job_row(job_id)
         if row["status"] not in {"FAILED", "STOPPED", "INTERRUPTED", "COMPLETED_WITHOUT_MARKER"}:
             raise HTTPException(409, "Use Match review to confirm this job")
+        if group_state(row['pgid'], execution_metadata(row).get('process_token')) != 'gone':
+            raise HTTPException(409, '上次执行尚未确认退出，请先停止该次执行；无法核验身份时请联系管理员')
+        require_job_dependencies(row)
         update_job(job_id, status="QUEUED", last_error=None, ended_at=None)
     add_action(job_id, row["operator"], "resume")
     schedule()
@@ -1586,6 +1848,16 @@ def stop_job(job_id: str) -> dict[str, Any]:
         row = get_job_row(job_id)
         if row["status"] == "QUEUED":
             update_job(job_id, status="STOPPED", ended_at=now(), last_error="stopped before start")
+        elif row['status'] == 'INTERRUPTED' and row['pgid']:
+            token = execution_metadata(row).get('process_token')
+            state = signal_group(row['pgid'], token, signal.SIGTERM)
+            if state == 'unverified':
+                raise HTTPException(409, '无法核验上次进程身份，未发送停止信号；请联系管理员')
+            if state == 'gone':
+                update_job(job_id, status='STOPPED', pid=None, pgid=None, ended_at=now())
+            else:
+                update_job(job_id, status='STOPPING', last_error=None)
+                threading.Thread(target=finish_recovered_stop, args=(job_id, row['pgid'], token), daemon=True).start()
         elif row["status"] in {"RUNNING", "MATCHING"}:
             process = PROCESSES.get(job_id)
             STOP_REQUESTED.add(job_id)
@@ -1600,6 +1872,31 @@ def stop_job(job_id: str) -> dict[str, Any]:
             raise HTTPException(409, "job is not running")
     add_action(job_id, row["operator"], "stop")
     return snapshot(get_job_row(job_id))
+
+
+def finish_recovered_stop(job_id, pgid, token):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        state = group_state(pgid, token)
+        if state != 'verified':
+            break
+        time.sleep(0.2)
+    else:
+        state = signal_group(pgid, token, signal.SIGKILL)
+        for _ in range(50):
+            if state != 'verified':
+                break
+            time.sleep(0.1)
+            state = group_state(pgid, token)
+    with PROCESS_LOCK:
+        row = get_job_row(job_id)
+        if row['pgid'] != pgid or execution_metadata(row).get('process_token') != token:
+            return
+        if state == 'gone':
+            update_job(job_id, status='STOPPED', pid=None, pgid=None, ended_at=now(), last_error=None)
+        else:
+            update_job(job_id, status='INTERRUPTED', last_error='未确认上次进程组退出，请联系管理员检查')
+    schedule()
 
 
 def finish_stop(job_id, process):
@@ -1667,8 +1964,19 @@ def metadata_review(job_id: str):
     return {'rows': missing}
 
 
+@app.get('/api/jobs/{job_id}/mapping-results')
+def mapping_result_page(job_id: str, query: str = '', chain: str = '', state: str = '',
+                        offset: int = 0, limit: int = 50):
+    row = get_job_row(job_id)
+    if row['pipeline'] != 'mapping':
+        raise HTTPException(400, '仅 reMapping 任务提供样本结果列表')
+    if state and state not in mapping_results.LABELS:
+        raise HTTPException(400, '未知的处理状态')
+    return mapping_results.page(row, query, chain, state, offset, limit)
+
+
 @app.get("/api/jobs/{job_id}/artifacts")
-def artifacts(job_id: str) -> dict[str, Any]:
+def artifacts(job_id: str, include_mapping_files: bool = True) -> dict[str, Any]:
     row = get_job_row(job_id)
     output = Path(row["output_root"])
     candidates = [
@@ -1683,7 +1991,7 @@ def artifacts(job_id: str) -> dict[str, Any]:
         candidates = [p for p in candidates if p != output / '01.match' / row['dataset']]
         candidates.extend(output / stage / row['dataset'] for stage in ('01.fasta', '02.igblastn_out', '03.umi_count'))
     return {
-        'mapping_files': mapping_files(row) if row['pipeline'] == 'mapping' else [],
+        'mapping_files': mapping_files(row) if row['pipeline'] == 'mapping' and include_mapping_files else [],
         "output_root": str(output),
         "archive_available": row["status"] == "ARCHIVED" and (output / "results.tar.gz").is_file(),
         "reports": stage_reports(row),

@@ -935,11 +935,22 @@ import csv, os, shutil, sys, tempfile
 from pathlib import Path
 root=Path(sys.argv[1]); out=Path(sys.argv[2]); mode=sys.argv[3]; summary=Path(sys.argv[4])
 bad={"","*","-","NA","N/A","NONE","NULL","NO_HIT","UNMAPPED","NOT_FOUND"}; tcr={"TRA","TRB","TRD","TRG"}; bcr={"IGH","IGK","IGL"}
+fasta_counts={}
 def count_fasta(path):
     if not path.is_file():
         return 0
     try:
-        return sum(1 for line in path.open(encoding='utf-8',errors='ignore') if line.startswith('>'))
+        # Chain-local symlinks share one batch input. Count that input once
+        # during this postprocess run, while retaining legacy/missing fallbacks.
+        source=path.resolve(); stat=path.stat()
+        version=(stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
+        cached=fasta_counts.get(source)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        with path.open(encoding='utf-8',errors='ignore') as handle:
+            count=sum(1 for line in handle if line.startswith('>'))
+        fasta_counts[source]=(version,count)
+        return count
     except OSError:
         return 0
 def count_batch_input(batch):
