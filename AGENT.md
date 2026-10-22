@@ -16,7 +16,7 @@ SCigblast 是免疫组库分析平台：Python/Bash 执行分析，`web/` 提供
 
 `web/app.py` 管理路径校验、队列、进程组、状态、审核和结果接口；`web/auth.py` 管理账户权限；`web/submission.py` 创建不可变 XLSX 工作副本。现有四条流程首次执行 Match 后进入 `WAITING_REVIEW`，全部记录完成标注且存在 OK 记录才能继续。
 
-新任务输出由服务器按用户、流程和北京时间分配。流程产物通常位于 `<output>/<stage>/<dataset>/`，日志为 `logs/<dataset>/pipeline.log`，状态为 `.pipeline_state/<dataset>/`；完成标记名称须与注册表和 `pipeline_done()` 对齐。仅运行单 Web 实例、单 Uvicorn worker；网页同时运行一条 pipeline，五条正式 runner 使用同一共享 `flock`，阶段内部并行由各流程配置控制。保留已有任务归属、路径范围、停止进程组及归档行为。
+新任务输出由服务器按用户、流程和北京时间分配。流程产物通常位于 `<output>/<stage>/<dataset>/`，日志为 `logs/<dataset>/pipeline.log`，状态为 `.pipeline_state/<dataset>/`；完成标记名称须与注册表和 `pipeline_done()` 对齐。仅运行单 Web 实例、单 Uvicorn worker；所有用户共用两个 pipeline 运行名额，第三条起按提交顺序排队；五条正式 runner 使用同一共享 `flock`，主分析使用共享门锁加两个独占槽位（锁路径后缀 .slot-1/.slot-2），Treemap 继续独占门锁并与所有主分析互斥；两种 FD 均由子进程继承并在退出时释放。不得删除正在使用的锁文件。Web 的 MAX_ACTIVE_JOBS 与 runner 槽位数同时固定为 2，不通过旧 SCIGBLAST_MAX_ACTIVE_JOBS 环境变量调整。阶段内部并行由各流程配置控制。保留已有任务归属、路径范围、停止进程组及归档行为。
 
 Web 使用 `execution_json` 关联本次 attempt 的启动日志、运行日志边界和进程身份。续跑不能展示旧执行进度；恢复的进程组需核验后才能停止，不得仅凭旧 PID 发送信号。`web/preflight.py` 按匹配/分析阶段检查真实运行环境；`web/table_preview.py` 为普通结果提供有界游标读取，Match 仍保持完整 revision 审核统计。普通结果的 `total` 在扫描完成前可为 null，调用者使用 `has_more`、`next_cursor`、`scan_complete`，不能把尚未扫描完当成零结果。
 
@@ -36,7 +36,7 @@ reMapping 结果页按样本和链展示最终 UMI 文件；条数/保留比例�
 
 任务详情的“本次运行时长”由 `execution_runtime()` 根据本次 started_at/ended_at 计算，API 返回 runtime_seconds/runtime_running；浏览器用 performance.now() 按秒更新，沿用现有接口轮询。续跑、重试或 Match 后分析会开始新的 attempt，不累计跨次时长；排队及等待审核不计入，排队期间停止也不把旧启动时间算入耗时。缺失或异常历史时间显示未知，不推算累计时长。
 
-邮件提醒模块为 `web/notifications.py`。用户仅通过 `/api/notifications/preferences` 设置自己的收件邮箱（留空关闭）；管理员 `/api/admin/mail-settings` 配置 SMTP、发件地址和平台链接，默认 QQ 的 smtp.qq.com /465 /SSL，服务初始关闭。自动通知仅限三类：完成 SUCCEEDED、失败 FAILED、中断异常 INTERRUPTED/COMPLETED_WITHOUT_MARKER；等待审核、主动停止、排队和运行不通知，旧队列中已取消支持的事件也跳过，管理员主动测试保留。密码存于服务端 SQLite，不回显、不写入任务参数或 runner 环境；空密码保留原值，清除需显式 clear_password。`update_job()` 与启动中断处理在状态事务内向 mail_outbox 入队，按 job/attempt/event 去重；后台单线程在事务外连接 SMTP，失败最多 3 次，延迟 60/300 秒重试，不改变分析结果。收件人由 owner_id 决定，不由当前操作者决定。发送前核验用户启用、当前邮箱和任务 attempt/status；已过时的通知、已删任务或已关闭收件设置跳过。SMTP 服务关闭时暂停队列；重启恢复 sending 项。测试必须 mock SMTP，不能使用真实邮箱或授权码。镜像同步打包 notifications.py。
+邮件提醒模块为 `web/notifications.py`。用户仅通过 `/api/notifications/preferences` 设置自己的收件邮箱（留空关闭）；管理员 `/api/admin/mail-settings` 配置 SMTP、发件地址和平台链接，默认 QQ 的 smtp.qq.com /465 /SSL，服务初始关闭。自动通知为四类：开始执行 STARTED、完成 SUCCEEDED、失败 FAILED、中断异常 INTERRUPTED/COMPLETED_WITHOUT_MARKER；开始提醒只在本次 launcher 日志确认获得共享资源锁后触发，不以 QUEUED/RUNNING 状态变化或启动进程作为依据。监控按 attempt/PID/process_token 核验并原子保存 execution_json.resource_acquired_at 与去重事件；Match、分析、续跑各 attempt 最多一次，进度不重发。发送前若已结束/停止/重新执行则跳过过时的开始事件。等待审核、主动停止和排队不通知，旧队列中已取消支持的事件也跳过，管理员主动测试保留。密码存于服务端 SQLite，不回显、不写入任务参数或 runner 环境；空密码保留原值，清除需显式 clear_password。`update_job()` 与启动中断处理在状态事务内向 mail_outbox 入队，按 job/attempt/event 去重；后台单线程在事务外连接 SMTP，失败最多 3 次，延迟 60/300 秒重试，不改变分析结果。收件人由 owner_id 决定，不由当前操作者决定。发送前核验用户启用、当前邮箱和任务 attempt/status；已过时的通知、已删任务或已关闭收件设置跳过。SMTP 服务关闭时暂停队列；重启恢复 sending 项。测试必须 mock SMTP，不能使用真实邮箱或授权码。镜像同步打包 notifications.py。
 
 `web/mapping_results.py` 按三个摘要的文件版本和执行 attempt 构建有限 LRU 索引。新任务在内部 `options_json.mapping_inputs` 保存创建时实际选中的源文件，只用于结果完整性展示，不传给 runner 或详情 API；历史任务仅合并已有摘要并标记清单不完整。`/mapping-results` 分页返回处理状态、原因和计数，计数依据摘要，文件可用性只对当前页实时核验；单文件预览与下载直接查索引后核验目标。不要根据样本与链的笛卡尔积猜测缺失输入，也不要把文件缺失计作生物学零结果。
 
@@ -67,6 +67,14 @@ Web 入口包含新建任务开关、任务输出页共用预览组件及独立�
 `mapping/pipeline/resources.py` 使用主机可用内存、cgroup v1/v2 上限及使用量、CPU 配额/亲和性计算实际线程和 worker 数，保留 5% 内存余量（至少 256 MiB）。单 worker 内存配置是排程估计，不是硬性 RSS 限制；余量后不足一个 worker 时明确报错。
 
 ## 开发与验证
+
+2026-10-22 Web 优化：目录、reMapping 和独立 Treemap 重扫使用候选结果，失败保留已确认草稿，但禁止使用失败/旧来源提交。目录按稳定 ID、读端路径与 versions 恢复编辑；reMapping/Treemap 扫描返回不透明 source_version，仅为恢复选择使用，不作为提交授权。变化条目需重新选择；首次扫描默认全选、重新 Match 新增项默认不选保持不变。分页 GET 仅对网络错误与 502/503/504 最多重试两次，不重试扫描 POST 或权限/过期错误。任务列表按 job.id/单元格更新，保留链接、按钮及 summary 焦点；Treemap 详情最多一个请求在途、一个最新待处理目标，不使用递归定时器。
+
+`web/input_manifest.py` 的私有 LRU 上限为 8 个快照、20,000 行、估算 32 MiB，对外仅返回页/清单副本；每次命中仍核验文件身份及 owner/pipeline/path/expires。`web/mapping_results.py` 按完整 key 共用在途构建，CSV 解析在全局 LRU 锁外，失败释放等待者；文件可用性仍实时检查。任务分页以 created_at/id 双降序稳定排序，owner/created_at/id 组合索引不改变统计权限范围。
+
+Treemap 新运行使用 `web/derived_store.py` 的 storage_version=2：derived_runs 只存小元信息与进度，derived_items/artifacts/samples 分项存储。每波最多读取 32 个 queued 候选（实际 worker 上限不变），仅写变化项和新产物；合图按一个样本读取，详情/最终表才恢复全量清单。无版本/版本 1 沿用整份 JSON，不自动迁移或补算。创建/发现、批次使用/发布、合图图片和最终发布继续核验来源/版本；保存事务重新核验取消与 parent attempt，缺失/变更单链图在重试时重做。删除任务须同事务删除三个子表；不得把 `_partial`、source 或 clone_table 暴露给 API。新模块必须同步 Docker COPY、白名单和 check_bundle。已经写入 v2 的数据库不能只回退旧代码；停服备份后须做受控 v1 兼容导出或恢复对应旧数据库，优先向前修复。
+
+合成状态基准：`rtk proxy python web/tools/benchmark_web_state.py --archive-files 10000`，只使用临时目录和内存 SQLite，不运行分析。分别报告快照读取、整份 JSON 序列化投影、增量序列化实际采样、查询计划及归档 Python 分配峰值；不把这些数值当作真实生物分析耗时或进程 RSS。归档保留原压缩/完整性检查流程。
 
 Base/Pig 已支持 `sample_source=directory`，`pipeline_input_manifest.py` 扫描并验证明确配对，`web/input_manifest.py` 保存用户绑定快照和不可变清单；API 为 `/api/input/scan`、分页扫描视图、任务 `/input-assignments` 与 `/input-rematch`。目录模式绕过外部 XLSX，仍生成原 Match CSV、进入人工审核；严禁将 requires_submission=false 分支当通用模式，该分支仍为 reMapping 专用。runner 接收 `SCIGBLAST_RUN_INPUT_MANIFEST/HASH`，检查失败必须停止，不能复用旧成功 Match。Base/Pig 阶段指纹包含清单与共享模块。IR/10X 尚未开放目录模式；文件/样本身份不得通过目录名或 Chain 猜测 Barcode。UI 状态组件在 `web/static/directory-input.js`。验证用 `web/tests/test_directory_input.py`。
 

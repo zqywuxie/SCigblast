@@ -23,6 +23,7 @@ import auth
 
 LOG = logging.getLogger(__name__)
 EVENTS = {
+    'STARTED': ('开始执行', '任务已获得运行资源并开始执行，可打开任务详情查看进度。'),
     'SUCCEEDED': ('分析完成', '可打开任务详情查看和下载结果。'),
     'FAILED': ('分析失败', '请查看错误原因和运行日志，修正后可按需续跑。'),
     'INTERRUPTED': ('执行中断', '请检查任务详情与日志，确认当前运行状态。'),
@@ -79,25 +80,36 @@ def settings(connection, *, secret=False):
     return values
 
 
-def enqueue(connection, job_id, registry):
+def enqueue(connection, job_id, registry, *, event=None):
     """Called within the status transaction; never connects to SMTP."""
     if not settings(connection)['enabled']:
         return
     row = connection.execute('SELECT j.*,u.notification_email,u.active FROM jobs j '
                              'JOIN users u ON u.id=j.owner_id WHERE j.id=?', (job_id,)).fetchone()
-    if not row or row['status'] not in EVENTS or not row['active'] or not row['notification_email']:
+    if not row or not row['active'] or not row['notification_email']:
         return
+    event = event or row['status']
+    if event not in EVENTS:
+        return
+    metadata = {}
+    if event == 'STARTED':
+        metadata = json.loads(row['execution_json'] or '{}')
+        if row['status'] not in {'RUNNING','MATCHING'} or not metadata.get('resource_acquired_at'):
+            return
     payload = {key: row[key] for key in ('id', 'dataset', 'status', 'attempt_no', 'started_at',
                                        'ended_at', 'current_stage', 'last_error')}
     pipeline = registry.get(row['pipeline'], {})
     payload['pipeline_label'] = pipeline.get('label', row['pipeline'])
     payload['stage_label'] = pipeline.get('stage_labels', {}).get(row['current_stage'], row['current_stage'])
+    if event == 'STARTED':
+        payload['resource_acquired_at'] = metadata['resource_acquired_at']
+        payload['execution_label'] = '样本匹配（Match）' if json.loads(row['env_json']).get('SCIGBLAST_WEB_MATCH_ONLY') == '1' else '分析 / 续跑'
     timestamp = int(time.time())
     connection.execute('INSERT OR IGNORE INTO mail_outbox '
                        '(id,owner_id,recipient,job_id,attempt_no,event,payload_json,next_attempt_at,created_at) '
                        'VALUES(?,?,?,?,?,?,?,?,?)',
                        (uuid.uuid4().hex, row['owner_id'], row['notification_email'], job_id,
-                        row['attempt_no'], row['status'], json.dumps(payload, ensure_ascii=False), timestamp, timestamp))
+                        row['attempt_no'], event, json.dumps(payload, ensure_ascii=False), timestamp, timestamp))
 
 
 def date_text(value):
@@ -124,8 +136,11 @@ def message(config, item):
         dataset = ' '.join(data['dataset'].split())[:160]
         mail['Subject'] = f'[SCigblast] {label} · {dataset}'
         lines = [f'任务：{data["dataset"]}', f'流程：{data["pipeline_label"]}', f'状态：{label}',
-                 f'任务编号：{data["id"]}', f'执行次数：{data["attempt_no"]}',
-                 f'开始：{date_text(data["started_at"])}', f'结束：{date_text(data["ended_at"])}']
+                 f'任务编号：{data["id"]}', f'执行次数：{data["attempt_no"]}']
+        if item['event'] == 'STARTED':
+            lines += [f'执行内容：{data["execution_label"]}', f'开始执行：{date_text(data["resource_acquired_at"])}']
+        else:
+            lines += [f'开始：{date_text(data["started_at"])}', f'结束：{date_text(data["ended_at"])}']
         if data.get('stage_label'):
             lines.append(f'阶段：{data["stage_label"]}')
         if data.get('last_error'):
@@ -217,9 +232,13 @@ class Dispatcher:
             user = connection.execute('SELECT active,notification_email FROM users WHERE id=?', (item['owner_id'],)).fetchone()
             valid = (item['event'] in EVENTS or item['event'] == 'TEST') and user and user['active'] and user['notification_email'] == item['recipient']
             if valid and item['job_id']:
-                job = connection.execute('SELECT owner_id,attempt_no,status FROM jobs WHERE id=?', (item['job_id'],)).fetchone()
-                statuses = {'SUCCEEDED', 'ARCHIVING', 'ARCHIVED'} if item['event'] == 'SUCCEEDED' else {item['event']}
+                job = connection.execute('SELECT owner_id,attempt_no,status,execution_json FROM jobs WHERE id=?', (item['job_id'],)).fetchone()
+                statuses = ({'RUNNING','MATCHING'} if item['event']=='STARTED' else
+                            {'SUCCEEDED', 'ARCHIVING', 'ARCHIVED'} if item['event'] == 'SUCCEEDED' else {item['event']})
                 valid = job and job['owner_id'] == item['owner_id'] and job['attempt_no'] == item['attempt_no'] and job['status'] in statuses
+                if valid and item['event']=='STARTED':
+                    acquired = json.loads(job['execution_json'] or '{}').get('resource_acquired_at')
+                    valid = bool(acquired and acquired == json.loads(item['payload_json']).get('resource_acquired_at'))
             if not valid:
                 connection.execute("UPDATE mail_outbox SET status='skipped' WHERE id=?", (item['id'],))
                 return True

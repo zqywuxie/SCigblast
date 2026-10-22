@@ -106,9 +106,9 @@ IR_split 自动识别 raw 和已带 UMI 标签的 presplit 输入，网页无需
 9. “输出文件”优先提供 IR 拆分、10X 预筛选/拆分、PANDAseq、fastp 等阶段统计卡片，可分页、搜索及下载原始 CSV/TSV。默认折叠路径字段，不修改计数定义。参数与记录展示中文操作名和第几次 Match，不显示内部哈希；后台仍保留版本校验。
 10. 非运行任务可在列表或详情点击“删除”，输入 `DELETE` 确认。删除任务记录及其独占的服务器结果目录，不删除原始数据、Submission 或共享工作副本。公共根目录、与其他任务共享/嵌套的输出、符号链接或无法验证归属的目录会被拒绝；不会自动删除任何历史任务。删除不可恢复，需保留的结果请事先备份。
 
-Web 启动的任务最多同时运行 1 条 pipeline。具体 fastp、PANDAseq、IgBLAST 并发和内存策略仍由各 pipeline 自己的 `00.pipeline_config.env` 控制。
+Web 启动的任务最多同时运行 2 条 pipeline，名额由所有用户和流程共享；第三条及之后的任务按提交顺序排队。具体 fastp、PANDAseq、IgBLAST 并发和内存策略仍由各 pipeline 自己的 `00.pipeline_config.env` 控制。
 
-`SCIGBLAST_MAX_ACTIVE_JOBS` 不是可调参数，旧 `.env` 中该值不会改变串行行为。界面“进行中”还包括正在归档的任务，但归档不会占用分析运行位。
+`SCIGBLAST_MAX_ACTIVE_JOBS` 不是可调参数，旧 `.env` 中该值不会改变固定的 2 条上限。界面“进行中”还包括正在归档的任务，但归档不会占用分析运行位。
 
 创建和出队启动均执行当前阶段的环境检查：四条 FASTQ 流程首次只匹配样本，确认分析/续跑时检查比对工具、Python 依赖及 Match 中实际链的数据库；reMapping 直接检查所选 human 链和比对环境。页面路径检查不能替代服务端启动检查。
 
@@ -118,7 +118,7 @@ Web 启动的任务最多同时运行 1 条 pipeline。具体 fastp、PANDAseq�
 
 Base/Pig 的 stage 与 task 缓存共同验证 IgBLAST 工具、参考库 sidecar、aux 和参数版本；参考文件保留大小/修改时间替换时，应更新各分支配置的 `SCIGBLAST_IGBLAST_REFERENCE_VERSION`。部署修改需重建镜像；新版本首次遇到旧缓存会重新验证/执行相应阶段。
 
-必须使用单 Web 实例、单 Uvicorn worker。第二条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前都会获取共享 `flock`，因此 Web 与终端直接启动的任务也会串行。默认锁文件为 `/colddata/SCigblast/results/.scigblast-resource.lock`，必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。
+必须使用单 Web 实例、单 Uvicorn worker。第三条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，两条任务共用，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前获取共享门锁及两个槽位之一的独占 `flock`，Web 与终端直接启动的任务合计最多执行两条。Treemap 持有门锁的独占模式，保持与主分析互斥。默认门锁为 `/colddata/SCigblast/results/.scigblast-resource.lock`，槽位文件为同路径加 `.slot-1` / `.slot-2`；文件不能在任务运行时删除。锁和槽位必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。
 
 `.env.example` 中 `SCIGBLAST_ALLOWED_*_ROOTS` 是容器内路径，并且必须已被 Compose 挂载；Linux 多根用冒号分隔。设置允许根不会自动增加挂载。路径验证不等于数据库/工具真实运行成功；部署后仍需各类型小数据验收，特别是 cgroup 内存限制。`deploy.sh` 检测到运行/排队任务会拒绝重建；更新期间不要提交新任务。
 
@@ -133,7 +133,7 @@ python -m unittest discover -s web/tests -v
 
 ## 邮件提醒与 QQ 发件邮箱
 
-用户进入“我的账户 → 邮件提醒”，保存一个接收邮箱；留空保存即可关闭。自动提醒仅覆盖后续任务的三类情况：完成（SUCCEEDED）、失败（FAILED）、中断异常（INTERRUPTED 或 COMPLETED_WITHOUT_MARKER），仅发送给任务所属用户。排队、运行、等待审核和主动停止均不发邮件；旧队列中尚未发送的审核和停止提醒也会跳过。邮件含状态、执行次数和需要登录的任务详情链接，不附原始序列或结果文件；已有完成任务不会在启用设置后补发。
+用户进入“我的账户 → 邮件提醒”，保存一个接收邮箱；留空保存即可关闭。自动提醒覆盖后续执行的四类情况：开始执行（STARTED）、完成（SUCCEEDED）、失败（FAILED）、中断异常（INTERRUPTED 或 COMPLETED_WITHOUT_MARKER），仅发送给任务所属用户。开始执行提醒在本次 runner 实际获得共享资源锁后入队，不在提交、QUEUED、刚启动进程或等待资源锁时发送。首次 Match、确认后的分析和断点续跑每次执行各提醒一次，并标明执行内容；进度更新不重复发信。邮件含状态、执行次数和需要登录的任务详情链接，不附原始序列或结果文件；启用设置后不补发已经开始或结束的历史执行。等待审核和主动停止不单独发邮件，已过时的开始提醒也会跳过。
 
 管理员进入“用户管理 → 发件邮箱配置”，首次配置已预填 QQ 参数：
 
@@ -154,6 +154,8 @@ QQ 参数可参考[腾讯官方 SMTP 配置表](https://intl.cloud.tencent.com/z
 配置与待发队列保存在 `SCIGBLAST_STATE_DIR` 下的 SQLite（Compose 默认 `web/runtime/scigblast.sqlite3`），重建镜像、重启容器后保留，不需要在 `.env` 写邮箱密码。授权码不会在 API 或页面回显，留空保留原值；输入新授权码替换，显式勾选清除才能删除。该数据库包含发件凭证，部署和备份只交由服务器管理员访问。
 
 后台邮件队列独立于分析进程，每项失败最多尝试 3 次（后续重试间隔 60 秒、300 秒）。修改或清空收件邮箱、停用用户、删除任务、续跑导致通知已过时，会跳过尚未发送的旧通知。关闭 SMTP 服务暂停待发队列。同一任务／执行次数／状态只入队一次，重启恢复未确认完成的发送项。测试全程使用模拟 SMTP。
+
+开始提醒由现有进程监控读取本次 `launcher-N.log` 的锁获取标记，按 attempt、PID 和进程 token 核验后，在同一 SQLite 事务中记录 `execution_json.resource_acquired_at` 与邮件事件。此时间为监控观测时间，不改变原有运行时长口径。后台实际发送前再次核验当前用户邮箱、执行次数及运行状态；快速任务已结束时跳过过时的开始提醒，仍按原规则发送完成/失败邮件。发件服务、收件邮箱与重试参数不需要另行配置。
 
 若认证失败，先检查 SMTP 服务已开启、完整邮箱账号与授权码；若连接失败，检查部署服务器是否能出站访问 `smtp.qq.com:465`。SMTP 已接收不代表收件箱立即可见，可检查垃圾箱与邮箱侧限制。
 
@@ -253,6 +255,28 @@ docker compose up -d --no-build
 - Base/Pig/reMapping 使用原 worker 和 IgBLAST 线程配置，有界提交任务（最多 worker × 2）；Base/Pig 同次执行内共用 FASTA 计数。分析阶段、筛选、输出命名、表结构和最终排序不变。
 - `web/mapping_results.py` 以摘要文件版本、执行 attempt 和选择范围构建限额索引，预览/下载只实时核验目标文件。页面调用 `artifacts?include_mapping_files=false` 和分页 `/mapping-results`，避免传输完整文件清单；旧的全量接口仍兼容已有调用。
 - 新增 `pipeline_parallel.py`、`web/artifact_download.py`、`web/mapping_results.py` 和静态组件均由 Docker 白名单打包；发布方式仍是重建镜像。
+## 操作连续性与状态处理优化（2026-10-22）
+
+- Base/Pig 目录、reMapping 与 Treemap 重扫失败保留原样本选择、名称和链；扫描完整成功后才替换结果。失败后需重新扫描成功才能提交，不能误用旧来源。未变化条目保留编辑，来源版本变化的条目重新选择；首次扫描与重新 Match 的默认选择规则不变。
+- 扫描文件系统时显示活动状态与耗时；获得清单总数后才显示分页读取进度。只对瞬时网络故障或 502/503/504 的清单 GET 最多重试两次，不自动重复扫描 POST。切换输入后迟到的响应不覆盖新来源。
+- 任务列表轮询局部更新，保留键盘焦点；树图历史只在显示字段变化时重建。快速切换生成记录时，共用一个在途请求并只读取最后选择。手机端保留执行次数；配置状态区分匹配检查与分析检查，正常提示继续折叠。CSV 与 ZIP 使用统一的下载按钮。
+- 扫描快照使用进程内有界缓存，最多 8 份、20,000 行、估算 32 MiB；每页仍检查文件身份、用户、流程、目录和有效期。完整提交继续检查真实输入文件。reMapping 索引在全局锁外解析，不同任务分别构建，同 key 共用结果；现有 32 任务/100,000 权重限制不变。
+- 历史任务新增 owner/created_at/id 组合索引，创建时间相同的任务也保持稳定分页。操作者、精确统计和权限范围不变，仍使用原页码交互。
+
+Treemap 新运行在 SQLite 使用 `storage_version=2`，状态、产物和合图完成标记分项保存；单链阶段只处理有界批次，合图只读取对应样本。已有 v1 JSON 记录继续读取、重试和完成，不自动迁移。文件、统计 CSV、Clone Top、manifest 与 ZIP 的公开结构和排序保持原约定；绘图 worker 数、计数口径、pipeline 阶段和输出不变。缺失或变更单链图片会阻止合图，重试仅重做受影响链。
+
+部署仍需重建镜像，启动时自动增加兼容表/索引。发布前等待主分析与派生任务退出并备份 SQLite。**数据库已产生 v2 记录后，不能只回退到不支持 v2 的旧程序**：优先向前修复；如需降级，停服并备份当前库，由维护人员在事务中用 `derived_store.load()` 恢复完整 v1 JSON、切换 storage_version 后核对记录/产物数量，或恢复与旧程序对应的数据库备份。不要在在线服务中转换、清理新表，也不要自动迁移历史任务。
+
+维护基准：
+
+```bash
+rtk proxy python web/tools/benchmark_web_state.py --archive-files 10000
+rtk proxy python -m unittest discover -s web/tests -q
+rtk proxy python -m pytest analysis/treemap/tests/test_core.py tests/test_sources.py -q
+```
+
+基准只生成临时合成数据。快照缓存、JSON 序列化字节、SQLite 查询与归档 Python 内存分开报告；不是实际 IgBLAST 加速承诺。当前归档枚举 10,000 文件的合成测量约 16 MiB Python 分配峰值，本轮保留原完整内容核验与清理机制。
+
 ## 流程介绍与合成教学包
 
 Base / Pig 新建任务支持“扫描目录，无需 Submission”：选择服务器输入根并扫描，有效配对默认全选；统一设置多条 Chain，点击“应用 Chain 到已选样本”，也可展开每个样本的 Chain 修改。样本可改名；同目录配对缺端、重复读端或空文件不参与选择。仍先执行 Match 并审核，再开始分析。IR / 10X 继续使用 Submission。

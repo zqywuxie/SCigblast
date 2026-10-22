@@ -18,7 +18,7 @@
       }catch(error){message('#auth-message',error.message);}finally{b.disabled=false;}};
   }
   if($('#password-form'))$('#password-form').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('[type=submit]');b.disabled=true;try{const body=Object.fromEntries(new FormData(e.target));if(body.new_password!==body.confirm_password)throw new Error('两次新密码不一致');delete body.confirm_password;await api('/api/auth/password',body);location.href='/login';}catch(error){message('#auth-message',error.message);}finally{b.disabled=false;}};
-  function serviceStatus(enabled){message('#mail-service-status',enabled?'邮件服务已启用；保存邮箱后，仅在任务完成、失败或中断异常时提醒。':'管理员尚未启用邮件服务，您可以先保存提醒邮箱。');}
+  function serviceStatus(enabled){message('#mail-service-status',enabled?'邮件服务已启用。':'管理员尚未启用邮件服务，您可以先保存提醒邮箱。');}
   const notificationForm=$('#notification-form');
   if(notificationForm){
     api('/api/notifications/preferences').then(data=>{notificationForm.elements.email.value=data.email;serviceStatus(data.service_enabled);notificationForm.elements.email.disabled=false;notificationForm.querySelector('[type=submit]').disabled=false;message('#notification-message','');}).catch(error=>message('#notification-message',error.message));

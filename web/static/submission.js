@@ -1,7 +1,15 @@
 /* Immutable workbook editor, shared by job creation and rematching. */
 window.Submission = (() => {
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  async function api(url, body) { const r = await fetch(url, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-SCIGBLAST-Request':'1'}, body:JSON.stringify(body)}); const data = await r.json(); if (r.status===401) location.href='/login'; if (!r.ok) { const error = new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)); error.status = r.status; throw error; } return data; }
+  async function api(url, body) {
+    const r = await fetch(url, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-SCIGBLAST-Request':'1'}, body:JSON.stringify(body)});
+    if (r.status===401) location.href='/login';
+    let data;
+    try { data=await r.json(); }
+    catch { if(r.ok)throw new Error('服务器返回格式无法识别，请刷新后重试');data={detail:`请求失败（HTTP ${r.status}），请稍后重试`}; }
+    if (!r.ok) { const error = new Error(typeof data?.detail === 'string' ? data.detail : JSON.stringify(data?.detail)||`请求失败（HTTP ${r.status}）`); error.status = r.status; throw error; }
+    return data;
+  }
   function open(initial, accept) {
     let data = initial, sheetIndex = 0, page = 0; const edits = new Map();
     const returnFocus = document.activeElement;

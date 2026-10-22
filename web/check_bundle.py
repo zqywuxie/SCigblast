@@ -21,7 +21,7 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
             ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
         else:
             subprocess.run(['bash', '-n', str(path)], check=True)
-    for filename in ('preflight.py', 'table_preview.py', 'process_identity.py', 'artifact_download.py', 'mapping_results.py', 'input_manifest.py', 'notifications.py', 'postanalysis.py'):
+    for filename in ('preflight.py', 'table_preview.py', 'process_identity.py', 'artifact_download.py', 'mapping_results.py', 'input_manifest.py', 'notifications.py', 'postanalysis.py', 'derived_store.py'):
         path = registry_path.parent / filename
         ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
     for filename in ('__init__.py','sources.py','aggregate.py','render.py','run.py','clone_table.py'):

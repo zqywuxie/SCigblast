@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -209,6 +211,90 @@ class MappingResultIndexTests(unittest.TestCase):
             results.inventory(other)
             self.assertEqual(len(results._cache), 1)
             self.assertEqual(next(iter(results._cache))[1], 'other')
+
+    def test_cold_builds_for_different_jobs_do_not_share_parse_lock(self):
+        entered, release = threading.Event(), threading.Event()
+        build = results._build
+        def blocked(row, signatures):
+            if row['dataset'] == 'data':
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError('build not released')
+            return build(row, signatures)
+        with ThreadPoolExecutor(max_workers=2) as pool, patch.object(results, '_build', side_effect=blocked):
+            first = pool.submit(results.inventory, self.row)
+            try:
+                self.assertTrue(entered.wait(2))
+                other = pool.submit(results.inventory, {**self.row, 'dataset': 'other'})
+                self.assertEqual(other.result(timeout=2).dataset, 'other')
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=2).dataset, 'data')
+
+    def test_same_key_build_is_shared_and_failure_releases_waiters(self):
+        entered, release = threading.Event(), threading.Event()
+        build = results._build
+        def blocked(row, signatures):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('build not released')
+            return build(row, signatures)
+        with ThreadPoolExecutor(max_workers=4) as pool, patch.object(results, '_build', side_effect=blocked) as tracked:
+            futures = [pool.submit(results.inventory, self.row) for _ in range(4)]
+            try:
+                self.assertTrue(entered.wait(2))
+            finally:
+                release.set()
+            values = [future.result(timeout=2) for future in futures]
+            self.assertTrue(all(value is values[0] for value in values))
+            self.assertEqual(tracked.call_count, 1)
+        results._cache.clear()
+        with patch.object(results, '_build', side_effect=ValueError('broken')):
+            with self.assertRaisesRegex(ValueError, 'broken'):
+                results.inventory(self.row)
+        self.assertFalse(results._building)
+        self.assertIsNotNone(results.inventory(self.row))
+
+    def test_build_failure_wakes_an_actual_waiter(self):
+        entered, waiting, release = threading.Event(), threading.Event(), threading.Event()
+        future_class=results.Future
+        class ObservedFuture(future_class):
+            def result(self,*args,**kwargs):
+                waiting.set()
+                return super().result(*args,**kwargs)
+        def failed(row,signatures):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('build not released')
+            raise ValueError('synthetic failure')
+        with ThreadPoolExecutor(max_workers=2) as pool,patch.object(results,'Future',ObservedFuture),patch.object(results,'_build',side_effect=failed):
+            first=pool.submit(results.inventory,self.row)
+            try:
+                self.assertTrue(entered.wait(2))
+                second=pool.submit(results.inventory,self.row)
+                self.assertTrue(waiting.wait(2))
+            finally:
+                release.set()
+            for future in (first,second):
+                with self.assertRaisesRegex(ValueError,'synthetic failure'):
+                    future.result(timeout=2)
+        self.assertFalse(results._building)
+
+    def test_changed_summary_during_build_is_rebuilt_before_publication(self):
+        self.summary(2,[{'source_file':'A__IGH.csv','status':'OK'}])
+        self.output()
+        build=results._build
+        changed=False
+        def changing(row,signatures):
+            nonlocal changed
+            result=build(row,signatures)
+            if not changed:
+                changed=True
+                self.summary(2,[{'source_file':'A__IGH.csv','status':'ERROR','error':'new failure'}])
+            return result
+        with patch.object(results,'_build',side_effect=changing):
+            self.assertIsNone(results.lookup(self.row,self.kind()))
+            self.assertEqual(results.page(self.row)['rows'][0]['error'],'new failure')
 
 
 if __name__ == '__main__':

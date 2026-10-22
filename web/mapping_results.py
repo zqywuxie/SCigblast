@@ -7,6 +7,7 @@ import stat
 import threading
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from concurrent.futures import Future
 from pathlib import Path, PurePosixPath
 
 
@@ -19,6 +20,7 @@ MAX_JOBS = 32
 MAX_RECORDS = 100_000
 _cache = OrderedDict()
 _lock = threading.RLock()
+_building = {}
 
 
 def _relative(value):
@@ -159,29 +161,48 @@ def _build(row, signatures):
 def inventory(row):
     """Cache by summary identity, selection and attempt; never cache file availability."""
     root = Path(row['output_root'])
-    with _lock:
-        for _ in range(2):
-            signatures = tuple(_summary_version(root / stage / row['dataset'] / name, root) for stage, name in STAGES)
-            key = (str(root), row['dataset'], row['attempt_no'], row['options_json'],
-                   dict(row).get('execution_json'), signatures)
+    for _ in range(2):
+        signatures = tuple(_summary_version(root / stage / row['dataset'] / name, root) for stage, name in STAGES)
+        key = (str(root), row['dataset'], row['attempt_no'], row['options_json'],
+               dict(row).get('execution_json'), signatures)
+        with _lock:
             cached = _cache.get(key)
             if cached:
                 _cache.move_to_end(key)
                 return cached
+            future = _building.get(key)
+            building = future is None
+            if building:
+                future = _building[key] = Future()
+        if not building:
+            result = future.result()
+            # A waiter may wake after the runner has replaced a summary again.
+            if result is not None and signatures == tuple(_summary_version(root / stage / row['dataset'] / name, root) for stage, name in STAGES):
+                return result
+            continue
+        try:
             result = _build(row, signatures)
             after = tuple(_summary_version(root / stage / row['dataset'] / name, root) for stage, name in STAGES)
-            if after == signatures:
-                if result.weight <= MAX_RECORDS:
+            with _lock:
+                if after == signatures and result.weight <= MAX_RECORDS:
                     # Keep only the newest version of an output/dataset.
                     for old in [old for old in _cache if old[:2] == key[:2]]:
                         del _cache[old]
                     _cache[key] = result
                     while len(_cache) > MAX_JOBS or sum(item.weight for item in _cache.values()) > MAX_RECORDS:
                         _cache.popitem(last=False)
+                future.set_result(result if after == signatures else None)
+            if after == signatures:
                 return result
-        # Never authorize a file from a known-outdated snapshot. While the
-        # runner keeps replacing summaries, retain only known pending inputs.
-        return _build(row, (None,) * len(STAGES))
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with _lock:
+                _building.pop(key, None)
+    # Never authorize a file from a known-outdated snapshot. While the
+    # runner keeps replacing summaries, retain only known pending inputs.
+    return _build(row, (None,) * len(STAGES))
 
 
 def _materialize(index, descriptor, requested=None):

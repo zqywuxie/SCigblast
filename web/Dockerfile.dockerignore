@@ -47,5 +47,6 @@
 !web/input_manifest.py
 !web/notifications.py
 !web/postanalysis.py
+!web/derived_store.py
 !analysis/__init__.py
 !analysis/treemap/*.py

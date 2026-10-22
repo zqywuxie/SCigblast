@@ -52,7 +52,7 @@ if DEFAULT_OUTPUT_ROOT == Path('/colddata/zqy/SCigblast/results/web_output').res
 # Pipeline memory guards are cgroup-aware, but they do not reserve budget
 # across runner processes. Keep Web-launched work serialized until that shared
 # reservation protocol is implemented and validated on Linux.
-MAX_ACTIVE_JOBS = 1
+MAX_ACTIVE_JOBS = 2
 
 
 def load_registry() -> dict[str, dict[str, Any]]:
@@ -135,6 +135,7 @@ def init_db() -> None:
         columns = {column[1] for column in connection.execute('PRAGMA table_info(jobs)')}
         if 'execution_json' not in columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
+        connection.execute('CREATE INDEX IF NOT EXISTS idx_jobs_owner_created ON jobs(owner_id,created_at DESC,id DESC)')
 
 
 def update_job(job_id: str, **values: Any) -> None:
@@ -156,10 +157,10 @@ def update_job(job_id: str, **values: Any) -> None:
                 postanalysis.LOG.warning('Unable to queue Treemap: %s', type(error).__name__)
 
 
-def enqueue_notification(connection, job_id):
+def enqueue_notification(connection, job_id, *, event=None):
     # Notification storage failures must not change a pipeline's outcome.
     try:
-        notifications.enqueue(connection, job_id, REGISTRY)
+        notifications.enqueue(connection, job_id, REGISTRY, event=event)
     except Exception as error:
         notifications.LOG.warning('Unable to queue task notification: %s', type(error).__name__)
 
@@ -890,9 +891,51 @@ def schedule() -> None:
             launch_job(row["id"])
 
 
+def notify_execution_started(row) -> bool:
+    # A mail-only observation must never terminate the process watcher or stop
+    # the next queued pipeline from being scheduled.
+    try:
+        return _record_execution_started(row)
+    except Exception as error:
+        notifications.LOG.warning('Unable to observe task start: %s', type(error).__name__)
+        return False
+
+
+def _record_execution_started(row) -> bool:
+    """Observe this launcher's lock receipt, not RUNNING or an old runtime log."""
+    metadata = execution_metadata(row)
+    if (row['status'] not in {'RUNNING','MATCHING'} or not row['attempt_no'] or not row['pid']
+            or not metadata.get('process_token') or metadata.get('resource_acquired_at')):
+        return False
+    launcher = STATE_ROOT / 'jobs' / row['id'] / f"launcher-{row['attempt_no']}.log"
+    try:
+        with launcher.open('rb') as handle:
+            # The shared helper prints the receipt before analysis output. Keep
+            # reading bounded even when a fast job has already produced a huge log.
+            text = handle.read(250_000).decode('utf-8', errors='replace')
+    except OSError:
+        return False
+    if not re.search(r'^\[SCigblast\] acquired shared pipeline resource lock\s*$', text, re.M):
+        return False
+    with db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        current = connection.execute('SELECT * FROM jobs WHERE id=?', (row['id'],)).fetchone()
+        if (not current or current['status'] not in {'RUNNING','MATCHING'}
+                or current['attempt_no'] != row['attempt_no'] or current['pid'] != row['pid']):
+            return False
+        latest = execution_metadata(current)
+        if latest.get('process_token') != metadata['process_token'] or latest.get('resource_acquired_at'):
+            return False
+        latest['resource_acquired_at'] = now()
+        connection.execute('UPDATE jobs SET execution_json=? WHERE id=?', (json.dumps(latest),row['id']))
+        enqueue_notification(connection,row['id'],event='STARTED')
+    return True
+
+
 def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
     row = get_job_row(job_id)
     while process.poll() is None:
+        notify_execution_started(row)
         current, progress = parse_progress(row)
         update_job(job_id, current_stage=current, progress=progress)
         time.sleep(2)
@@ -913,6 +956,9 @@ def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
             except ProcessLookupError:
                 pass
     row = get_job_row(job_id)
+    # Fast attempts can finish between monitor ticks; record the event before
+    # the terminal transition. The mailer skips it if it is already out of date.
+    notify_execution_started(row)
     current, progress = parse_progress(row)
     stopped = job_id in STOP_REQUESTED
     if stopped:
@@ -1295,11 +1341,9 @@ def scan_input(request: dict):
 def input_scan_page(token: str, pipeline: str, input_path: str, offset: int = 0, limit: int = 50):
     root = validate_input_path(input_path, 'input_path')
     try:
-        value = input_manifest.get_scan(STATE_ROOT, token, auth.require_user()['id'], pipeline, root)
+        return input_manifest.scan_page(STATE_ROOT, token, auth.require_user()['id'], pipeline, root, offset, limit)
     except (ValueError, OSError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    offset, limit = max(0, offset), min(200, max(1, limit))
-    return {'total': len(value['rows']), 'rows': value['rows'][offset:offset+limit]}
 
 
 @app.get('/api/jobs/{job_id}/input-assignments')
@@ -1368,11 +1412,17 @@ def scan_mapping(request: dict):
     samples = {}
     for file in files:
         sample = samples.setdefault(file['sample_key'], {'sample_key': file['sample_key'], 'sample_id': file['sample_id'],
-                                                        'chains': set(), 'chain_counts': {}, 'file_count': 0})
+                                                        'chains': set(), 'chain_counts': {}, 'file_count': 0, '_versions': []})
+        try:
+            info = (root / file['source_file']).stat()
+        except OSError as exc:
+            raise HTTPException(400, '来源文件已变化，请重新扫描目录') from exc
+        sample['_versions'].append((file['source_file'], info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
         sample['chains'].add(file['chain'])
         sample['chain_counts'][file['chain']] = sample['chain_counts'].get(file['chain'], 0) + 1
         sample['file_count'] += 1
-    return {'input_path': str(root), 'samples': [{**s, 'chains': sorted(s['chains'])} for _, s in sorted(samples.items())],
+    return {'input_path': str(root), 'samples': [{**{k:v for k,v in s.items() if k!='_versions'},
+                'chains': sorted(s['chains']), 'source_version': pipeline_input_manifest.digest(s['_versions'])} for _, s in sorted(samples.items())],
             'chains': [{'chain': chain, 'file_count': sum(f['chain'] == chain for f in files)}
                                                for chain in SUPPORTED if any(f['chain'] == chain for f in files)],
             'unrecognized_files': len(ignored), 'ignored_files': [str(path) for path in ignored]}
@@ -1718,6 +1768,8 @@ def delete_job(job_id: str, request: dict):
         except OSError as exc:
             raise HTTPException(500, f'删除未完成，任务记录已保留，可检查权限后重试：{exc}') from exc
         with db() as connection:
+            import derived_store
+            derived_store.delete(connection, [item[0] for item in connection.execute('SELECT id FROM derived_runs WHERE parent_job_id=?', (job_id,))])
             connection.execute('DELETE FROM derived_runs WHERE parent_job_id=?', (job_id,))
             connection.execute('DELETE FROM reviews WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM actions WHERE job_id=?', (job_id,))
@@ -1788,7 +1840,7 @@ def list_jobs(
         total = connection.execute(f"SELECT COUNT(*) FROM jobs{where}", tuple(params)).fetchone()[0]
         rows = connection.execute(
             f"SELECT jobs.*, COALESCE((SELECT display_name FROM users WHERE users.id=jobs.owner_id), operator) "
-            f"AS operator_display_name FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"AS operator_display_name FROM jobs{where} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
         stats = connection.execute(

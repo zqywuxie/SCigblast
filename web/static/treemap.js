@@ -2,23 +2,25 @@
   'use strict';
   const $=selector=>document.querySelector(selector),api=Submission.api,{esc,status,date,active}=TreemapView;
   const params=new URLSearchParams(location.search),pageSize=20;
-  let scan=null,catalog=new Map(),selected=new Set(),page=0,pageTotal=0,scanBusy=false,creating=false,scanGeneration=0,pageGeneration=0,queryTimer;
+  let scan=null,catalog=new Map(),selected=new Set(),page=0,pageTotal=0,scanBusy=false,scanCurrent=false,creating=false,scanGeneration=0,pageGeneration=0,queryTimer;
   let runs=[],runPage=0,currentId=params.get('run')||'',detail=null,viewer=null,listBusy=false,detailBusy=false,detailGeneration=0,runListSignature='';
+  let detailPending=false,detailPromise=null;
   function message(text='',error=false){$('#tm-message').textContent=text;$('#tm-message').classList.toggle('error',error);}
   function showError(error){message(error.message||String(error),true);}
   const source=()=>document.querySelector('[name=source]:checked').value;
   function lockSource(locked){$('#tm-source-form').querySelectorAll('input,select,button').forEach(node=>{node.disabled=locked;});if(!locked){$('#tm-task').disabled=source()!=='task';$('#tm-path').disabled=$('#tm-browse').disabled=source()!=='directory';}}
   function syncSelection(){
     $('#tm-selected').textContent=`已选 ${selected.size} 项样本 / 链`;
-    $('#tm-generate').disabled=!scan||!selected.size||scanBusy||creating;
+    $('#tm-generate').disabled=!scanCurrent||!scan||!selected.size||scanBusy||creating;
     $('#tm-all').disabled=$('#tm-none').disabled=$('#tm-search').disabled=!scan||scanBusy||creating;
     $('#tm-name').disabled=creating;
     $('#tm-selection-note').textContent=scan?`${catalog.size} 项输入 · ${[...catalog.values()].filter(row=>row.valid).length} 项可绘制。选择跨搜索与分页保留。`:'先扫描一个结果来源。';
-    $('#tm-prev').disabled=!scan||page===0||creating;
-    $('#tm-next').disabled=!scan||(page+1)*pageSize>=pageTotal||creating;
+    $('#tm-prev').disabled=!scan||page===0||scanBusy||creating;
+    $('#tm-next').disabled=!scan||(page+1)*pageSize>=pageTotal||scanBusy||creating;
+    $('#tm-rows').querySelectorAll('[data-row]').forEach(node=>node.disabled=scanBusy||creating||!catalog.get(node.dataset.row)?.valid);
   }
   function resetScan(){
-    scanGeneration++;pageGeneration++;clearTimeout(queryTimer);scan=null;catalog.clear();selected.clear();page=0;pageTotal=0;$('#tm-search').value='';$('#tm-page').textContent='尚未扫描';
+    scanGeneration++;pageGeneration++;clearTimeout(queryTimer);scan=null;scanCurrent=false;catalog.clear();selected.clear();page=0;pageTotal=0;$('#tm-search').value='';$('#tm-page').textContent='尚未扫描';
     $('#tm-rows').innerHTML='<tr><td colspan="4"><div class="tm-empty"><strong>选择数据后开始</strong><span>扫描会列出可绘制的样本与链，你可以自由调整范围。</span></div></td></tr>';syncSelection();
   }
   function renderRows(rows){
@@ -72,14 +74,15 @@
     event.preventDefault();if(scanBusy||creating)return;
     const body=source()==='task'?{job_id:$('#tm-task').value}:{input_path:$('#tm-path').value.trim()};
     if(!body.job_id&&!body.input_path){message('请选择一个任务，或填写结果目录。',true);return;}
-    resetScan();scanBusy=true;const token=scanGeneration;lockSource(true);$('#tm-scan').textContent='正在扫描…';message('正在识别可绘制的样本与链…');
+    const restoring=Boolean(scan),priorCatalog=catalog,priorSelected=new Set(selected);
+    pageGeneration++;clearTimeout(queryTimer);scanBusy=true;scanCurrent=false;const token=++scanGeneration;lockSource(true);syncSelection();$('#tm-scan').textContent='正在扫描…';message('正在识别可绘制的样本与链…');
     try{
       const result=await api('/api/treemap/scan',body);if(token!==scanGeneration)return;
-      scan=result;catalog=new Map((result.rows||[]).map(row=>[row.id,row]));selected=new Set([...catalog.values()].filter(row=>row.valid).map(row=>row.id));
-      pageTotal=result.total??catalog.size;renderRows([...catalog.values()].slice(0,pageSize));
-      message(selected.size?`扫描完成，已默认选择 ${selected.size} 项有效输入。`:'未发现可绘制输入，请检查来源目录和检查结果。',!selected.size);
-      if(pageTotal>catalog.size){message('扫描清单不完整，请缩小输入范围后重新扫描。',true);scan=null;selected.clear();}
-    }catch(error){showError(error);}finally{scanBusy=false;lockSource(false);$('#tm-scan').innerHTML='扫描样本与链 <span aria-hidden="true">→</span>';syncSelection();}
+      if((result.total??result.rows?.length??0)!==(result.rows||[]).length)throw new Error('扫描清单不完整，请缩小输入范围后重新扫描。');
+      scan=result;catalog=new Map((result.rows||[]).map(row=>[row.id,row]));selected=new Set([...catalog.values()].filter(row=>row.valid&&(!restoring||!priorCatalog.has(row.id)||priorSelected.has(row.id)&&Boolean(row.source_version)&&row.source_version===priorCatalog.get(row.id).source_version)).map(row=>row.id));scanCurrent=true;
+      pageTotal=result.total??catalog.size;page=0;renderRows([...catalog.values()].slice(0,pageSize));
+      message(restoring?`扫描完成，已选 ${selected.size} 项；未变化输入保留原选择，变化输入请重新选择。`:selected.size?`扫描完成，已默认选择 ${selected.size} 项有效输入。`:'未发现可绘制输入，请检查来源目录和检查结果。',!selected.size);
+    }catch(error){if(token===scanGeneration)message(`${error.message}${restoring?'；原选择已保留，请重新扫描后生成。':''}`,true);}finally{if(token===scanGeneration){scanBusy=false;lockSource(false);$('#tm-scan').innerHTML='扫描样本与链 <span aria-hidden="true">→</span>';syncSelection();}}
   };
   $('#tm-rows').onchange=event=>{const node=event.target.closest('[data-row]');if(!node||creating)return;const row=catalog.get(node.dataset.row);if(!row?.valid)return;node.checked?selected.add(row.id):selected.delete(row.id);syncSelection();};
   $('#tm-all').onclick=()=>{selected=new Set([...catalog.values()].filter(row=>row.valid).map(row=>row.id));$('#tm-rows').querySelectorAll('[data-row]:not(:disabled)').forEach(node=>node.checked=true);syncSelection();};
@@ -87,7 +90,7 @@
   $('#tm-search').oninput=()=>{clearTimeout(queryTimer);queryTimer=setTimeout(()=>{page=0;loadPage();},250);};
   $('#tm-prev').onclick=()=>{if(page>0){page--;loadPage();}};$('#tm-next').onclick=()=>{page++;loadPage();};
   $('#tm-generate-form').onsubmit=async event=>{
-    event.preventDefault();if(creating||!scan||!selected.size)return;
+    event.preventDefault();if(creating||scanBusy||!scanCurrent||!scan||!selected.size)return;
     const body={scan_id:scan.id,selected_ids:[...selected],name:$('#tm-name').value.trim()||undefined};
     creating=true;lockSource(true);syncSelection();$('#tm-rows').querySelectorAll('input').forEach(node=>node.disabled=true);$('#tm-generate').textContent='正在提交…';
     try{
@@ -98,8 +101,8 @@
   };
   function renderRuns(){
     runPage=Math.max(0,Math.min(runPage,Math.ceil(runs.length/8)-1));const visible=runs.slice(runPage*8,runPage*8+8);
-    const signature=JSON.stringify([visible,currentId]);
-    if(signature!==runListSignature){runListSignature=signature;$('#tm-runs').innerHTML=visible.map(run=>`<button class="tm-run-choice" data-run="${esc(run.id)}" aria-current="${run.id===currentId}"><strong>${esc(run.name||'克隆树图')}</strong>${status(run)}<small>${esc(date(run.created_at))}</small></button>`).join('')||'<div class="tm-empty"><strong>暂无生成记录</strong><span>完成上方两步后，结果将显示在这里。</span></div>';}
+    const signature=JSON.stringify([visible.map(run=>[run.id,run.name,run.status,run.created_at]),currentId]);
+    if(signature!==runListSignature){const focused=$('#tm-runs').contains(document.activeElement)?document.activeElement.dataset.run:null;runListSignature=signature;$('#tm-runs').innerHTML=visible.map(run=>`<button class="tm-run-choice" data-run="${esc(run.id)}" aria-current="${run.id===currentId}"><strong>${esc(run.name||'克隆树图')}</strong>${status(run)}<small>${esc(date(run.created_at))}</small></button>`).join('')||'<div class="tm-empty"><strong>暂无生成记录</strong><span>完成上方两步后，结果将显示在这里。</span></div>';if(focused)([...$('#tm-runs').querySelectorAll('[data-run]')].find(node=>node.dataset.run===focused)||$('#tm-refresh')).focus({preventScroll:true});}
     $('#tm-runs-page').textContent=`${runPage+1} / ${Math.max(1,Math.ceil(runs.length/8))}`;$('#tm-runs-prev').disabled=runPage===0;$('#tm-runs-next').disabled=(runPage+1)*8>=runs.length;
   }
   async function refreshRuns(){
@@ -107,14 +110,21 @@
     try{const result=await api('/api/treemap/runs');runs=result.runs||[];if(!currentId&&runs.length)currentId=runs[0].id;renderRuns();}finally{listBusy=false;}
   }
   async function refreshDetail(){
-    if(!currentId||detailBusy)return;detailBusy=true;const token=++detailGeneration,id=currentId;
-    try{const result=await api(`/api/treemap/runs/${encodeURIComponent(id)}`);if(token!==detailGeneration||id!==currentId)return;detail=result.run||result;if(!viewer)viewer=TreemapView.mount($('#tm-run-detail'),runAction);viewer.update(detail);}finally{detailBusy=false;}
+    if(!currentId)return;
+    detailPending=true;if(detailBusy)return detailPromise;
+    detailBusy=true;detailPromise=(async()=>{
+      while(detailPending&&currentId){
+        detailPending=false;const token=detailGeneration,id=currentId;
+        try{const result=await api(`/api/treemap/runs/${encodeURIComponent(id)}`);if(token!==detailGeneration||id!==currentId)continue;detail=result.run||result;if(!viewer)viewer=TreemapView.mount($('#tm-run-detail'),runAction);viewer.update(detail);}
+        catch(error){if(token===detailGeneration&&id===currentId)throw error;}
+      }
+    })();
+    try{await detailPromise;}finally{detailBusy=false;detailPromise=null;}
   }
   async function selectRun(id){
-    if(detail?.id!==id){viewer=null;$('#tm-run-detail').innerHTML='<div class="tm-empty" role="status"><strong>正在读取生成记录…</strong></div>';}
-    currentId=id;detailGeneration++;detail=null;
+    if(currentId!==id||detail&&detail.id!==id){viewer=null;detail=null;detailGeneration++;$('#tm-run-detail').innerHTML='<div class="tm-empty" role="status"><strong>正在读取生成记录…</strong></div>';}
+    currentId=id;
     const url=new URL(location.href);url.searchParams.set('run',id);history.replaceState(null,'',url);renderRuns();
-    if(detailBusy){setTimeout(()=>{if(currentId===id)selectRun(id).catch(showError);},150);return;}
     await refreshDetail();
   }
   async function runAction(action,run){

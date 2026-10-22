@@ -19,11 +19,12 @@
     if(regionMarkup.get(selector)===markup)return;
     const node=$(selector),opened=new Map([...node.querySelectorAll('details')].map(detail=>[detail.id||detail.querySelector('summary')?.textContent,detail.open]));
     const focused=node.contains(document.activeElement)?document.activeElement:null;
-    const focusId=focused?.id,focusAction=focused?.dataset.action;
+    const focusId=focused?.id,focusAction=focused?.dataset.action,focusSummary=focused?.matches('summary')?focused.parentElement.id:null;
     node.innerHTML=markup;regionMarkup.set(selector,markup);
     node.querySelectorAll('details').forEach(detail=>{const key=detail.id||detail.querySelector('summary')?.textContent;if(opened.has(key))detail.open=opened.get(key);});
     if(focusId)document.getElementById(focusId)?.focus({preventScroll:true});
     else if(focusAction)node.querySelector(`[data-action="${focusAction}"]`)?.focus({preventScroll:true});
+    else if(focusSummary)document.getElementById(focusSummary)?.querySelector('summary')?.focus({preventScroll:true});
   }
   function jumpToTab(name){setTab(name);$('.detail-tabs').scrollIntoView({block:'start'});const panel=$(`#tab-${tab}`);panel.focus({preventScroll:true});}
   const fmt=v=>v?new Date(v).toLocaleString('zh-CN'):'—';

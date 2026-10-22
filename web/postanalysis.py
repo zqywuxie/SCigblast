@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import auth
+import derived_store
 from artifact_download import stream_zip
 from process_identity import group_state, signal_group
 
@@ -58,6 +59,7 @@ def init_schema(connection):
     for name in ('done', 'total'):
         if name not in columns:
             connection.execute(f'ALTER TABLE derived_runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+    derived_store.init_schema(connection)
 
 
 def digest(value):
@@ -145,11 +147,13 @@ def enqueue_auto(connection, job_id, now):
     folder = Path(row['output_root']) / 'analysis' / 'treemap' / f"attempt-{row['attempt_no']}" / f'run-{run_id}'
     data = dict(pending_discovery=True, items=[], files=[], input_root=row['output_root'], metric='records',
                 clone_table_version=clone_table_version())
-    connection.execute('INSERT OR IGNORE INTO derived_runs '
+    inserted = connection.execute('INSERT OR IGNORE INTO derived_runs '
                        '(id,owner_id,parent_job_id,attempt_no,name,source_type,dedupe_key,output_root,data_json,created_at) '
                        'VALUES(?,?,?,?,?,?,?,?,?,?)',
                        (run_id, row['owner_id'], job_id, row['attempt_no'], row['dataset'], 'job',
                         f"auto:{job_id}:{row['attempt_no']}:{VERSION}", str(folder), json.dumps(data), now))
+    if inserted.rowcount:
+        derived_store.replace(connection, run_id, data)
 
 
 class ScanRequest(BaseModel):
@@ -187,6 +191,14 @@ class Service:
         if row['parent_job_id']:
             self.owned_job(row['parent_job_id'], user)
         return row
+
+    def data(self, row, *, work=False):
+        with self.app.db() as connection:
+            connection.execute('BEGIN')
+            current = connection.execute('SELECT * FROM derived_runs WHERE id=?', (row['id'],)).fetchone()
+            if current is None:
+                raise HTTPException(404, 'Treemap 记录不存在或无权访问')
+            return derived_store.load(connection, current, work=work)
 
     @staticmethod
     def successful(row):
@@ -276,7 +288,9 @@ class Service:
         items = data['items']
         needle = query.casefold()
         filtered = [item for item in items if not needle or needle in ' '.join(str(item.get(k, '')) for k in ('sample_key', 'sample_label', 'chain', 'error')).casefold()]
-        rows = [{key: value for key, value in item.items() if key != 'sources'} for item in filtered[max(0,offset):max(0,offset)+max(1,min(limit,10000))]]
+        rows = [{**{key: value for key, value in item.items() if key != 'sources'},
+                 'source_version': digest(item.get('sources', []))}
+                for item in filtered[max(0,offset):max(0,offset)+max(1,min(limit,10000))]]
         return dict(id=scan_id, rows=rows, total=len(filtered), valid_count=sum(bool(i.get('valid')) for i in items),
                     parent_job_id=data['parent_job_id'], chains=sorted({i['chain'] for i in items if i.get('valid')}))
 
@@ -314,10 +328,12 @@ class Service:
                 current = connection.execute('SELECT status,attempt_no FROM jobs WHERE id=?', (parent['id'],)).fetchone()
                 if not current or current['status'] != 'SUCCEEDED' or current['attempt_no'] != data['attempt_no']:
                     raise HTTPException(409, '来源任务已变化，请重新扫描')
-            connection.execute('INSERT OR IGNORE INTO derived_runs '
+            inserted = connection.execute('INSERT OR IGNORE INTO derived_runs '
                                '(id,owner_id,parent_job_id,attempt_no,name,source_type,dedupe_key,output_root,data_json,created_at,total) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                (run_id, owner_id, data['parent_job_id'], data['attempt_no'], name,
                                 'job' if parent is not None else 'directory', key, str(output), json.dumps(payload, ensure_ascii=False), self.app.now(), len(items)))
+            if inserted.rowcount:
+                derived_store.replace(connection, run_id, payload)
             existing = connection.execute('SELECT id FROM derived_runs WHERE owner_id=? AND dedupe_key=?', (owner_id, key)).fetchone()
         return self.public(self.owned_run(existing['id']))
 
@@ -329,7 +345,7 @@ class Service:
                     raise ValueError('来源文件已变化，请重新扫描数据')
 
     def public(self, row, *, details=True):
-        data = json.loads(row['data_json']) if details else {}
+        data = self.data(row) if details else {}
         status = row['status']
         if row['parent_job_id']:
             with self.app.db() as connection:
@@ -370,7 +386,7 @@ class Service:
         if row['pid']:
             if group_state(row['pid'], row['process_token']) != 'gone':
                 raise HTTPException(409, '上次绘图进程尚未确认退出，请先取消或联系管理员')
-        data = json.loads(row['data_json'])
+        data = self.data(row)
         if any(not item.get('valid', True) for item in data.get('items', [])):
             raise HTTPException(409, '存在来源检查失败的条目，请重新扫描数据后生成')
         try:
@@ -384,12 +400,20 @@ class Service:
                 if not parent or parent['status'] != 'SUCCEEDED' or parent['attempt_no'] != row['attempt_no']:
                     raise HTTPException(409, '来源任务已变化，请重新生成')
             repeated = set()
+            artifacts = {item['id']:item for item in data.get('files', [])}
             for item in data.get('items', []):
                 if item.get('status') != 'succeeded':
                     repeated.add(item['id'])
-                elif data.get('clone_table_version'):
+                else:
                     try:
-                        self.clone_table_path(row,item)
+                        image = artifacts.get(item.get('artifact_id'))
+                        if not image:
+                            raise ValueError('单链图片缺失')
+                        path = safe_path(Path(row['output_root'])/image['relative_path'],row['output_root'],file=True)
+                        if version(path)!=image['version']:
+                            raise ValueError('单链图片已变化')
+                        if data.get('clone_table_version'):
+                            self.clone_table_path(row,item)
                     except (ValueError,OSError):
                         repeated.add(item['id'])
             affected = {item['sample_key'] for item in data.get('items', []) if item['id'] in repeated}
@@ -403,9 +427,10 @@ class Service:
                     item.update(status='queued', error='')
                     item.pop('clone_table',None)
                     item.pop('artifact_id',None)
-            done = sum(item.get('status') not in {'queued','running'} for item in data.get('items', []))
-            connection.execute("UPDATE derived_runs SET status='queued',error=NULL,cancel_requested=0,pid=NULL,process_token=NULL,ended_at=NULL,data_json=?,done=? WHERE id=? AND status NOT IN ('queued','running','cancelling')",
-                               (json.dumps(data, ensure_ascii=False),done,run_id))
+            updated = connection.execute("UPDATE derived_runs SET status='queued',error=NULL,cancel_requested=0,pid=NULL,process_token=NULL,ended_at=NULL WHERE id=? AND status NOT IN ('queued','running','cancelling')",
+                                         (run_id,))
+            if updated.rowcount:
+                derived_store.save(connection, row, data)
         return self.public(self.owned_run(run_id))
 
     def cancel(self, run_id):
@@ -481,9 +506,10 @@ class Service:
 
     def save(self, row, data):
         with self.app.db() as connection:
-            items = data.get('items', [])
-            connection.execute('UPDATE derived_runs SET data_json=?,done=?,total=? WHERE id=?',
-                               (json.dumps(data, ensure_ascii=False), sum(i.get('status') not in {'queued','running'} for i in items),len(items),row['id']))
+            connection.execute('BEGIN IMMEDIATE')
+            if not self.current_valid(connection,row) or self.stopping.is_set():
+                raise ValueError('Treemap 已停止或来源任务已更新')
+            derived_store.save(connection, row, data)
 
     def work_unit(self, row, request):
         """One bounded wave, with one persisted supervisor identity and shared flock."""
@@ -621,7 +647,7 @@ class Service:
         row = self.owned_run(run_id)
         if self.public(row, details=False)['status'] in {'stale', 'archived'}:
             raise HTTPException(409, '结果已过期或归档，请从来源任务查看当前结果或完整归档')
-        data = json.loads(row['data_json'])
+        data = self.data(row)
         labels = {item['sample_key']: item['sample_label'] for item in data['items']}
         if sample_key is not None and sample_key not in labels:
             raise HTTPException(404, '未找到所选样本')
@@ -665,7 +691,7 @@ class Service:
             else:
                 parent = None
             connection.execute("UPDATE derived_runs SET status='running',started_at=COALESCE(started_at,?) WHERE id=?", (self.app.now(),row['id']))
-        data = json.loads(row['data_json'])
+        data = self.data(row, work=True)
         item = None
         try:
             if data.get('pending_discovery'):
@@ -738,6 +764,13 @@ class Service:
             completed = set(data.get('composed_samples', []))
             sample = next((i['sample_key'] for i in data['items'] if i['sample_key'] not in completed), None)
             if sample is not None:
+                # Validate every registered input image before passing it to
+                # the composition worker; input TSV checks alone are not enough.
+                for artifact in data['files']:
+                    if artifact['kind']=='chain' and artifact['sample_key']==sample:
+                        path = safe_path(Path(row['output_root'])/artifact['relative_path'],row['output_root'],file=True)
+                        if version(path)!=artifact['version']:
+                            raise ValueError('合图来源图片已变化，请重试生成')
                 images = {f['chain']:str(Path(row['output_root'])/f['relative_path']) for f in data['files'] if f['kind']=='chain' and f['sample_key']==sample}
                 if images:
                     label = next(i['sample_label'] for i in data['items'] if i['sample_key']==sample)
@@ -818,9 +851,10 @@ class Service:
             if not self.current_valid(connection,row):
                 connection.execute("UPDATE derived_runs SET status='cancelled',ended_at=? WHERE id=?",(self.app.now(),row['id']))
                 return
-            atomic_json(root/'manifest.json',dict(version=VERSION,run_id=row['id'],metric='records',data=data))
-            connection.execute('UPDATE derived_runs SET status=?,data_json=?,ended_at=?,error=? WHERE id=?',
-                               (status,json.dumps(data,ensure_ascii=False),self.app.now(),'部分链绘图失败，请检查后重试' if 'failed' in states else None,row['id']))
+            atomic_json(root/'manifest.json',dict(version=VERSION,run_id=row['id'],metric='records',data=derived_store.clean(data)))
+            derived_store.save(connection,row,data)
+            connection.execute('UPDATE derived_runs SET status=?,ended_at=?,error=? WHERE id=?',
+                               (status,self.app.now(),'部分链绘图失败，请检查后重试' if 'failed' in states else None,row['id']))
 
 
 def router(service):
@@ -860,10 +894,16 @@ def router(service):
     @routes.get('/api/treemap/runs/{run_id}/files/{artifact_id}')
     def file(run_id:str,artifact_id:str,download:bool=False):
         row=service.owned_run(run_id)
-        if not any(f['id']==artifact_id for f in service.public(row)['files']):
+        with service.app.db() as connection:
+            item=derived_store.artifact(connection,row,artifact_id)
+        if service.public(row,details=False)['status'] in {'stale','archived'} or not item:
             raise HTTPException(404,'图片已过期、归档或不可访问')
-        item=next(f for f in json.loads(row['data_json'])['files'] if f['id']==artifact_id)
-        path=safe_path(Path(row['output_root'])/item['relative_path'],row['output_root'],file=True)
+        try:
+            path=safe_path(Path(row['output_root'])/item['relative_path'],row['output_root'],file=True)
+            if version(path)!=item['version']:
+                raise ValueError('artifact changed')
+        except (ValueError,OSError):
+            raise HTTPException(404,'图片已过期、归档或不可访问') from None
         table = item['kind'] in {'stats','clone_top'}
         return FileResponse(path,media_type='text/csv' if table else 'image/png',filename=path.name if download or table else None)
 

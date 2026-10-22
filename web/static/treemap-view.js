@@ -31,7 +31,7 @@ window.TreemapView = (() => {
       $('[data-view]').disabled=!chainSelect.value;
       if(viewedId!==chainSelect.value)viewedId='';
       const zip=`/api/treemap/runs/${encodeURIComponent(run.id)}/download`;
-      replace($('[data-downloads]'),(images.length?`<a class="button button-ghost button-small" href="${zip}">下载全部结果 ZIP</a>`:'')+(choices.length?`<a class="button button-ghost button-small" href="${zip}?sample_key=${encodeURIComponent(sampleSelect.value)}">下载当前样本 ZIP</a>`:'')+availableFiles.filter(file=>['stats','clone_top'].includes(file.kind)).map(file=>`<a href="${url(run,file,true)}">${file.kind==='clone_top'?'下载 Clone Top CSV':'下载统计 CSV'}</a>`).join(''));
+      replace($('[data-downloads]'),(images.length?`<a class="button button-ghost button-small" href="${zip}">下载全部结果 ZIP</a>`:'')+(choices.length?`<a class="button button-ghost button-small" href="${zip}?sample_key=${encodeURIComponent(sampleSelect.value)}">下载当前样本 ZIP</a>`:'')+availableFiles.filter(file=>['stats','clone_top'].includes(file.kind)).map(file=>`<a class="button button-ghost button-small" href="${url(run,file,true)}">${file.kind==='clone_top'?'下载 Clone Top CSV':'下载统计 CSV'}</a>`).join(''));
       const file=images.find(file=>file.id===viewedId),next=JSON.stringify([run.id,file||null,images.length,run.status]);
       if(next!==signature){
         signature=next;

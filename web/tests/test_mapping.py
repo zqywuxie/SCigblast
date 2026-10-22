@@ -30,7 +30,13 @@ class MappingWebTests(unittest.TestCase):
         response = self.client.post('/api/mapping/scan', json={'input_path':str(self.fixture.raw)})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['chains'], [{'chain':'IGH','file_count':1},{'chain':'TRB','file_count':1}])
-        self.assertEqual(response.json()['samples'], [{'sample_key':'A','sample_id':'A','chains':['IGH','TRB'],'chain_counts':{'IGH':1,'TRB':1},'file_count':2}])
+        samples=response.json()['samples']
+        self.assertEqual([{k:v for k,v in sample.items() if k!='source_version'} for sample in samples], [{'sample_key':'A','sample_id':'A','chains':['IGH','TRB'],'chain_counts':{'IGH':1,'TRB':1},'file_count':2}])
+        version=samples[0]['source_version']
+        self.assertEqual(self.client.post('/api/mapping/scan',json={'input_path':str(self.fixture.raw)}).json()['samples'][0]['source_version'],version)
+        (self.fixture.raw/'A__IGH.csv').write_text('changed input')
+        self.assertNotEqual(self.client.post('/api/mapping/scan',json={'input_path':str(self.fixture.raw)}).json()['samples'][0]['source_version'],version)
+        (self.fixture.raw/'A__IGH.csv').write_text('CDR3(pep),copy,joinedSeq\nCAR,11,ACGT\n')
         self.assertEqual(self.client.post('/api/validate', json=self.body).status_code, 200)
         jid = self.create(); row = self.web.get_job_row(jid)
         self.assertEqual(row['submission_path'], '')

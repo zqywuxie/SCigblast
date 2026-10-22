@@ -29,3 +29,15 @@ class JobFilterTests(unittest.TestCase):
         self.assertEqual(private['operators'], ['Test User'])
         self.assertIn('operator-filter', self.client.get('/').text)
         self.assertEqual(self.client.get('/api/pipelines').json()['mapping']['label'], 'reMapping')
+
+    def test_equal_creation_times_have_stable_pages_and_renamed_operators(self):
+        body = {'pipeline': 'igblast_base', 'input_path': str(self.raw), 'submission_path': str(self.source)}
+        ids = [self.client.post('/api/jobs', json=body).json()['id'] for _ in range(3)]
+        with test_auth.web.db() as connection:
+            connection.execute("UPDATE jobs SET created_at='2026-10-22T00:00:00+00:00'")
+            connection.execute("UPDATE users SET display_name='Renamed Admin' WHERE role='admin'")
+        actual = [self.client.get('/api/jobs', params={'operator': 'Renamed Admin', 'offset': offset, 'limit': 1}).json()['jobs'][0]['id'] for offset in range(3)]
+        self.assertEqual(actual, sorted(ids, reverse=True))
+        result = self.client.get('/api/jobs', params={'operator': 'Renamed Admin', 'query': 'no-match'}).json()
+        self.assertEqual(result['total'], 0)
+        self.assertEqual(result['counts']['total'], 3)

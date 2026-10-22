@@ -19,6 +19,7 @@ from PIL import Image
 import test_workflow as workflow
 import postanalysis
 import archive_results
+import derived_store
 
 web = workflow.web
 HEADERS = {'X-SCIGBLAST-Request': '1'}
@@ -131,7 +132,7 @@ class TreemapTests(unittest.TestCase):
         self.assertNotIn('clone_table',result['items'][0])
         with web.db() as connection:
             stored = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
-        for artifact in json.loads(stored['data_json'])['files']:
+        for artifact in self.service.data(stored)['files']:
             if artifact['kind'] in {'chain', 'combined'}:
                 expected = 'individual_treemaps' if artifact['kind'] == 'chain' else 'multi_chain_treemaps'
                 self.assertEqual(Path(artifact['relative_path']).parts[0], expected)
@@ -194,7 +195,7 @@ class TreemapTests(unittest.TestCase):
             result = self.deliver(run['id'])
         with web.db() as connection:
             row = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
-        return result, row, json.loads(row['data_json'])
+        return result, row, self.service.data(row)
 
     def test_zip_all_and_sample_keep_image_bytes_and_collision_safe_directories(self):
         result, row, data = self.zip_run()
@@ -239,7 +240,8 @@ class TreemapTests(unittest.TestCase):
             path.replace(legacy)
             artifact.update(relative_path=legacy.relative_to(row['output_root']).as_posix(), version=postanalysis.version(legacy))
         with web.db() as connection:
-            connection.execute('UPDATE derived_runs SET data_json=? WHERE id=?', (json.dumps(data), row['id']))
+            connection.execute('UPDATE derived_runs SET storage_version=1,data_json=? WHERE id=?', (json.dumps(data), row['id']))
+            derived_store.delete(connection,[row['id']])
         response = self.client.get(f"/api/treemap/runs/{row['id']}/download")
         self.assertEqual(response.status_code, 200)
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
@@ -548,7 +550,7 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(failed['status'],'failed')
         with web.db() as connection:
             row=connection.execute('SELECT * FROM derived_runs WHERE id=?',(run['id'],)).fetchone()
-        data=json.loads(row['data_json'])
+        data=self.service.data(row)
         lost=data['items'][0]
         (Path(row['output_root'])/lost['clone_table']['relative_path']).unlink()
         kept=next(file for file in failed['files'] if file['kind']=='chain' and file['chain']!=lost['chain'])
@@ -571,18 +573,20 @@ class TreemapTests(unittest.TestCase):
         scan=self.scan();legacy=self.create_run(scan)
         with web.db() as connection:
             snapshot=json.loads(connection.execute('SELECT data_json FROM treemap_scans WHERE id=?',(scan['id'],)).fetchone()['data_json'])
-            data=json.loads(connection.execute('SELECT data_json FROM derived_runs WHERE id=?',(legacy['id'],)).fetchone()['data_json'])
+            data=derived_store.load(connection,connection.execute('SELECT * FROM derived_runs WHERE id=?',(legacy['id'],)).fetchone())
             data.pop('clone_table_version')
             key=postanalysis.digest(dict(version=postanalysis.VERSION,parent=snapshot['parent_job_id'],attempt=snapshot['attempt_no'],
                                         input_root=snapshot['input_root'],items=snapshot['items']))
-            connection.execute('UPDATE derived_runs SET dedupe_key=?,data_json=? WHERE id=?',(key,json.dumps(data),legacy['id']))
+            connection.execute('UPDATE derived_runs SET storage_version=1,dedupe_key=?,data_json=? WHERE id=?',(key,json.dumps(data),legacy['id']))
+            derived_store.delete(connection,[legacy['id']])
         self.assertNotEqual(self.create_run(scan)['id'],legacy['id'])
         job_id=self.job(enabled=True)
         web.update_job(job_id,status='SUCCEEDED')
         with web.db() as connection:
             old=connection.execute('SELECT * FROM derived_runs WHERE parent_job_id=?',(job_id,)).fetchone()
-            old_data=json.loads(old['data_json']);old_data.pop('clone_table_version')
-            connection.execute("UPDATE derived_runs SET status='succeeded',data_json=? WHERE id=?",(json.dumps(old_data),old['id']))
+            old_data=derived_store.load(connection,old);old_data.pop('clone_table_version')
+            connection.execute("UPDATE derived_runs SET status='succeeded',storage_version=1,data_json=? WHERE id=?",(json.dumps(old_data),old['id']))
+            derived_store.delete(connection,[old['id']])
             postanalysis.enqueue_auto(connection,job_id,web.now())
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM derived_runs WHERE parent_job_id=?',(job_id,)).fetchone()[0],1)
 
@@ -596,6 +600,39 @@ class TreemapTests(unittest.TestCase):
         table = next(f for f in result['files'] if f['kind']=='clone_top')
         rows = list(csv.DictReader(io.StringIO(self.client.get(table['url']).content.decode('utf-8-sig'))))
         self.assertEqual(rows,[])
+
+    def test_v1_queued_run_completes_and_retries_without_automatic_storage_migration(self):
+        self.airr(empty=True)
+        run=self.create_run()
+        with web.db() as connection:
+            row=connection.execute('SELECT * FROM derived_runs WHERE id=?',(run['id'],)).fetchone()
+            data=derived_store.load(connection,row)
+            connection.execute('UPDATE derived_runs SET storage_version=1,data_json=? WHERE id=?',(json.dumps(data),run['id']))
+            derived_store.delete(connection,[run['id']])
+        result=self.deliver(run['id'])
+        self.assertEqual(result['status'],'empty')
+        self.assertEqual(self.client.post(f"/api/treemap/runs/{run['id']}/retry",json={}).status_code,200)
+        self.assertEqual(self.deliver(run['id'])['status'],'empty')
+        with web.db() as connection:
+            row=connection.execute('SELECT * FROM derived_runs WHERE id=?',(run['id'],)).fetchone()
+            self.assertEqual(row['storage_version'],1)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM derived_items WHERE run_id=?',(run['id'],)).fetchone()[0],0)
+        self.assertCountEqual([file['kind'] for file in result['files']],['clone_top','stats'])
+
+    def test_composition_rejects_changed_image_and_retry_repairs_it(self):
+        self.airr()
+        run=self.create_run()
+        self.assertTrue(self.service.deliver_one())
+        with web.db() as connection:
+            row=connection.execute('SELECT * FROM derived_runs WHERE id=?',(run['id'],)).fetchone()
+            data=derived_store.load(connection,row)
+        artifact=data['files'][0]
+        (Path(row['output_root'])/artifact['relative_path']).unlink()
+        self.assertTrue(self.service.deliver_one())
+        self.assertEqual(self.run_info(run['id'])['status'],'failed')
+        self.assertEqual(self.client.post(f"/api/treemap/runs/{run['id']}/retry",json={}).status_code,200)
+        self.assertEqual(self.deliver(run['id'])['status'],'succeeded')
+        self.assertEqual(self.client.get(f"/api/treemap/runs/{run['id']}/files/{artifact['id']}").status_code,404)
 
     def test_automatic_discovery_failure_does_not_change_primary_success(self):
         job_id = self.job(enabled=True)

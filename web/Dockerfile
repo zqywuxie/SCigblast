@@ -29,7 +29,7 @@ RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
 COPY web/archive_results.py web/app.py web/submission.py web/auth.py web/manage_users.py web/pipeline_registry.json /app/
 COPY web/preflight.py web/table_preview.py web/process_identity.py web/artifact_download.py web/mapping_results.py /app/
 COPY web/input_manifest.py web/notifications.py /app/
-COPY web/postanalysis.py /app/
+COPY web/postanalysis.py web/derived_store.py /app/
 COPY web/templates /app/templates
 COPY web/static /app/static
 
