@@ -32,7 +32,7 @@ reMapping 结果页按样本和链展示最终 UMI 文件；条数/保留比例�
 
 链选择组件在 `web/static/ui.js` 的 `chainPicker/bindChainPicker`，统一按 IG 与 TCR 分组，保留原 checkbox 值与多链选择。reMapping 显示扫描文件数，未发现的链禁用，“全部可用链”和本组快捷选择不能勾选禁用项；默认仍仅选扫描到的 IGH。目录批量勾选只是模板，点击应用才覆盖全部已选样本；`syncBatch()` 展示已使用该组合的样本数。逐样本设置继续独立保存，不根据批量区当前勾选生成请求。
 
-详情页仅保留一处状态与下一步说明，阶段明细按需展开，Tab 吸顶且 reMapping 隐藏 Match。`region()` 按内容变化更新结构，时间、阶段内进度等局部更新；轮询不能重建未变化的操作按钮、展开区或夺取焦点。吸顶导航高度通过 ResizeObserver 写入详情页的 `--detail-tabs-height`，结果 sticky 预览与跳转偏移沿用该变量。保留原有 Tab 初次落点与键盘操作，不用任务状态轮询强行切换 Tab。
+详情页仅保留一处状态与下一步说明，阶段明细按需展开，Tab 吸顶且 reMapping 隐藏 Match。克隆树图为输出文件旁的独立 Tab，支持 `#treemap` 直达、浏览偏好恢复和键盘切换；只在该 Tab 可见时加载/轮询树图，不随输出文件刷新。`region()` 按内容变化更新结构，时间、阶段内进度等局部更新；轮询不能重建未变化的操作按钮、展开区或夺取焦点。吸顶导航高度通过 ResizeObserver 写入详情页的 `--detail-tabs-height`，结果 sticky 预览与跳转偏移沿用该变量。保留原有 Tab 初次落点与键盘操作，不用任务状态轮询强行切换 Tab。任务列表操作列的 `<td>` 保留 table-cell 布局，按钮 flex 放在内部 `.row-actions` 容器，表头和按钮左对齐，不能直接把表格单元格设为 flex。
 
 任务详情的“本次运行时长”由 `execution_runtime()` 根据本次 started_at/ended_at 计算，API 返回 runtime_seconds/runtime_running；浏览器用 performance.now() 按秒更新，沿用现有接口轮询。续跑、重试或 Match 后分析会开始新的 attempt，不累计跨次时长；排队及等待审核不计入，排队期间停止也不把旧启动时间算入耗时。缺失或异常历史时间显示未知，不推算累计时长。
 
@@ -48,11 +48,11 @@ IR/10X stage7 后处理仅在本次进程内复用同一 FASTA 的计数，按�
 
 用户提供的 `treemap_g.py` QR 核心移植到 `analysis/treemap/`，仅按 `productive == T` 且 CDR3 非空的最终记录数聚合完整 V/J/CDR3，不读取 copy/UMI 权重。CDR3 优先 junction_aa，否则 cdr3_aa；保留原始字符串、配色、排序、3000×3000/300 DPI 和固定比例合图。合图链区面积不代表链间丰度。`sources.py` 用各流程最终摘要与真实 output_path 识别来源，不重复统计聚合文件；10X 合并文件以 locus 拆链，IR 使用 preprocessing 的 junction_peps。
 
-新建任务 `generate_treemap` 默认 false，只写 options_json，不传给主 runner；成功状态事务只保存绘图意图。`web/postanalysis.py` 通过 derived_runs 和单后台线程启动独立子进程，每工作单元使用与 pipeline 同一 flock 并在子进程中继承锁 FD，优先主分析，设置线程数、时间/RSS 预算并按可用内存留余量。主分析状态、DONE、耗时、输出和邮件不受绘图失败影响。状态和进度独立，重复提交去重；修改来源/attempt、取消、续跑、删除与归档均核验生命周期，旧 PID 必须通过 process_identity 验证。归档认领须在 SQLite 事务中检查无活跃 derived_runs，不能只靠 PROCESS_LOCK。
+新建任务 `generate_treemap` 默认 false，只写 options_json，不传给主 runner；成功状态事务只保存绘图意图。`web/postanalysis.py` 用单调度线程启动有界绘图批次；默认最多 2 个单链 worker，按 cgroup/CPU/可用内存限制，合图仍逐样本执行。`SCIGBLAST_TREEMAP_MAX_WORKERS=1` 恢复串行；worker 总预算为 `SCIGBLAST_TREEMAP_MEMORY_BUDGET_MB`，单进程预算为 `SCIGBLAST_TREEMAP_MAX_RSS_MB`。每批一个轻量监督进程，数据库 PID/token 指向监督进程；所有 worker 同组且继承共享 flock FD，禁止单独释放锁。取消、超总预算、关闭或监督进程异常时核验并停止整个组，确认全部退出后才清除 PID；身份不明则保留 interrupted 记录。进程间只传文件路径和少量 JSON，不复制 DataFrame/图片。主分析排队后不启动下一批；单链失败不影响其他 worker，重试保留成功图。主分析状态、DONE、耗时、输出和邮件不受绘图失败影响。状态和进度独立，重复提交去重；修改来源/attempt、取消、续跑、删除与归档均核验生命周期，旧 PID 必须通过 process_identity 验证。归档认领须在 SQLite 事务中检查无活跃 derived_runs，不能只靠 PROCESS_LOCK。
 
 独立入口 `/treemap` 可选有权限的成功任务或受控服务器目录，`/api/treemap/scan` 返回绑定用户和有效期的快照，提交 selected_ids；跨页/搜索只影响显示。纯目录表格必须有明确样本链身份，原始 FASTQ/FASTA/官方未注释 CSV 不适用。手填平台任务路径仍检查任务归属。关联运行归属于来源任务所有者，独立运行归属于提交者。产物按 run/attempt 独立保存，PNG/manifest 原子发布；下载用产物 ID 并核验所有权、版本、真实路径和符号链接。历史列表只读进度摘要，详情才载入产物，不在每次列表轮询扫描所有图。
 
-Web 入口包含新建任务开关、任务输出页共用预览组件及独立工作台（treemap-view.js/treemap.js/treemap.css）；旧任务未设置不会自动补生成。关联任务图随任务归档，纯目录绘图不自动进入旧归档脚本。Docker 白名单打包 analysis/treemap 与 postanalysis.py，环境显式依赖 Pillow。聚合/像素保真测试、五流程来源测试和 API/生命周期测试位于 analysis/treemap/tests/test_core.py、tests/test_sources.py、web/tests/test_treemap.py。
+Web 入口包含新建任务开关、任务输出页共用预览组件及独立工作台（treemap-view.js/treemap.js/treemap.css）；适用于五流程最终 mapping 结果及兼容 AIRR 目录，不限制为 Pig。默认不加载图片，选择样本和链/合图后点击查看才加载单张图；轮询保留选择与预览。新输出与 ZIP 使用 `individual_treemaps/<安全样本标识>/`、`multi_chain_treemaps/<安全样本标识>/`；历史文件不迁移，ZIP 按 manifest 的 kind/sample_key 整理路径。支持全部结果/当前样本流式 ZIP，权限、版本及路径检查必须全部通过，不静默遗漏文件；全量含根目录统计 CSV，样本 ZIP 仅含该样本图片。旧任务未设置不会自动补生成。关联任务图随任务归档，纯目录绘图不自动进入旧归档脚本。Docker 白名单打包 analysis/treemap 与 postanalysis.py，环境显式依赖 Pillow。聚合/像素保真测试、五流程来源测试和 API/生命周期测试位于 analysis/treemap/tests/test_core.py、tests/test_sources.py、web/tests/test_treemap.py。
 
 ## Mapping 当前状态
 

@@ -159,15 +159,26 @@ QQ 参数可参考[腾讯官方 SMTP 配置表](https://intl.cloud.tencent.com/z
 
 ## Treemap 后置分析
 
-新建任务时可勾选“分析完成后生成 Treemap”，默认关闭。开启后，原有分析和结果整理成功才会后台排队绘图；失败、主动停止或等待 Match 审核不会触发。任务详情“输出文件”展示生成进度、单链图、多链合并图及统计下载。绘图失败可独立重试，不改变分析状态、结果内容或完成邮件。
+新建任务时可勾选“分析完成后生成 Treemap”，默认关闭。开启后，原有分析和结果整理成功才会后台排队绘图；失败、主动停止或等待 Match 审核不会触发。任务详情在“输出文件”旁提供独立“克隆树图”Tab，可用 `/jobs/<任务ID>#treemap` 直达；打开时才加载树图状态，支持刷新和键盘切换。该 Tab 和独立工作台默认不加载图片；选择样本、链（或多链合并图）并点击“查看图片”才加载单张预览。可下载 PNG、统计 CSV、全部结果 ZIP 或当前样本 ZIP。绘图失败可独立重试，不改变分析状态、结果内容或完成邮件。
 
-首页“树图工作台”是独立入口 `/treemap`：选择已完成任务或填写服务器结果目录 → 扫描样本和链 → 勾选需要的条目 → 生成。搜索/分页不丢失选择，默认选择全部有效项。无需 Submission，也不重新运行 IgBLAST。目录须包含已注释 AIRR CSV/TSV（支持 gzip），列为 `productive`、`v_call`、`j_call`、`junction_aa`（无此列时使用 `cdr3_aa`）；普通独立文件需明确命名为 `样本_CHAIN` 或 `样本__CHAIN`。未注释的官方 CSV、FASTA、FASTQ 请先运行分析。平台已有任务目录按任务归属校验，不能通过手填路径访问他人的结果。
+首页“树图工作台”是独立入口 `/treemap`：选择已完成任务或填写服务器结果目录 → 扫描样本和链 → 勾选需要的条目 → 生成。支持 IgBLAST base、Pig IgBLAST、IR、10X、reMapping 的最终结果，不限物种；搜索/分页不丢失选择，默认选择全部有效项。无需 Submission，也不重新运行 IgBLAST。目录须包含已注释 AIRR CSV/TSV（支持 gzip），列为 `productive`、`v_call`、`j_call`、`junction_aa`（无此列时使用 `cdr3_aa`）；普通独立文件需明确命名为 `样本_CHAIN` 或 `样本__CHAIN`。未注释的官方 CSV、FASTA、FASTQ 请先运行分析。平台已有任务目录按任务归属校验，不能通过手填路径访问他人的结果。
 
 绘图复用 `treemap_g.py` 的 QR 样式：只统计 `productive == T` 且 CDR3 非空的最终记录，按完整 V/J/CDR3 聚合，每条记录计 1，**不按 copy/umi_count/umi_counts 加权**。块面积表示链内记录占比；多链图的链区采用固定比例排版，面积不表示链间丰度。无有效记录、缺字段、来源文件缺失和绘图失败分别展示。首版不提供俄罗斯方块或 V/J 环形图。
 
-关联任务的派生输出在 `<任务输出>/analysis/treemap/attempt-N/run-ID/`；纯目录绘图由服务器分配到 `<默认输出根>/<用户>/treemap/<北京时间目录>/run-ID/`，不写回输入目录。各运行保留来源版本、选择、计数规则、PNG 和 `treemap_summary.csv`。关联任务续跑后旧图标为过期；归档时 PNG 随完整压缩包保存，在线副本可以移除，归档后不能补生成。纯目录绘图首版不纳入 pipeline 的 14 天自动归档规则。
+关联任务的派生输出在 `<任务输出>/analysis/treemap/attempt-N/run-ID/`；纯目录绘图由服务器分配到 `<默认输出根>/<用户>/treemap/<北京时间目录>/run-ID/`，不写回输入目录。单链图位于 `individual_treemaps/<安全样本标识>/`，合图位于 `multi_chain_treemaps/<安全样本标识>/`。各运行保留来源版本、选择、计数规则、PNG 和 `treemap_summary.csv`。ZIP 流式打包，不在结果目录创建压缩包；全量 ZIP 包含统计 CSV，当前样本 ZIP 仅含该样本图片。历史图片保持原路径，下载 ZIP 时也整理为上述两个目录。关联任务续跑后旧图标为过期；归档时 PNG 随完整压缩包保存，在线副本可以移除，归档后不能补生成。纯目录绘图首版不纳入 pipeline 的 14 天自动归档规则。
 
-绘图只有一个后台执行器，每次一条链或一次合图，复用 pipeline 共享资源锁；主分析排队时暂不启动新的绘图单元。每单元默认最多 1800 秒、2048 MiB RSS，还会根据当前可用内存留出余量；可在 `.env` 修改 `SCIGBLAST_TREEMAP_TIMEOUT_SECONDS`、`SCIGBLAST_TREEMAP_MAX_RSS_MB` 后重建容器。检查是周期性预算监测，不是容器硬性内存隔离。超预算明确报错，不截断克隆或丢弃低频记录。更改 Python/绘图代码或增加 Pillow 依赖后须重建镜像。
+绘图采用一个后台调度器和有界的多进程批次：默认最多 2 个独立单链 worker，实际数量取 CPU 配额/亲和性、当前可用内存和配置上限的较小值；单链完成后逐样本生成合图。不在进程间传输 DataFrame 或图片。每批次由一个轻量监督进程管理，同组子进程继承 pipeline 的共享资源锁，主分析排队后不再启动下一批。取消/关闭会停止并核验整组进程退出；单链失败独立记录，重试复用成功单链。
+
+可在 `web/.env` 设置以下参数，随后从 `web/` 执行 `docker compose up -d --build`：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `SCIGBLAST_TREEMAP_MAX_WORKERS` | `2` | 单链最大并行进程数，设为 `1` 恢复串行，最多 32 |
+| `SCIGBLAST_TREEMAP_MEMORY_BUDGET_MB` | `4096` | 绘图 worker 合计内存预算（MiB），监督进程另预留 64 MiB |
+| `SCIGBLAST_TREEMAP_MAX_RSS_MB` | `2048` | 每个 worker 的 RSS 上限（MiB）；可用内存不足时下调并发或单进程额度 |
+| `SCIGBLAST_TREEMAP_TIMEOUT_SECONDS` | `1800` | 每个 worker 的时间预算（秒） |
+
+例如 4 个 worker、每个 2048 MiB，需同时将总预算设为 `8192`，且容器实际 CPU/内存允许才会生效。每个新批次重新检测 cgroup v1/v2 和主机资源，保留至少 256 MiB 或当前可用内存的 5% 余量。单 worker 和进程组 RSS 周期监测属于预算控制，不是容器硬性内存隔离。超预算明确报错，不截断克隆或丢弃低频记录。更改 Python/绘图代码或增加 Pillow 依赖后须重建镜像。
 
 验证命令：`rtk proxy python -m pytest analysis/treemap/tests/test_core.py tests/test_sources.py -q`；`rtk proxy python -m unittest discover -s web/tests -p test_treemap.py -q`。测试使用合成数据、独立临时输出，不发送真实邮件。
 

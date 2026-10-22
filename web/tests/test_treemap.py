@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 import smtplib
+import subprocess
 import threading
 import time
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -32,6 +34,7 @@ class TreemapTests(unittest.TestCase):
         self.patches.append(patch.dict(os.environ, {
             'SCIGBLAST_RESOURCE_LOCK_FILE': str(self.root / 'treemap-resource.lock'),
             'SCIGBLAST_TREEMAP_TIMEOUT_SECONDS': '60',
+            'SCIGBLAST_TREEMAP_MAX_WORKERS': '1',
         }))
         self.patches[-1].start()
 
@@ -125,6 +128,12 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(len(result['items']), 1)
         self.assertEqual((result['items'][0]['productive_count'], result['items'][0]['clone_count']), (3, 2))
         self.assertCountEqual([f['kind'] for f in result['files']], ['chain', 'combined', 'stats'])
+        with web.db() as connection:
+            stored = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
+        for artifact in json.loads(stored['data_json'])['files']:
+            if artifact['kind'] in {'chain', 'combined'}:
+                expected = 'individual_treemaps' if artifact['kind'] == 'chain' else 'multi_chain_treemaps'
+                self.assertEqual(Path(artifact['relative_path']).parts[0], expected)
         for artifact in result['files']:
             response = self.client.get(artifact['url'])
             self.assertEqual(response.status_code, 200, response.text[:200] if artifact['kind'] == 'stats' else '')
@@ -144,6 +153,208 @@ class TreemapTests(unittest.TestCase):
         summary = history.json()['runs'][0]
         self.assertEqual(summary['progress'], {'done': 1, 'total': 1})
         self.assertEqual((summary['items'], summary['files']), ([], []))
+
+    def zip_run(self, *, parent=False):
+        if parent:
+            job_id = self.job()
+            self.job_results(job_id)
+            web.update_job(job_id, status='SUCCEEDED')
+            run = self.create_run(self.scan(job_id=job_id))
+        else:
+            self.airr(self.raw / 'one', sample='Same', chain='IGH')
+            self.airr(self.raw / 'two', sample='Same', chain='TRB')
+            run = self.create_run()
+        def small_png(row, request):
+            path = Path(request['target'])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new('RGB', (4, 4), (50, 80, 120)).save(path)
+            return {'productive_count': 3, 'clone_count': 2}
+        with patch.object(self.service, 'work_unit', side_effect=small_png):
+            result = self.deliver(run['id'])
+        with web.db() as connection:
+            row = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
+        return result, row, json.loads(row['data_json'])
+
+    def test_zip_all_and_sample_keep_image_bytes_and_collision_safe_directories(self):
+        result, row, data = self.zip_run()
+        endpoint = f"/api/treemap/runs/{row['id']}/download"
+        response = self.client.get(endpoint)
+        self.assertEqual(response.status_code, 200, response.text[:100] if response.status_code != 200 else '')
+        self.assertEqual(response.headers['content-type'], 'application/zip')
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            self.assertEqual(len(archive.namelist()), 5)
+            self.assertIn('treemap_summary.csv', archive.namelist())
+            self.assertEqual({p.split('/')[0] for p in archive.namelist() if p.endswith('.png')},
+                             {'individual_treemaps', 'multi_chain_treemaps'})
+            # Equal sample labels in separate input directories must never collide.
+            self.assertEqual(len({p.split('/')[1] for p in archive.namelist() if p.endswith('.png')}), 2)
+            for artifact in data['files']:
+                if artifact['kind'] == 'stats':
+                    name = 'treemap_summary.csv'
+                else:
+                    label = next(i['sample_label'] for i in data['items'] if i['sample_key'] == artifact['sample_key'])
+                    name = postanalysis.image_relative(artifact['sample_key'], label, artifact['kind'], artifact['chain']).as_posix()
+                self.assertEqual(archive.read(name), (Path(row['output_root']) / artifact['relative_path']).read_bytes())
+        sample = result['items'][0]['sample_key']
+        selected = self.client.get(endpoint, params={'sample_key': sample})
+        with zipfile.ZipFile(io.BytesIO(selected.content)) as archive:
+            self.assertEqual(len(archive.namelist()), 2)
+            self.assertTrue(all(name.endswith('.png') for name in archive.namelist()))
+        self.assertEqual(self.client.get(endpoint, params={'sample_key': '../unknown'}).status_code, 404)
+        self.assertEqual(self.other_client().get(endpoint).status_code, 404)
+        self.assertEqual(list(Path(row['output_root']).rglob('*.zip')), [])
+
+    def test_zip_normalizes_historical_layout_without_moving_existing_files(self):
+        result, row, data = self.zip_run()
+        for artifact in data['files']:
+            if artifact['kind'] == 'stats':
+                continue
+            path = Path(row['output_root']) / artifact['relative_path']
+            legacy = Path(row['output_root']) / 'samples' / artifact['sample_key'] / path.name
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            path.replace(legacy)
+            artifact.update(relative_path=legacy.relative_to(row['output_root']).as_posix(), version=postanalysis.version(legacy))
+        with web.db() as connection:
+            connection.execute('UPDATE derived_runs SET data_json=? WHERE id=?', (json.dumps(data), row['id']))
+        response = self.client.get(f"/api/treemap/runs/{row['id']}/download")
+        self.assertEqual(response.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            self.assertFalse(any(name.startswith('samples/') for name in archive.namelist()))
+            self.assertEqual(len(archive.namelist()), 5)
+        for artifact in result['files']:
+            self.assertEqual(self.client.get(artifact['url']).status_code, 200)
+
+    def test_zip_rejects_changed_or_missing_artifacts_without_partial_archive(self):
+        _, row, data = self.zip_run()
+        image = next(item for item in data['files'] if item['kind'] == 'chain')
+        path = Path(row['output_root']) / image['relative_path']
+        path.write_bytes(b'changed')
+        endpoint = f"/api/treemap/runs/{row['id']}/download"
+        self.assertEqual(self.client.get(endpoint).status_code, 409)
+        path.unlink()
+        self.assertEqual(self.client.get(endpoint).status_code, 409)
+
+    def test_zip_rejects_stale_archived_and_empty_runs(self):
+        _, row, _ = self.zip_run(parent=True)
+        endpoint = f"/api/treemap/runs/{row['id']}/download"
+        web.update_job(row['parent_job_id'], status='ARCHIVED')
+        self.assertEqual(self.client.get(endpoint).status_code, 409)
+        web.update_job(row['parent_job_id'], status='SUCCEEDED', attempt_no=row['attempt_no'] + 1)
+        self.assertEqual(self.client.get(endpoint).status_code, 409)
+        self.airr(empty=True)
+        empty = self.deliver(self.create_run()['id'])
+        self.assertEqual(self.client.get(f"/api/treemap/runs/{empty['id']}/download").status_code, 404)
+
+    def test_worker_budget_respects_cpu_quota_memory_and_explicit_serial_mode(self):
+        gib = 1024**3
+        resources = {'cpu_count': 8, 'memory_available_bytes': 8*gib, 'memory_limit_bytes': 8*gib}
+        with patch('mapping.pipeline.resources.detect_resources', return_value=resources), patch.dict(os.environ, {
+            'SCIGBLAST_TREEMAP_MAX_WORKERS': '4', 'SCIGBLAST_TREEMAP_MAX_RSS_MB': '1024',
+            'SCIGBLAST_TREEMAP_MEMORY_BUDGET_MB': '3072',
+        }):
+            self.assertEqual(postanalysis.worker_budget()['workers'], 3)
+            resources['cpu_count'] = 1.5
+            self.assertEqual(postanalysis.worker_budget()['workers'], 1)
+            resources.update(cpu_count=8, memory_available_bytes=2*gib)
+            self.assertEqual(postanalysis.worker_budget()['workers'], 1)
+            resources['memory_available_bytes'] = 128*1024**2
+            with self.assertRaisesRegex(ValueError, 'Treemap'):
+                postanalysis.worker_budget()
+            resources['memory_available_bytes'] = 8*gib
+            with patch.dict(os.environ, {'SCIGBLAST_TREEMAP_MAX_WORKERS': '1'}):
+                self.assertEqual(postanalysis.worker_budget()['workers'], 1)
+
+    def test_unverified_supervisor_is_preserved_and_blocks_further_dispatch(self):
+        self.airr(chain='IGH')
+        self.airr(chain='TRB')
+        run = self.create_run()
+        def uncertain(row, request):
+            with web.db() as connection:
+                connection.execute('UPDATE derived_runs SET pid=12345,process_token=? WHERE id=?', ('unknown-supervisor',row['id']))
+            raise RuntimeError('unverified process group')
+        with patch.object(self.service,'work_unit',side_effect=uncertain), patch.object(postanalysis,'group_state',return_value='unverified'):
+            self.assertTrue(self.service.deliver_one())
+            self.assertFalse(self.service.deliver_one())
+        self.assertEqual(self.run_info(run['id'])['status'],'interrupted')
+        with web.db() as connection:
+            self.assertEqual(connection.execute('SELECT pid FROM derived_runs WHERE id=?',(run['id'],)).fetchone()['pid'],12345)
+
+    def test_parallel_workers_isolate_failure_then_retry_without_changing_successful_image(self):
+        self.airr(chain='IGH')
+        self.airr(chain='TRB')
+        run = self.create_run()
+        actual = self.service.work_unit
+        batch_results = []
+        def fail_one(row, request):
+            if request['kind'] == 'batch':
+                self.assertEqual(len(request['units']), 2)
+                # Make only one worker fail after source snapshot validation.
+                request['units'][0] = dict(request['units'][0], sources=[{'path': str(self.raw / 'missing.tsv')}])
+                result = actual(row, request)
+                batch_results.extend(result['results'])
+                return result
+            return actual(row, request)
+        resources = {'cpu_count': 4, 'memory_available_bytes': 8*1024**3, 'memory_limit_bytes': 8*1024**3}
+        with patch('mapping.pipeline.resources.detect_resources', return_value=resources), patch.dict(os.environ, {
+            'SCIGBLAST_TREEMAP_MAX_WORKERS': '2',
+        }), patch.object(self.service, 'work_unit', side_effect=fail_one):
+            partial = self.deliver(run['id'])
+        self.assertEqual(partial['status'], 'partial', partial)
+        self.assertEqual(len({entry['pid'] for entry in batch_results}), 2)
+        self.assertEqual(sum('error' in entry for entry in batch_results), 1)
+        good = next(file for file in partial['files'] if file['kind'] == 'chain')
+        before = self.client.get(good['url']).content
+        self.assertEqual(self.client.post(f"/api/treemap/runs/{run['id']}/retry", json={}).status_code, 200)
+        complete = self.deliver(run['id'])
+        self.assertEqual(complete['status'], 'succeeded', complete)
+        self.assertEqual(self.client.get(good['url']).content, before)
+        self.assertEqual(len([f for f in complete['files'] if f['kind'] == 'chain']), 2)
+
+    @unittest.skipUnless(os.name == 'posix', 'Linux process groups and shared flock')
+    def test_cancel_parallel_group_reaps_workers_and_releases_shared_lock(self):
+        import fcntl
+        self.airr(chain='IGH')
+        self.airr(chain='TRB')
+        run = self.create_run()
+        marker = self.root / 'parallel-pids.json'
+        script = self.root / 'slow-supervisor.py'
+        script.write_text(
+            'import json,os,subprocess,sys,time\n'
+            'from pathlib import Path\n'
+            "fd=int(os.environ['SCIGBLAST_TREEMAP_LOCK_FD'])\n"
+            "children=[subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],pass_fds=(fd,)) for _ in range(2)]\n"
+            'Path(sys.argv[1]).write_text(json.dumps([os.getpid()]+[p.pid for p in children]))\n'
+            'time.sleep(60)\n', encoding='utf-8')
+        original = subprocess.Popen
+        def launch(args, **kwargs):
+            return original([args[0], str(script), str(marker)], **kwargs)
+        resources = {'cpu_count': 4, 'memory_available_bytes': 8*1024**3, 'memory_limit_bytes': 8*1024**3}
+        with patch('mapping.pipeline.resources.detect_resources', return_value=resources), patch.dict(os.environ, {
+            'SCIGBLAST_TREEMAP_MAX_WORKERS': '2',
+        }), patch.object(postanalysis.subprocess, 'Popen', side_effect=launch), ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self.service.deliver_one)
+            deadline = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(marker.is_file())
+            pids = json.loads(marker.read_text())
+            self.assertEqual(len(pids), 3)
+            with Path(os.environ['SCIGBLAST_RESOURCE_LOCK_FILE']).open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            response = self.client.post(f"/api/treemap/runs/{run['id']}/cancel", json={})
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(future.result(timeout=15))
+        self.assertEqual(self.run_info(run['id'])['status'], 'cancelled')
+        self.assertEqual(postanalysis.group_state(pids[0], None), 'gone')
+        for pid in pids:
+            try:
+                status = Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[0]
+                self.assertEqual(status, 'Z')
+            except FileNotFoundError:
+                pass
+        with Path(os.environ['SCIGBLAST_RESOURCE_LOCK_FILE']).open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_scan_paging_does_not_change_selection_and_invalid_ids_rejected(self):
         self.airr(sample='first', chain='IGH')

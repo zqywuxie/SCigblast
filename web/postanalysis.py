@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -16,10 +17,11 @@ import time
 import uuid
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import auth
+from artifact_download import stream_zip
 from process_identity import group_state, signal_group
 
 LOG = logging.getLogger(__name__)
@@ -57,6 +59,14 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def image_relative(sample_key, sample_label, kind, chain=''):
+    """Stable, collision-safe layout, also used to package historical manifests."""
+    name = re.sub(r'[^\w.-]', '_', sample_label)[:60] or 'sample'
+    directory = 'individual_treemaps' if kind == 'chain' else 'multi_chain_treemaps'
+    suffix = chain if kind == 'chain' else 'ALL_CHAINS'
+    return Path(directory) / (name + '_' + digest(sample_key)[:12]) / f'{name}_{suffix}.png'
+
+
 def safe_path(raw, root, *, file=False):
     path, base = Path(raw).absolute(), Path(root).resolve()
     if any(part.is_symlink() for part in (path, *path.parents)):
@@ -70,6 +80,44 @@ def safe_path(raw, root, *, file=False):
 def version(path):
     info = Path(path).stat()
     return [info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def worker_budget():
+    from mapping.pipeline.resources import detect_resources
+    resources = detect_resources()
+    requested = max(1, min(32, int(os.environ.get('SCIGBLAST_TREEMAP_MAX_WORKERS', '2'))))
+    per_worker = max(128, int(os.environ.get('SCIGBLAST_TREEMAP_MAX_RSS_MB', '2048')))
+    configured = max(128, int(os.environ.get('SCIGBLAST_TREEMAP_MEMORY_BUDGET_MB', '4096'))) * 1024**2
+    available = resources['memory_available_bytes']
+    supervisor = 64 * 1024**2
+    usable = configured
+    if available is not None:
+        usable = min(usable, available - max(256 * 1024**2, math.ceil(available * 0.05)) - supervisor)
+    if usable < 128 * 1024**2:
+        raise ValueError('可用内存不足，暂时无法生成 Treemap')
+    per_worker = min(per_worker, usable // 1024**2)
+    workers = min(requested, max(1, math.floor(resources['cpu_count'])), usable // (per_worker * 1024**2))
+    return dict(workers=workers, worker_rss_mb=per_worker,
+                group_rss_bytes=workers * per_worker * 1024**2 + supervisor)
+
+
+def group_rss(pgid):
+    from analysis.treemap.run import process_rss
+    total = 0
+    try:
+        entries = list(Path('/proc').iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+            if int(fields[2]) == pgid:
+                total += process_rss(int(entry.name))
+        except (OSError, ValueError, IndexError):
+            continue
+    return total
 
 
 def atomic_json(path, value):
@@ -416,12 +464,16 @@ class Service:
                                (json.dumps(data, ensure_ascii=False), sum(i.get('status') not in {'queued','running'} for i in items),len(items),row['id']))
 
     def work_unit(self, row, request):
-        """One bounded subprocess, holding the same kernel lock as the runners."""
+        """One bounded wave, with one persisted supervisor identity and shared flock."""
         lock = None
         process = None
         req_path = result_path = None
         timeout = max(10, int(os.environ.get('SCIGBLAST_TREEMAP_TIMEOUT_SECONDS', '1800')))
-        limit = max(128, int(os.environ.get('SCIGBLAST_TREEMAP_MAX_RSS_MB', '2048'))) * 1024 * 1024
+        batch = request['kind'] == 'batch'
+        if batch:
+            timeout += 10  # Allow the supervisor to publish per-worker timeout errors.
+        limit = request.get('group_rss_bytes') if batch else None
+        limit = limit or worker_budget()['worker_rss_mb'] * 1024**2
         from mapping.pipeline.resources import detect_resources
         available = detect_resources()['memory_available_bytes']
         if available is not None:
@@ -446,12 +498,16 @@ class Service:
                 folder.mkdir(parents=True, exist_ok=True)
                 temporary = folder / '.work'
                 temporary.mkdir(exist_ok=True)
+                if batch:
+                    request = dict(request, work_dir=str(temporary))
                 token = uuid.uuid4().hex
                 req_path, result_path = temporary / f'{token}.request.json', temporary / f'{token}.result.json'
                 atomic_json(req_path, request)
                 process_env = {'PATH': os.environ.get('PATH', ''), 'PYTHONPATH': str(self.app.PIPELINE_ROOT),
                                'PYTHONUNBUFFERED':'1', 'PYTHONDONTWRITEBYTECODE':'1', 'SCIGBLAST_WEB_PROCESS_TOKEN':token,
                                'OPENBLAS_NUM_THREADS':'1', 'OMP_NUM_THREADS':'1', 'MKL_NUM_THREADS':'1'}
+                if lock is not None:
+                    process_env['SCIGBLAST_TREEMAP_LOCK_FD'] = str(lock.fileno())
                 for key in ('SYSTEMROOT','WINDIR','TEMP','TMP','LANG','LC_ALL'):
                     if key in os.environ:
                         process_env[key] = os.environ[key]
@@ -472,45 +528,93 @@ class Service:
                 elif time.monotonic() > deadline:
                     error = '绘图超过时间预算，请缩小数据范围后重试'
                 elif os.name == 'posix':
-                    try:
-                        status = Path(f'/proc/{process.pid}/status').read_text()
-                        match = re.search(r'^VmRSS:\s+(\d+) kB', status, re.M)
-                        if match and int(match[1]) * 1024 > limit:
-                            error = '绘图超过内存预算，请缩小数据范围后重试'
-                    except OSError:
-                        pass
+                    from analysis.treemap.run import process_rss
+                    if (group_rss(process.pid) if batch else process_rss(process.pid)) > limit:
+                        error = '绘图超过内存预算，请缩小数据范围后重试'
                 if error:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        process.kill(); process.wait(timeout=5)
+                    self.stop_group(process, token)
                     raise ValueError(error)
                 self.stopping.wait(0.2)
             if process.returncode != 0 or not result_path.is_file():
                 raise ValueError('绘图未完成，请查看 Treemap 日志并检查输入文件')
             return json.loads(result_path.read_text(encoding='utf-8'))
         finally:
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill(); process.wait(timeout=5)
-            if self.process_run == row['id']:
-                self.process, self.process_run = None, None
-                with self.app.db() as connection:
-                    connection.execute('UPDATE derived_runs SET pid=NULL,process_token=NULL WHERE id=?', (row['id'],))
-            for path in (req_path, result_path):
-                if path is not None:
-                    path.unlink(missing_ok=True)
-            if lock is not None:
-                lock.close()
+            try:
+                if process is not None:
+                    self.stop_group(process, token)
+            finally:
+                if self.process_run == row['id']:
+                    self.process, self.process_run = None, None
+                    if os.name != 'posix' or group_state(process.pid,token) == 'gone':
+                        with self.app.db() as connection:
+                            connection.execute('UPDATE derived_runs SET pid=NULL,process_token=NULL WHERE id=?', (row['id'],))
+                if lock is not None:
+                    lock.close()
+                for path in (req_path, result_path):
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def stop_group(process, token):
+        if os.name != 'posix':
+            if process.poll() is None:
+                # Windows development only; Linux production uses verified PGIDs.
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            process.wait(timeout=5)
+            return
+        state = signal_group(process.pid, token, signal.SIGTERM)
+        if state == 'unverified':
+            raise RuntimeError('无法核验绘图进程组身份，保留进程记录待管理员检查')
+        deadline = time.monotonic() + 2
+        while group_state(process.pid, token) != 'gone' and time.monotonic() < deadline:
+            process.poll()
+            time.sleep(0.05)
+        state = signal_group(process.pid, token, signal.SIGKILL)
+        if state == 'unverified':
+            raise RuntimeError('无法核验绘图进程组身份，保留进程记录待管理员检查')
+        process.wait(timeout=5)
+        deadline = time.monotonic() + 3
+        while group_state(process.pid, token) != 'gone':
+            if time.monotonic() >= deadline:
+                raise RuntimeError('绘图子进程尚未确认退出，保留进程记录')
+            time.sleep(0.05)
 
     def artifact(self, row, path, kind, sample_key='', chain=''):
         path = safe_path(path, row['output_root'], file=True)
         return dict(id=uuid.uuid4().hex, label=path.name, relative_path=path.relative_to(row['output_root']).as_posix(),
                     kind=kind, sample_key=sample_key, chain=chain, version=version(path))
+
+    def download(self, run_id, sample_key=None):
+        row = self.owned_run(run_id)
+        if self.public(row, details=False)['status'] in {'stale', 'archived'}:
+            raise HTTPException(409, '结果已过期或归档，请从来源任务查看当前结果或完整归档')
+        data = json.loads(row['data_json'])
+        labels = {item['sample_key']: item['sample_label'] for item in data['items']}
+        if sample_key is not None and sample_key not in labels:
+            raise HTTPException(404, '未找到所选样本')
+        artifacts = [item for item in data['files']
+                     if (item['kind'] in {'chain', 'combined'} and
+                         (sample_key is None or item['sample_key'] == sample_key)) or
+                        (item['kind'] == 'stats' and sample_key is None)]
+        if not any(item['kind'] in {'chain', 'combined'} for item in artifacts):
+            raise HTTPException(404, '暂无可下载的图片')
+        files = []
+        for item in artifacts:
+            try:
+                path = safe_path(Path(row['output_root']) / item['relative_path'], row['output_root'], file=True)
+                if version(path) != item['version']:
+                    raise ValueError('artifact changed')
+            except (ValueError, OSError):
+                raise HTTPException(409, '结果文件已变化或不可用，请刷新后重试') from None
+            archive_name = ('treemap_summary.csv' if item['kind'] == 'stats' else
+                            image_relative(item['sample_key'], labels[item['sample_key']],
+                                           item['kind'], item['chain']).as_posix())
+            files.append((path, archive_name))
+        filename = f"Treemap_{row['id']}{'_sample' if sample_key is not None else ''}.zip"
+        return StreamingResponse(stream_zip(files), media_type='application/zip',
+                                 headers={'Content-Disposition': f'attachment; filename="{filename}"',
+                                          'Cache-Control': 'no-store'})
 
     def deliver_one(self):
         self.reap_finished_children()
@@ -547,20 +651,48 @@ class Service:
                 if not any(source.get('valid') for source in data['items']):
                     raise ValueError('没有适用于 Treemap 的最终样本链结果')
             self.verify_inputs(data['items'], data['input_root'])
-            item = next((i for i in data['items'] if i.get('status') == 'queued'), None)
+            queued = [i for i in data['items'] if i.get('status') == 'queued']
+            item = queued[0] if queued else None
             if item is not None:
-                name = re.sub(r'[^\w.-]', '_', item['sample_label'])[:60] or 'sample'
-                sample_dir = Path(row['output_root']) / 'samples' / (name + '_' + digest(item['sample_key'])[:12])
-                target = sample_dir / f"{name}_{item['chain']}.png"
-                result = self.work_unit(row, dict(kind='chain', sources=item['sources'], chain=item['chain'], target=str(target)))
+                budget = worker_budget()
+                selected = queued[:budget['workers']]
+                requests = [dict(kind='chain', sources=entry['sources'], chain=entry['chain'],
+                                 target=str(Path(row['output_root']) / image_relative(entry['sample_key'], entry['sample_label'], 'chain', entry['chain']))) for entry in selected]
+                request = requests[0] if len(requests) == 1 else dict(
+                    kind='batch', units=requests, worker_rss_mb=budget['worker_rss_mb'],
+                    group_rss_bytes=budget['group_rss_bytes'],
+                    timeout_seconds=max(10,int(os.environ.get('SCIGBLAST_TREEMAP_TIMEOUT_SECONDS','1800'))))
+                try:
+                    result = self.work_unit(row, request)
+                except Exception as error:
+                    with self.app.db() as connection:
+                        current = connection.execute('SELECT pid FROM derived_runs WHERE id=?',(row['id'],)).fetchone()
+                    if current and current['pid']:
+                        self.end(row,'interrupted',str(error))
+                        return True
+                    result = {'results': [{'error': str(error)} for _ in selected]}
                 if result is None:
                     return False
-                self.verify_inputs([item], data['input_root'])
-                item.update(status='empty' if result.get('empty') else 'succeeded', error='',
-                            productive_count=result['productive_count'], clone_count=result['clone_count'])
-                if not result.get('empty'):
-                    artifact = self.artifact(row, target, 'chain', item['sample_key'], item['chain'])
-                    item['artifact_id'] = artifact['id']; data['files'].append(artifact)
+                with self.app.db() as connection:
+                    if not self.current_valid(connection,row) or self.stopping.is_set():
+                        self.end(row,'interrupted' if self.stopping.is_set() else 'cancelled')
+                        return True
+                results = result['results'] if 'results' in result else [{'result':result}]
+                if len(results) != len(selected):
+                    raise ValueError('绘图批次结果不完整')
+                for entry, request, outcome in zip(selected, requests, results):
+                    try:
+                        if outcome.get('error'):
+                            raise ValueError(outcome['error'])
+                        self.verify_inputs([entry], data['input_root'])
+                        value = outcome['result']
+                        entry.update(status='empty' if value.get('empty') else 'succeeded', error='',
+                                     productive_count=value['productive_count'], clone_count=value['clone_count'])
+                        if not value.get('empty'):
+                            artifact = self.artifact(row, request['target'], 'chain', entry['sample_key'], entry['chain'])
+                            entry['artifact_id'] = artifact['id']; data['files'].append(artifact)
+                    except Exception as error:
+                        entry.update(status='failed',error=str(error)[:500])
                 self.save(row,data)
                 return True
             # Chain work is complete: compose one sample at a time, releasing the lock.
@@ -569,10 +701,8 @@ class Service:
             if sample is not None:
                 images = {f['chain']:str(Path(row['output_root'])/f['relative_path']) for f in data['files'] if f['kind']=='chain' and f['sample_key']==sample}
                 if images:
-                    first = Path(next(iter(images.values())))
                     label = next(i['sample_label'] for i in data['items'] if i['sample_key']==sample)
-                    name = re.sub(r'[^\w.-]', '_',label)[:60] or 'sample'
-                    target = first.parent / f'{name}_ALL_CHAINS.png'
+                    target = Path(row['output_root']) / image_relative(sample, label, 'combined')
                     result = self.work_unit(row, dict(kind='combined',images=images,target=str(target)))
                     if result is None:
                         return False
@@ -605,8 +735,10 @@ class Service:
 
     def end(self,row,status,error=None):
         with self.app.db() as connection:
-            connection.execute('UPDATE derived_runs SET status=?,error=?,ended_at=?,pid=NULL,process_token=NULL WHERE id=?',
-                               (status,error,self.app.now(),row['id']))
+            current = connection.execute('SELECT pid,process_token FROM derived_runs WHERE id=?',(row['id'],)).fetchone()
+            live = bool(current and current['pid'] and group_state(current['pid'],current['process_token']) != 'gone')
+            connection.execute('UPDATE derived_runs SET status=?,error=?,ended_at=?'+('' if live else ',pid=NULL,process_token=NULL')+' WHERE id=?',
+                               ('interrupted' if live else status,error,self.app.now(),row['id']))
 
     def finish(self,row,data):
         with self.app.PROCESS_LOCK:
@@ -663,6 +795,9 @@ def router(service):
 
     @routes.get('/api/treemap/runs/{run_id}')
     def run(run_id:str): return service.public(service.owned_run(run_id))
+
+    @routes.get('/api/treemap/runs/{run_id}/download')
+    def download(run_id:str,sample_key:str|None=None): return service.download(run_id,sample_key)
 
     @routes.post('/api/treemap/runs/{run_id}/retry')
     def retry(run_id:str): return service.retry(run_id)

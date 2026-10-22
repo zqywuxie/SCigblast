@@ -14,7 +14,7 @@
         <div class="field" id="tm-path-field" hidden><label class="field-label" for="tm-path">结果目录</label><input id="tm-path" placeholder="/colddata/.../results" spellcheck="false" disabled><button id="tm-browse" class="button button-ghost button-small tm-browse-button" type="button" aria-haspopup="dialog" aria-controls="tm-directory-dialog" disabled>浏览目录</button><small class="field-hint">填写服务器允许范围内的现有结果目录。</small></div>
         <button id="tm-scan" class="button button-primary tm-wide" type="submit">扫描样本与链 <span aria-hidden="true">→</span></button>
       </form>
-      <div class="tm-source-note"><strong>独立生成，结果可追溯</strong><p>树图使用既有分析结果。统计口径为记录数，不按 copy 或 UMI count 加权。</p><p>仅保留 productive 为 T 且 CDR3 非空的记录；已处理结果按对应文件的筛选规则读取。</p></div>
+      <div class="tm-source-note"><strong>支持各流程的 mapping 结果</strong><p>可使用 IgBLAST base、Pig IgBLAST、IR、10X、reMapping 的最终结果，或目录中兼容的 AIRR 注释表。</p><p>仅统计 productive 为 T 且 CDR3 非空的记录，不按 copy 或 UMI count 加权。</p></div>
     </section>
     <section class="panel tm-selection" aria-labelledby="tm-selection-title"><div class="tm-section-heading"><span class="tm-step">02</span><div><h2 id="tm-selection-title">确认绘制范围</h2><p id="tm-selection-note">先扫描一个结果来源。</p></div></div>
       <div class="tm-selection-tools"><label class="search-box"><span aria-hidden="true">⌕</span><input id="tm-search" type="search" aria-label="搜索样本或链" placeholder="搜索样本或链" disabled></label><div><button id="tm-all" class="button button-ghost button-small" disabled>全部有效项</button><button id="tm-none" class="button button-ghost button-small" disabled>清空选择</button></div></div>

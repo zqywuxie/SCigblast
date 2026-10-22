@@ -8,30 +8,42 @@ window.TreemapView = (() => {
   const date = value => { if(!value)return '—';const d=new Date(value);return Number.isNaN(d.getTime())?'—':d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); };
   const url = (run, file, download=false) => `/api/treemap/runs/${encodeURIComponent(run.id)}/files/${encodeURIComponent(file.id)}${download?'?download=1':''}`;
   function mount(root, onAction) {
-    root.innerHTML = `<div class="tm-run-head"><div><h3 data-title></h3><div class="tm-run-meta" data-meta></div></div><div class="tm-run-actions" data-actions></div></div><div class="tm-progress" data-progress role="status" aria-live="polite"><progress></progress><span></span></div><p class="tm-run-note" data-note></p><p class="tm-run-error" data-error role="status"></p><div class="tm-result-tools"><input data-search type="search" placeholder="筛选样本" aria-label="筛选树图样本"><select data-kind aria-label="筛选产物类型"><option value="">全部产物</option><option value="combined">样本合图</option><option value="chain">单链树图</option><option value="stats">统计文件</option></select></div><div class="tm-file-grid" data-files></div><div class="tm-result-pager"><span data-page></span><div><button class="button button-ghost button-small" data-prev>上一页</button><button class="button button-ghost button-small" data-next>下一页</button></div></div><details class="tm-item-errors" data-issues hidden><summary></summary><ul></ul></details>`;
+    root.innerHTML = `<div class="tm-run-head"><div><h3 data-title></h3><div class="tm-run-meta" data-meta></div></div><div class="tm-run-actions" data-actions></div></div><div class="tm-progress" data-progress role="status" aria-live="polite"><progress></progress><span></span></div><p class="tm-run-note" data-note></p><p class="tm-run-error" data-error role="status"></p><div class="tm-result-tools"><label>样本<select data-sample aria-label="选择树图样本"><option value="">请选择样本</option></select></label><label>链 / 图类型<select data-chain aria-label="选择链或多链合图" disabled><option value="">请先选择样本</option></select></label><button class="button button-primary button-small" data-view disabled>查看图片</button></div><div class="tm-downloads" data-downloads></div><div class="tm-single-result" data-files aria-live="polite"></div><details class="tm-item-errors" data-issues hidden><summary></summary><ul></ul></details>`;
     const $ = selector => root.querySelector(selector);
-    let run = null, page = 0, busy = false, signature = '', actionSignature = '', searchTimer;
+    let run = null, busy = false, signature = '', actionSignature = '', viewedId = '';
     const replace = (node, markup) => {if(node.innerHTML!==markup)node.innerHTML=markup;};
-    function renderFiles(force=false) {
+    function renderFiles() {
       if(!run)return;
-      const query=$('[data-search]').value.trim().toLocaleLowerCase(),kind=$('[data-kind]').value;
       const availableFiles=['ARCHIVED','STALE'].includes(run.status)?[]:run.files||[];
-      const files=availableFiles.filter(file=>(!kind||file.kind===kind)&&(!query||`${file.sample_key||''} ${file.label||''} ${file.chain||''}`.toLocaleLowerCase().includes(query)));
-      page=Math.max(0,Math.min(page,Math.ceil(files.length/9)-1));
-      const slice=files.slice(page*9,page*9+9),next=JSON.stringify([run.id,slice,page,query,kind,run.status]);
-      if(force||next!==signature){
+      const images=availableFiles.filter(file=>['chain','combined'].includes(file.kind));
+      const labelsBySample=new Map((run.items||[]).map(item=>[item.sample_key,item.sample_label]));
+      const samples=new Map(images.map(file=>[file.sample_key,labelsBySample.get(file.sample_key)||file.sample_key]));
+      const sampleSelect=$('[data-sample]'),chainSelect=$('[data-chain]');
+      const selectedSample=sampleSelect.value,selectedChain=chainSelect.value;
+      const labelCounts=new Map();for(const label of samples.values())labelCounts.set(label,(labelCounts.get(label)||0)+1);
+      replace(sampleSelect,'<option value="">请选择样本</option>'+[...samples].map(([key,label])=>`<option value="${esc(key)}">${esc(labelCounts.get(label)>1?key:label)}</option>`).join(''));
+      sampleSelect.value=samples.has(selectedSample)?selectedSample:'';
+      sampleSelect.disabled=!samples.size;
+      const choices=images.filter(file=>file.sample_key===sampleSelect.value);
+      replace(chainSelect,`<option value="">${sampleSelect.value?'请选择链或合图':'请先选择样本'}</option>`+choices.map(file=>`<option value="${esc(file.id)}">${esc(file.kind==='combined'?'多链合并图':file.chain)}</option>`).join(''));
+      chainSelect.value=choices.some(file=>file.id===selectedChain)?selectedChain:'';
+      chainSelect.disabled=!choices.length;
+      $('[data-view]').disabled=!chainSelect.value;
+      if(viewedId!==chainSelect.value)viewedId='';
+      const zip=`/api/treemap/runs/${encodeURIComponent(run.id)}/download`;
+      replace($('[data-downloads]'),(images.length?`<a class="button button-ghost button-small" href="${zip}">下载全部结果 ZIP</a>`:'')+(choices.length?`<a class="button button-ghost button-small" href="${zip}?sample_key=${encodeURIComponent(sampleSelect.value)}">下载当前样本 ZIP</a>`:'')+availableFiles.filter(file=>file.kind==='stats').map(file=>`<a href="${url(run,file,true)}">下载统计 CSV</a>`).join(''));
+      const file=images.find(file=>file.id===viewedId),next=JSON.stringify([run.id,file||null,images.length,run.status]);
+      if(next!==signature){
         signature=next;
-        $('[data-files]').innerHTML=slice.map(file=>`<article class="tm-file-card">${file.kind==='stats'?'<div class="tm-stats-icon" aria-hidden="true">CSV / JSON</div>':`<a class="tm-file-preview" href="${url(run,file)}" target="_blank" rel="noopener" aria-label="查看 ${esc(file.label||file.sample_key||'树图')} 原图"><img src="${url(run,file)}" loading="lazy" alt="${esc(file.label||file.sample_key||'克隆树图')}"></a>`}<div class="tm-file-caption"><strong>${esc(file.label||file.sample_key||'结果文件')}</strong><small>${esc(file.kind==='combined'?'样本合图 · 固定链区排版':file.kind==='chain'?`${file.chain||''} · 按记录数`:'计数与生成统计')}</small><a href="${url(run,file,true)}">下载${file.kind==='stats'?'统计文件':' PNG'} ↓</a></div></article>`).join('') || `<div class="tm-empty"><strong>${availableFiles.length?'没有匹配的产物':active(run)?'图片生成后将在这里显示':run.status==='ARCHIVED'?'图片已归档':run.status==='STALE'?'来源任务已更新':'暂无可用图片'}</strong><span>${availableFiles.length?'调整样本或类型筛选。':active(run)?'可离开此页面，稍后查看结果。':run.status==='ARCHIVED'?'请从来源任务下载完整归档。':run.status==='STALE'?'此记录属于之前的分析结果，请基于当前结果重新生成。':'请查看生成状态与处理说明。'}</span></div>`;
+        $('[data-files]').innerHTML=file?`<article class="tm-file-card"><div class="tm-file-caption"><strong>${esc(samples.get(file.sample_key))} · ${esc(file.kind==='combined'?'多链合并图':file.chain)}</strong><a href="${url(run,file,true)}">下载 PNG ↓</a><a href="${url(run,file)}" target="_blank" rel="noopener">查看原图 ↗</a></div><a class="tm-file-preview" href="${url(run,file)}" target="_blank" rel="noopener"><img src="${url(run,file)}" alt="${esc(file.label||'克隆树图')}"></a></article>`:`<div class="tm-empty"><strong>${images.length?'选择样本和链后查看图片':active(run)?'等待图片生成':run.status==='ARCHIVED'?'图片已归档':run.status==='STALE'?'来源任务已更新':'暂无可用图片'}</strong><span>${images.length?`${samples.size} 个样本 · ${images.length} 张图片，可直接下载压缩包。`:active(run)?'可离开此页面，稍后选择查看。':run.status==='ARCHIVED'?'请从来源任务下载完整归档。':run.status==='STALE'?'请基于当前结果重新生成。':'请查看生成状态与处理说明。'}</span></div>`;
       }
-      $('[data-page]').textContent=`${files.length} 个产物 · 第 ${page+1} / ${Math.max(1,Math.ceil(files.length/9))} 页`;
-      $('[data-prev]').disabled=page===0;$('[data-next]').disabled=(page+1)*9>=files.length;
     }
     function update(next) {
       if(!next)return;
-      if(run?.id!==next.id){page=0;$('[data-search]').value='';$('[data-kind]').value='';signature='';actionSignature='';}
+      if(run?.id!==next.id){$('[data-sample]').value='';$('[data-chain]').value='';viewedId='';signature='';actionSignature='';}
       run={...next,status:state(next),items:(next.items||[]).map(item=>({...item,status:state(item)}))};
       $('[data-title]').textContent=run.name||'克隆树图';
-      replace($('[data-meta]'),`${status(run)}<span>创建于 ${esc(date(run.created_at))}</span>${run.parent_job_id?`<a href="/jobs/${encodeURIComponent(run.parent_job_id)}#artifacts">来源任务 ↗</a>`:''}`);
+      replace($('[data-meta]'),`${status(run)}<span>创建于 ${esc(date(run.created_at))}</span>${run.parent_job_id?`<a href="/jobs/${encodeURIComponent(run.parent_job_id)}#treemap">来源任务 ↗</a>`:''}`);
       const total=Math.max(0,Number(run.progress?.total)||0),done=Math.max(0,Number(run.progress?.done)||0);
       $('[data-progress]').hidden=!total;
       $('[data-progress] progress').max=Math.max(total,1);$('[data-progress] progress').value=Math.min(done,total);
@@ -48,9 +60,9 @@ window.TreemapView = (() => {
       renderFiles();
     }
     $('[data-actions]').onclick=async event=>{const button=event.target.closest('[data-action]');if(!button||busy)return;busy=true;update(run);try{await onAction(button.dataset.action,run);}finally{busy=false;update(run);}};
-    $('[data-search]').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{page=0;renderFiles();},200);};
-    $('[data-kind]').onchange=()=>{page=0;renderFiles();};
-    $('[data-prev]').onclick=()=>{page--;renderFiles();};$('[data-next]').onclick=()=>{page++;renderFiles();};
+    $('[data-sample]').onchange=()=>{$('[data-chain]').value='';viewedId='';renderFiles();};
+    $('[data-chain]').onchange=()=>{viewedId='';renderFiles();};
+    $('[data-view]').onclick=()=>{viewedId=$('[data-chain]').value;renderFiles();};
     return {update};
   }
   function jobPanel(root, jobId) {
@@ -58,8 +70,9 @@ window.TreemapView = (() => {
     let context=null,inflight=false,generation=0,lastFetch=0,working=false,lastSignature='',previewSignature='',preview=null;
     const notice = text => {$('[data-tm-job-message]').textContent=text;};
     async function load(force=false) {
-      if(!context||document.hidden||inflight||!force&&Date.now()-lastFetch<8000)return;
+      if(!context||document.hidden||!root.getClientRects().length||inflight||!force&&Date.now()-lastFetch<8000)return;
       inflight=true;const token=++generation,attempt=context.attempt_no;
+      const refreshButton=$('[data-tm-refresh]');if(refreshButton)refreshButton.disabled=true;
       try{
         const data=await Submission.api(`/api/jobs/${encodeURIComponent(jobId)}/treemap`);
         if(token!==generation||attempt!==context.attempt_no)return;
@@ -69,7 +82,7 @@ window.TreemapView = (() => {
         const archived=['ARCHIVED','ARCHIVING'].includes(context.status),running=runs.some(active);
         $('[data-tm-generate]').hidden=archived||context.status!=='SUCCEEDED'||running;
         $('[data-tm-generate]').disabled=working;
-        notice(archived?'结果已归档，树图请从完整压缩包中查看。':running?'树图正在排队或生成，可打开树图工作台查看进度。':runs.length?'打开生成记录，预览单链图与样本合图。':context.status==='SUCCEEDED'?'尚未生成树图，可基于本次结果生成。':data.enabled?'已勾选生成树图，主分析成功后自动生成。':'主分析成功后可生成树图。');
+        notice(archived?'结果已归档，树图请从完整压缩包中查看。':running?'树图正在排队或生成，可打开树图工作台查看进度。':runs.length?'选择样本和链查看图片，或下载结果压缩包。':context.status==='SUCCEEDED'?'尚未生成树图，可基于本次结果生成。':data.enabled?'已勾选生成树图，主分析成功后自动生成。':'主分析成功后可生成树图。');
         const current=runs.find(run=>run.attempt_no===context.attempt_no&&!['stale','archived'].includes(String(run.status).toLowerCase()));
         const container=$('[data-tm-job-preview]');
         if(container){
@@ -85,12 +98,13 @@ window.TreemapView = (() => {
             preview.update(detail);previewSignature=nextPreview;
           }
         }
-      }catch(error){notice(`树图状态读取失败：${error.message}`);}finally{inflight=false;}
+      }catch(error){notice(`树图状态读取失败：${error.message}`);}finally{inflight=false;if(refreshButton)refreshButton.disabled=false;}
     }
     $('[data-tm-generate]').onclick=async()=>{if(working)return;working=true;$('[data-tm-generate]').disabled=true;notice('正在创建树图生成记录…');try{await Submission.api(`/api/jobs/${encodeURIComponent(jobId)}/treemap`,{});lastFetch=0;await load(true);}catch(error){notice(error.message);}finally{working=false;$('[data-tm-generate]').disabled=false;}};
+    const refreshButton=$('[data-tm-refresh]');if(refreshButton)refreshButton.onclick=()=>load(true);
     $('[data-tm-workspace]').href=`/treemap?job=${encodeURIComponent(jobId)}`;
     setInterval(()=>{if(root.getClientRects().length)load();},8000);
-    return {load,update(job){if(context?.attempt_no!==job.attempt_no){generation++;lastFetch=0;lastSignature='';previewSignature='';$('[data-tm-job-runs]').textContent='';}context=job;load();}};
+    return {load,update(job){if(context?.attempt_no!==job.attempt_no){generation++;lastFetch=0;lastSignature='';previewSignature='';$('[data-tm-job-runs]').textContent='';const container=$('[data-tm-job-preview]');if(container){container.hidden=true;container.textContent='';preview=null;}}context=job;load();}};
   }
   return {esc,labels,status,active,date,mount,jobPanel};
 })();

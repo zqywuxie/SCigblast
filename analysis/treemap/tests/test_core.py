@@ -213,3 +213,22 @@ def test_empty_chain_request_returns_successful_empty_result(tmp_path: Path) -> 
         {"kind": "chain", "sources": [{"path": str(source)}], "chain": "TRA", "target": str(tmp_path / "unused.png")}
     )
     assert result == {"empty": True, "productive_count": 0, "clone_count": 0, "path": None}
+
+
+def test_parallel_workers_match_serial_images_and_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
+        monkeypatch.setenv(key, '1')
+    source = tmp_path / 'source.tsv'
+    source.write_text('productive\tv_call\tj_call\tjunction_aa\nT\tV1\tJ1\tCAR\nT\tV2\tJ1\tCAT\n', encoding='utf-8')
+    units = [dict(kind='chain', sources=[dict(path=str(source), chain=chain)], chain=chain,
+                  target=str(tmp_path / f'{chain}.png')) for chain in ('IGH', 'TRB')]
+    parallel = run_request(dict(kind='batch', units=units, work_dir=str(tmp_path),
+                                worker_rss_mb=1024, timeout_seconds=60))
+    assert len({entry['pid'] for entry in parallel['results']}) == 2
+    for unit, entry in zip(units, parallel['results']):
+        serial_target = tmp_path / f"serial-{unit['chain']}.png"
+        serial = run_request(dict(unit, target=str(serial_target)))
+        assert entry['result']['productive_count'] == serial['productive_count'] == 2
+        assert entry['result']['clone_count'] == serial['clone_count'] == 2
+        assert Path(unit['target']).read_bytes() == serial_target.read_bytes()
+    assert not list(tmp_path.glob('batch-*'))
