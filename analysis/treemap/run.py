@@ -38,11 +38,21 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
     if kind == "batch":
         return run_batch(request)
     target = Path(request["target"])
+    if kind == 'clone_merge':
+        from analysis.treemap.clone_table import merge_clone_tables
+        merge_clone_tables(request['tables'],target)
+        return {'path': str(target)}
     if kind == "chain":
         from analysis.treemap.aggregate import load_clones
         from analysis.treemap.render import save_treemap
         chain = str(request["chain"]).strip().upper()
         clones, productive_count = load_clones(request.get("sources", []), chain)
+        if not clones.empty:
+            save_treemap(clones, target)
+        if request.get('clone_table_target'):
+            from analysis.treemap.clone_table import write_clone_table
+            write_clone_table(clones, productive_count, request['clone_table_target'],
+                              sample_key=request.get('sample_key',''), sample_label=request.get('sample_label',''), chain=chain)
         if clones.empty:
             return {
                 "empty": True,
@@ -50,7 +60,6 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
                 "clone_count": 0,
                 "path": None,
             }
-        save_treemap(clones, target)
         return {
             "empty": False,
             "productive_count": productive_count,
@@ -64,7 +73,7 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("combined requests require an 'images' object")
         save_combined_treemap({chain: Path(path) for chain, path in images.items()}, target)
         return {"productive_count": 0, "clone_count": 0, "path": str(target)}
-    raise ValueError("kind must be 'chain' or 'combined'")
+    raise ValueError("kind must be 'chain', 'combined', 'batch' or 'clone_merge'")
 
 
 def process_rss(pid: int) -> int:

@@ -24,7 +24,7 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
     for filename in ('preflight.py', 'table_preview.py', 'process_identity.py', 'artifact_download.py', 'mapping_results.py', 'input_manifest.py', 'notifications.py', 'postanalysis.py'):
         path = registry_path.parent / filename
         ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
-    for filename in ('__init__.py','sources.py','aggregate.py','render.py','run.py'):
+    for filename in ('__init__.py','sources.py','aggregate.py','render.py','run.py','clone_table.py'):
         path = root / 'analysis' / 'treemap' / filename
         ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
     registry = json.loads(registry_path.read_text(encoding='utf-8'))

@@ -127,7 +127,8 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(result['status'], 'succeeded', result)
         self.assertEqual(len(result['items']), 1)
         self.assertEqual((result['items'][0]['productive_count'], result['items'][0]['clone_count']), (3, 2))
-        self.assertCountEqual([f['kind'] for f in result['files']], ['chain', 'combined', 'stats'])
+        self.assertCountEqual([f['kind'] for f in result['files']], ['chain', 'combined', 'clone_top', 'stats'])
+        self.assertNotIn('clone_table',result['items'][0])
         with web.db() as connection:
             stored = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
         for artifact in json.loads(stored['data_json'])['files']:
@@ -137,14 +138,24 @@ class TreemapTests(unittest.TestCase):
         for artifact in result['files']:
             response = self.client.get(artifact['url'])
             self.assertEqual(response.status_code, 200, response.text[:200] if artifact['kind'] == 'stats' else '')
-            if artifact['kind'] != 'stats':
+            if artifact['kind'] in {'chain','combined'}:
                 with Image.open(io.BytesIO(response.content)) as image:
                     self.assertEqual(image.size, (3000, 3000))
                     self.assertAlmostEqual(image.info['dpi'][0], 300, delta=1)
                     image.verify()
-            else:
+            elif artifact['kind']=='stats':
                 rows = list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
                 self.assertEqual((rows[0]['productive_count'], rows[0]['clone_count']), ('3', '2'))
+            else:
+                self.assertIn('attachment',response.headers['content-disposition'])
+                rows = list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
+                self.assertEqual([r['record_count'] for r in rows],['2','1'])
+                self.assertEqual([r['rank'] for r in rows],['1','2'])
+                self.assertEqual([r['cdr3_aa'] for r in rows],['CAR','CAT'])
+                self.assertAlmostEqual(float(rows[0]['frequency_percent']),200/3)
+                self.assertEqual(rows[-1]['cumulative_frequency_percent'],'100.00000000')
+                self.assertEqual({r['chain'] for r in rows},{'IGH'})
+                self.assertEqual({r['sample_key'] for r in rows},{result['items'][0]['sample_key']})
         self.assertEqual(before, {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in before})
         self.assertEqual(self.client.get(f"/api/treemap/runs/{run['id']}/files/not-an-artifact").status_code, 404)
         with patch.object(postanalysis, 'version', side_effect=AssertionError('history must not stat every artifact')):
@@ -165,9 +176,19 @@ class TreemapTests(unittest.TestCase):
             self.airr(self.raw / 'two', sample='Same', chain='TRB')
             run = self.create_run()
         def small_png(row, request):
+            if request['kind']=='clone_merge':
+                from analysis.treemap.clone_table import merge_clone_tables
+                merge_clone_tables(request['tables'],request['target'])
+                return {'path':request['target']}
             path = Path(request['target'])
             path.parent.mkdir(parents=True, exist_ok=True)
             Image.new('RGB', (4, 4), (50, 80, 120)).save(path)
+            if request.get('clone_table_target'):
+                from analysis.treemap.aggregate import load_clones
+                from analysis.treemap.clone_table import write_clone_table
+                clones,total=load_clones(request['sources'],request['chain'])
+                write_clone_table(clones,total,request['clone_table_target'],sample_key=request['sample_key'],
+                                  sample_label=request['sample_label'],chain=request['chain'])
             return {'productive_count': 3, 'clone_count': 2}
         with patch.object(self.service, 'work_unit', side_effect=small_png):
             result = self.deliver(run['id'])
@@ -182,8 +203,9 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text[:100] if response.status_code != 200 else '')
         self.assertEqual(response.headers['content-type'], 'application/zip')
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            self.assertEqual(len(archive.namelist()), 5)
+            self.assertEqual(len(archive.namelist()), 6)
             self.assertIn('treemap_summary.csv', archive.namelist())
+            self.assertIn('clone_top.csv', archive.namelist())
             self.assertEqual({p.split('/')[0] for p in archive.namelist() if p.endswith('.png')},
                              {'individual_treemaps', 'multi_chain_treemaps'})
             # Equal sample labels in separate input directories must never collide.
@@ -191,6 +213,8 @@ class TreemapTests(unittest.TestCase):
             for artifact in data['files']:
                 if artifact['kind'] == 'stats':
                     name = 'treemap_summary.csv'
+                elif artifact['kind']=='clone_top':
+                    name = 'clone_top.csv'
                 else:
                     label = next(i['sample_label'] for i in data['items'] if i['sample_key'] == artifact['sample_key'])
                     name = postanalysis.image_relative(artifact['sample_key'], label, artifact['kind'], artifact['chain']).as_posix()
@@ -207,7 +231,7 @@ class TreemapTests(unittest.TestCase):
     def test_zip_normalizes_historical_layout_without_moving_existing_files(self):
         result, row, data = self.zip_run()
         for artifact in data['files']:
-            if artifact['kind'] == 'stats':
+            if artifact['kind'] in {'stats','clone_top'}:
                 continue
             path = Path(row['output_root']) / artifact['relative_path']
             legacy = Path(row['output_root']) / 'samples' / artifact['sample_key'] / path.name
@@ -220,7 +244,7 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
             self.assertFalse(any(name.startswith('samples/') for name in archive.namelist()))
-            self.assertEqual(len(archive.namelist()), 5)
+            self.assertEqual(len(archive.namelist()), 6)
         for artifact in result['files']:
             self.assertEqual(self.client.get(artifact['url']).status_code, 200)
 
@@ -491,7 +515,11 @@ class TreemapTests(unittest.TestCase):
             partial = self.deliver(run['id'])
         self.assertEqual(partial['status'], 'partial', partial)
         self.assertEqual(composites, [{'TRB'}])
+        partial_table=next(file for file in partial['files'] if file['kind']=='clone_top')
+        partial_rows=list(csv.DictReader(io.StringIO(self.client.get(partial_table['url']).content.decode('utf-8-sig'))))
+        self.assertEqual({row['chain'] for row in partial_rows},{'TRB'})
         self.assertEqual(self.client.post(f"/api/treemap/runs/{run['id']}/retry", json={}).status_code, 200)
+        self.assertEqual(self.client.get(partial_table['url']).status_code,404)
         def capture(row, request):
             if request['kind'] == 'combined':
                 composites.append(set(request['images']))
@@ -501,6 +529,62 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(complete['status'], 'succeeded', complete)
         self.assertEqual(composites[-1], {'IGH', 'TRB'})
         self.assertEqual(len([f for f in complete['files'] if f['kind'] == 'combined']), 1)
+        table=next(file for file in complete['files'] if file['kind']=='clone_top')
+        rows=list(csv.DictReader(io.StringIO(self.client.get(table['url']).content.decode('utf-8-sig'))))
+        self.assertEqual({row['chain'] for row in rows},{'IGH','TRB'})
+        self.assertEqual(len(rows),4)
+        self.assertEqual(sum(int(row['record_count']) for row in rows),6)
+
+    def test_retry_repairs_missing_clone_table_without_rerunning_other_chains(self):
+        self.airr(chain='IGH');self.airr(chain='TRB')
+        run=self.create_run()
+        actual=self.service.work_unit
+        def fail_merge(row,request):
+            if request['kind']=='clone_merge':
+                raise ValueError('synthetic table publication failure')
+            return actual(row,request)
+        with patch.object(self.service,'work_unit',side_effect=fail_merge):
+            failed=self.deliver(run['id'])
+        self.assertEqual(failed['status'],'failed')
+        with web.db() as connection:
+            row=connection.execute('SELECT * FROM derived_runs WHERE id=?',(run['id'],)).fetchone()
+        data=json.loads(row['data_json'])
+        lost=data['items'][0]
+        (Path(row['output_root'])/lost['clone_table']['relative_path']).unlink()
+        kept=next(file for file in failed['files'] if file['kind']=='chain' and file['chain']!=lost['chain'])
+        before=self.client.get(kept['url']).content
+        self.assertEqual(self.client.post(f"/api/treemap/runs/{run['id']}/retry",json={}).status_code,200)
+        calls=[]
+        def capture(row,request):
+            if request['kind']=='chain':calls.append(request['chain'])
+            return actual(row,request)
+        with patch.object(self.service,'work_unit',side_effect=capture):
+            complete=self.deliver(run['id'])
+        self.assertEqual(complete['status'],'succeeded',complete)
+        self.assertEqual(calls,[lost['chain']])
+        self.assertEqual(self.client.get(kept['url']).content,before)
+        table=next(file for file in complete['files'] if file['kind']=='clone_top')
+        self.assertEqual(len(list(csv.DictReader(io.StringIO(self.client.get(table['url']).content.decode('utf-8-sig'))))),4)
+
+    def test_new_table_format_does_not_reuse_legacy_manual_run_or_auto_regenerate_old_run(self):
+        self.airr()
+        scan=self.scan();legacy=self.create_run(scan)
+        with web.db() as connection:
+            snapshot=json.loads(connection.execute('SELECT data_json FROM treemap_scans WHERE id=?',(scan['id'],)).fetchone()['data_json'])
+            data=json.loads(connection.execute('SELECT data_json FROM derived_runs WHERE id=?',(legacy['id'],)).fetchone()['data_json'])
+            data.pop('clone_table_version')
+            key=postanalysis.digest(dict(version=postanalysis.VERSION,parent=snapshot['parent_job_id'],attempt=snapshot['attempt_no'],
+                                        input_root=snapshot['input_root'],items=snapshot['items']))
+            connection.execute('UPDATE derived_runs SET dedupe_key=?,data_json=? WHERE id=?',(key,json.dumps(data),legacy['id']))
+        self.assertNotEqual(self.create_run(scan)['id'],legacy['id'])
+        job_id=self.job(enabled=True)
+        web.update_job(job_id,status='SUCCEEDED')
+        with web.db() as connection:
+            old=connection.execute('SELECT * FROM derived_runs WHERE parent_job_id=?',(job_id,)).fetchone()
+            old_data=json.loads(old['data_json']);old_data.pop('clone_table_version')
+            connection.execute("UPDATE derived_runs SET status='succeeded',data_json=? WHERE id=?",(json.dumps(old_data),old['id']))
+            postanalysis.enqueue_auto(connection,job_id,web.now())
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM derived_runs WHERE parent_job_id=?',(job_id,)).fetchone()[0],1)
 
     def test_empty_data_is_successful_no_data_result_without_blank_png(self):
         self.airr(empty=True)
@@ -508,7 +592,10 @@ class TreemapTests(unittest.TestCase):
         result = self.deliver(run['id'])
         self.assertEqual(result['status'], 'empty', result)
         self.assertEqual((result['items'][0]['productive_count'], result['items'][0]['clone_count']), (0, 0))
-        self.assertEqual([f['kind'] for f in result['files']], ['stats'])
+        self.assertCountEqual([f['kind'] for f in result['files']], ['clone_top','stats'])
+        table = next(f for f in result['files'] if f['kind']=='clone_top')
+        rows = list(csv.DictReader(io.StringIO(self.client.get(table['url']).content.decode('utf-8-sig'))))
+        self.assertEqual(rows,[])
 
     def test_automatic_discovery_failure_does_not_change_primary_success(self):
         job_id = self.job(enabled=True)

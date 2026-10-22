@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import importlib.util
 import subprocess
@@ -14,6 +15,7 @@ from pandas.testing import assert_frame_equal
 from analysis.treemap.aggregate import load_clones
 from analysis.treemap.render import save_combined_treemap, save_treemap
 from analysis.treemap.run import run_request
+from analysis.treemap.clone_table import FIELDS, write_clone_table, merge_clone_tables
 
 SOURCE_TREEMAP = Path("E:/Desktop/treemap_code/treemap_g.py")
 
@@ -221,14 +223,61 @@ def test_parallel_workers_match_serial_images_and_counts(tmp_path: Path, monkeyp
     source = tmp_path / 'source.tsv'
     source.write_text('productive\tv_call\tj_call\tjunction_aa\nT\tV1\tJ1\tCAR\nT\tV2\tJ1\tCAT\n', encoding='utf-8')
     units = [dict(kind='chain', sources=[dict(path=str(source), chain=chain)], chain=chain,
-                  target=str(tmp_path / f'{chain}.png')) for chain in ('IGH', 'TRB')]
+                  target=str(tmp_path / f'{chain}.png'),clone_table_target=str(tmp_path/f'{chain}.csv'),
+                  sample_key='batch/sample',sample_label='sample') for chain in ('IGH', 'TRB')]
     parallel = run_request(dict(kind='batch', units=units, work_dir=str(tmp_path),
                                 worker_rss_mb=1024, timeout_seconds=60))
     assert len({entry['pid'] for entry in parallel['results']}) == 2
     for unit, entry in zip(units, parallel['results']):
         serial_target = tmp_path / f"serial-{unit['chain']}.png"
-        serial = run_request(dict(unit, target=str(serial_target)))
+        serial_table = tmp_path/f"serial-{unit['chain']}.csv"
+        serial = run_request(dict(unit, target=str(serial_target),clone_table_target=str(serial_table)))
         assert entry['result']['productive_count'] == serial['productive_count'] == 2
         assert entry['result']['clone_count'] == serial['clone_count'] == 2
         assert Path(unit['target']).read_bytes() == serial_target.read_bytes()
+        assert Path(unit['clone_table_target']).read_bytes() == serial_table.read_bytes()
     assert not list(tmp_path.glob('batch-*'))
+
+
+def test_clone_table_ranking_percentages_ties_and_raw_identities(tmp_path: Path) -> None:
+    clones=pd.DataFrame([
+        {'V':'V2','J':'J1','CDR3(pep)':'CATS','copy':1},
+        {'V':'V1','J':'J1','CDR3(pep)':'CAR,\nX','copy':3},
+        {'V':' V1 ','J':'J1','CDR3(pep)':'CAT','copy':1},
+    ])
+    original=clones.copy(deep=True)
+    target=tmp_path/'clones.csv'
+    write_clone_table(clones,5,target,sample_key='batch/样本',sample_label='样本',chain='TRB')
+    with target.open(encoding='utf-8-sig',newline='') as source:
+        rows=list(csv.DictReader(source))
+    assert [row['rank'] for row in rows]==['1','2','3']
+    assert [row['record_count'] for row in rows]==['3','1','1']
+    assert [row['v_call'] for row in rows]==['V1',' V1 ','V2']
+    assert rows[0]['cdr3_aa']=='CAR,\nX'
+    assert [float(row['frequency_percent']) for row in rows]==[60,20,20]
+    assert [float(row['cumulative_frequency_percent']) for row in rows]==[60,80,100]
+    assert rows[0]['sample_key']=='batch/样本'
+    assert_frame_equal(clones,original)
+    # Combining is streamed and preserves quoted/multiline values and one header.
+    merged=tmp_path/'clone_top.csv'
+    merge_clone_tables([target,target],merged)
+    with merged.open(encoding='utf-8-sig',newline='') as source:
+        combined=list(csv.DictReader(source))
+    assert combined==rows+rows
+    assert merged.read_bytes().count(b'\xef\xbb\xbf')==1
+
+
+def test_empty_clone_table_and_failed_merge_preserve_published_file(tmp_path: Path) -> None:
+    empty=pd.DataFrame(columns=['V','J','CDR3(pep)','copy'])
+    target=tmp_path/'empty.csv'
+    write_clone_table(empty,0,target,chain='IGH')
+    with target.open(encoding='utf-8-sig',newline='') as source:
+        assert list(csv.reader(source))==[list(FIELDS)]
+    published=tmp_path/'clone_top.csv'
+    merge_clone_tables([target],published)
+    before=published.read_bytes()
+    bad=tmp_path/'bad.csv';bad.write_text('wrong,header\n',encoding='utf-8')
+    with pytest.raises(ValueError):
+        merge_clone_tables([target,bad],published)
+    assert published.read_bytes()==before
+    assert not list(tmp_path.glob('*.tmp'))

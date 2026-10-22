@@ -30,6 +30,11 @@ ACTIVE_SQL = "(status IN ('queued','running','cancelling') OR pid IS NOT NULL)"
 CHAINS = ('TRA', 'TRB', 'TRD', 'TRG', 'IGH', 'IGK', 'IGL')
 
 
+def clone_table_version():
+    from analysis.treemap.clone_table import VERSION as table_version
+    return table_version
+
+
 def init_schema(connection):
     connection.executescript('''
         CREATE TABLE IF NOT EXISTS treemap_scans (
@@ -138,7 +143,8 @@ def enqueue_auto(connection, job_id, now):
         return
     run_id = uuid.uuid4().hex
     folder = Path(row['output_root']) / 'analysis' / 'treemap' / f"attempt-{row['attempt_no']}" / f'run-{run_id}'
-    data = dict(pending_discovery=True, items=[], files=[], input_root=row['output_root'], metric='records')
+    data = dict(pending_discovery=True, items=[], files=[], input_root=row['output_root'], metric='records',
+                clone_table_version=clone_table_version())
     connection.execute('INSERT OR IGNORE INTO derived_runs '
                        '(id,owner_id,parent_job_id,attempt_no,name,source_type,dedupe_key,output_root,data_json,created_at) '
                        'VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -291,7 +297,8 @@ class Service:
             if parent['attempt_no'] != data['attempt_no']:
                 raise HTTPException(409, '来源任务已重新执行，请重新扫描')
         run_id = uuid.uuid4().hex
-        key = digest(dict(version=VERSION, parent=data['parent_job_id'], attempt=data['attempt_no'],
+        key = digest(dict(version=VERSION, clone_table_version=clone_table_version(),
+                          parent=data['parent_job_id'], attempt=data['attempt_no'],
                           input_root=data['input_root'], items=items))
         if parent is not None:
             output = Path(parent['output_root']) / 'analysis' / 'treemap' / f"attempt-{parent['attempt_no']}" / f'run-{run_id}'
@@ -299,7 +306,8 @@ class Service:
             output = self.app.default_job_output(user, 'treemap') / f'run-{run_id}'
         name = body.name.strip() or (parent['dataset'] if parent is not None else Path(data['input_root']).name)
         owner_id = parent['owner_id'] if parent is not None else user['id']
-        payload = dict(items=[dict(item, status='queued') for item in items], files=[], input_root=data['input_root'], metric='records')
+        payload = dict(items=[dict(item, status='queued') for item in items], files=[], input_root=data['input_root'], metric='records',
+                       clone_table_version=clone_table_version())
         with self.app.PROCESS_LOCK, self.app.db() as connection:
             connection.execute('BEGIN IMMEDIATE')
             if parent is not None:
@@ -330,7 +338,7 @@ class Service:
                 status = 'stale'
             elif parent['status'] in {'ARCHIVING','ARCHIVED'}:
                 status = 'archived'
-        items = [{k: v for k, v in item.items() if k not in {'sources', 'path'}} for item in data.get('items', [])]
+        items = [{k: v for k, v in item.items() if k not in {'sources', 'path', 'clone_table'}} for item in data.get('items', [])]
         files = []
         if status not in {'stale','archived'}:
             for item in data.get('files', []):
@@ -375,12 +383,26 @@ class Service:
                 parent = connection.execute('SELECT status,attempt_no FROM jobs WHERE id=?', (row['parent_job_id'],)).fetchone()
                 if not parent or parent['status'] != 'SUCCEEDED' or parent['attempt_no'] != row['attempt_no']:
                     raise HTTPException(409, '来源任务已变化，请重新生成')
-            affected = {item['sample_key'] for item in data.get('items', []) if item.get('status') != 'succeeded'}
-            data['composed_samples'] = [sample for sample in data.get('composed_samples', []) if sample not in affected]
-            data['files'] = [item for item in data.get('files', []) if not (item['kind'] == 'combined' and item['sample_key'] in affected)]
+            repeated = set()
             for item in data.get('items', []):
                 if item.get('status') != 'succeeded':
+                    repeated.add(item['id'])
+                elif data.get('clone_table_version'):
+                    try:
+                        self.clone_table_path(row,item)
+                    except (ValueError,OSError):
+                        repeated.add(item['id'])
+            affected = {item['sample_key'] for item in data.get('items', []) if item['id'] in repeated}
+            replaced_artifacts = {item.get('artifact_id') for item in data.get('items', []) if item['id'] in repeated}
+            data['composed_samples'] = [sample for sample in data.get('composed_samples', []) if sample not in affected]
+            data['files'] = [item for item in data.get('files', []) if item['kind'] != 'clone_top' and
+                             item['id'] not in replaced_artifacts and not (item['kind'] == 'combined' and item['sample_key'] in affected)]
+            data.pop('clone_top_complete',None)
+            for item in data.get('items', []):
+                if item['id'] in repeated:
                     item.update(status='queued', error='')
+                    item.pop('clone_table',None)
+                    item.pop('artifact_id',None)
             done = sum(item.get('status') not in {'queued','running'} for item in data.get('items', []))
             connection.execute("UPDATE derived_runs SET status='queued',error=NULL,cancel_requested=0,pid=NULL,process_token=NULL,ended_at=NULL,data_json=?,done=? WHERE id=? AND status NOT IN ('queued','running','cancelling')",
                                (json.dumps(data, ensure_ascii=False),done,run_id))
@@ -585,6 +607,16 @@ class Service:
         return dict(id=uuid.uuid4().hex, label=path.name, relative_path=path.relative_to(row['output_root']).as_posix(),
                     kind=kind, sample_key=sample_key, chain=chain, version=version(path))
 
+    @staticmethod
+    def clone_table_path(row,item):
+        table = item.get('clone_table') or {}
+        if not table.get('relative_path'):
+            raise ValueError('Clone Top 中间表缺失，请重试生成')
+        path = safe_path(Path(row['output_root'])/table['relative_path'],row['output_root'],file=True)
+        if version(path) != table['version']:
+            raise ValueError('Clone Top 中间表已变化，请重试生成')
+        return path
+
     def download(self, run_id, sample_key=None):
         row = self.owned_run(run_id)
         if self.public(row, details=False)['status'] in {'stale', 'archived'}:
@@ -596,7 +628,7 @@ class Service:
         artifacts = [item for item in data['files']
                      if (item['kind'] in {'chain', 'combined'} and
                          (sample_key is None or item['sample_key'] == sample_key)) or
-                        (item['kind'] == 'stats' and sample_key is None)]
+                        (item['kind'] in {'stats','clone_top'} and sample_key is None)]
         if not any(item['kind'] in {'chain', 'combined'} for item in artifacts):
             raise HTTPException(404, '暂无可下载的图片')
         files = []
@@ -607,7 +639,7 @@ class Service:
                     raise ValueError('artifact changed')
             except (ValueError, OSError):
                 raise HTTPException(409, '结果文件已变化或不可用，请刷新后重试') from None
-            archive_name = ('treemap_summary.csv' if item['kind'] == 'stats' else
+            archive_name = ('treemap_summary.csv' if item['kind'] == 'stats' else 'clone_top.csv' if item['kind']=='clone_top' else
                             image_relative(item['sample_key'], labels[item['sample_key']],
                                            item['kind'], item['chain']).as_posix())
             files.append((path, archive_name))
@@ -658,6 +690,10 @@ class Service:
                 selected = queued[:budget['workers']]
                 requests = [dict(kind='chain', sources=entry['sources'], chain=entry['chain'],
                                  target=str(Path(row['output_root']) / image_relative(entry['sample_key'], entry['sample_label'], 'chain', entry['chain']))) for entry in selected]
+                if data.get('clone_table_version'):
+                    for entry, request in zip(selected,requests):
+                        request.update(clone_table_target=str(Path(row['output_root'])/'.clone_tables'/f"{entry['id']}.csv"),
+                                       sample_key=entry['sample_key'],sample_label=entry['sample_label'])
                 request = requests[0] if len(requests) == 1 else dict(
                     kind='batch', units=requests, worker_rss_mb=budget['worker_rss_mb'],
                     group_rss_bytes=budget['group_rss_bytes'],
@@ -686,6 +722,9 @@ class Service:
                             raise ValueError(outcome['error'])
                         self.verify_inputs([entry], data['input_root'])
                         value = outcome['result']
+                        if data.get('clone_table_version'):
+                            table = safe_path(request['clone_table_target'],row['output_root'],file=True)
+                            entry['clone_table'] = dict(relative_path=table.relative_to(row['output_root']).as_posix(),version=version(table))
                         entry.update(status='empty' if value.get('empty') else 'succeeded', error='',
                                      productive_count=value['productive_count'], clone_count=value['clone_count'])
                         if not value.get('empty'):
@@ -708,6 +747,19 @@ class Service:
                         return False
                     data['files'].append(self.artifact(row,target,'combined',sample))
                 data['composed_samples'] = sorted(completed|{sample}); self.save(row,data)
+                return True
+            if data.get('clone_table_version') and not data.get('clone_top_complete'):
+                entries = [entry for entry in data['items'] if entry.get('status') in {'succeeded','empty'}]
+                paths = [str(self.clone_table_path(row,entry)) for entry in entries]
+                target = Path(row['output_root'])/'clone_top.csv'
+                result = self.work_unit(row,dict(kind='clone_merge',tables=paths,target=str(target)))
+                if result is None:
+                    return False
+                for entry in entries:
+                    self.clone_table_path(row,entry)
+                data['files'] = [file for file in data['files'] if file['kind']!='clone_top']+[self.artifact(row,target,'clone_top')]
+                data['clone_top_complete'] = True
+                self.save(row,data)
                 return True
             self.finish(row,data)
         except Exception as error:
@@ -812,7 +864,8 @@ def router(service):
             raise HTTPException(404,'图片已过期、归档或不可访问')
         item=next(f for f in json.loads(row['data_json'])['files'] if f['id']==artifact_id)
         path=safe_path(Path(row['output_root'])/item['relative_path'],row['output_root'],file=True)
-        return FileResponse(path,media_type='text/csv' if item['kind']=='stats' else 'image/png',filename=path.name if download or item['kind']=='stats' else None)
+        table = item['kind'] in {'stats','clone_top'}
+        return FileResponse(path,media_type='text/csv' if table else 'image/png',filename=path.name if download or table else None)
 
     @routes.get('/api/jobs/{job_id}/treemap')
     def job_runs(job_id:str):
