@@ -3,6 +3,27 @@ window.UI = (() => {
   const busyButtons = new WeakMap();
   let dialogNumber = 0;
 
+  const chainGroups=[
+    {key:'ig',title:'免疫球蛋白 · IG',chains:[['IGH','重链'],['IGK','κ 轻链'],['IGL','λ 轻链']]},
+    {key:'tcr',title:'T 细胞受体 · TCR',chains:[['TRA','α 链'],['TRB','β 链'],['TRD','δ 链'],['TRG','γ 链']]}
+  ];
+  function chainPicker({selected=[],counts=null,row=false}={}) {
+    // Labels and codes are fixed; counts come from the scanner, never HTML.
+    return chainGroups.map(group=>`<fieldset class="chain-group chain-group-${group.key}"><legend>${group.title}</legend>${row?'':`<button type="button" class="chain-group-action" data-chain-preset="${group.key}" ${counts&&!group.chains.some(([code])=>counts[code]>0)?'disabled':''}>仅选 ${group.key==='ig'?'IG':'TCR'}</button>`}<div class="chain-group-options">${group.chains.map(([code,label])=>{
+      const available=counts===null||counts[code]>0;
+      return `<label class="chain-choice"><input type="checkbox" ${row?`data-chain="${code}"`:''} value="${code}" ${available&&selected.includes(code)?'checked':''} ${available?'':'disabled'}><span><strong>${code}</strong><small>${label}</small>${counts===null?'':`<em>${available?`${Number(counts[code])} 个文件`:'未发现文件'}</em>`}</span></label>`;
+    }).join('')}</div></fieldset>`).join('');
+  }
+  function bindChainPicker(node) {
+    node.addEventListener('click',event=>{
+      const button=event.target.closest('[data-chain-preset]');if(!button||button.disabled)return;
+      const group=chainGroups.find(group=>group.key===button.dataset.chainPreset);if(!group)return;
+      const codes=new Set(group.chains.map(([code])=>code));
+      node.querySelectorAll('input[type=checkbox]').forEach(input=>input.checked=!input.disabled&&codes.has(input.value));
+      node.dispatchEvent(new Event('change',{bubbles:true}));
+    });
+  }
+
   function setBusy(button, busy, label) {
     if (!button) return;
     if (busy) {
@@ -57,5 +78,5 @@ window.UI = (() => {
     });
   }
 
-  return {confirm, setBusy};
+  return {confirm, setBusy, chainPicker, bindChainPicker};
 })();

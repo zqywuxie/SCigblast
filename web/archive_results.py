@@ -140,6 +140,13 @@ def run(app, dry_run=False, days=14):
             if dry_run:
                 continue
             with app.db() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                # Both services claim through SQLite: an archive process does
+                # not share the Web process's in-memory scheduling lock.
+                has_derived = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='derived_runs'").fetchone()
+                if has_derived and connection.execute("SELECT 1 FROM derived_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (row['id'],)).fetchone():
+                    print(f"archive deferred: active Treemap {row['id']}", flush=True)
+                    continue
                 updated = connection.execute("UPDATE jobs SET status='ARCHIVING' WHERE id=? AND status IN ('SUCCEEDED','ARCHIVING')", (row['id'],))
                 if not updated.rowcount:
                     continue

@@ -42,6 +42,8 @@ class WorkflowTests(unittest.TestCase):
                         patch.object(web, 'DEFAULT_OUTPUT_ROOT', self.out),
                         patch.dict(os.environ, {k: str(self.root) for k in ('SCIGBLAST_ALLOWED_INPUT_ROOTS', 'SCIGBLAST_ALLOWED_SUBMISSION_ROOTS', 'SCIGBLAST_ALLOWED_OUTPUT_ROOTS')}),
                         patch.object(web.runtime_preflight, 'check_dependencies', side_effect=available_dependencies),
+                        patch.object(web.MAILER, 'start'),
+                        patch.object(web.TREEMAP, 'start'),
                         patch.object(web, 'schedule')]
         for p in self.patches: p.start()
         web.PROCESSES.clear(); web.init_db()

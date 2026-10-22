@@ -61,34 +61,28 @@ fi
 [[ "$THREAD_BUDGET" =~ ^[1-9][0-9]*$ ]] || die "invalid parallel thread budget"
 (( MAX_PARALLEL * THREADS <= THREAD_BUDGET )) || die "fastp concurrency exceeds thread budget"
 (( MAX_PARALLEL * MEMORY_PER_SAMPLE_GB <= MEMORY_BUDGET_GB )) || die "fastp concurrency exceeds memory budget"
-mapfile -t JOBS < <("${PYTHON_BIN:-python3}" - "$MANIFEST" <<'PY'
+JOB_PAYLOAD="$("${PYTHON_BIN:-python3}" - "$MANIFEST" "${SCRIPT_DIR}/../.." "${RAW_INPUT_DIR:-}" "${SCIGBLAST_INPUT_MANIFEST:-}" <<'PY'
 import csv,sys
+sys.path.insert(0,sys.argv[2])
+from pipeline_input_manifest import pig_output_relative
 with open(sys.argv[1], newline='', encoding='utf-8') as f:
     for row in csv.DictReader(f):
         if row.get('status','OK') == 'OK':
-            print('\t'.join((row.get('sample_id',''), row.get('pair_id',''), row.get('r1_path',''), row.get('r2_path',''))))
+            print('\t'.join((row.get('sample_id',''), row.get('pair_id',''), row.get('r1_path',''), row.get('r2_path',''),str(pig_output_relative(row['sample_id'],row['pair_id'],row['r1_path'],sys.argv[3],sys.argv[4])))))
 PY
-)
+)" || { log 'ERROR cannot resolve selected sample output paths'; exit 1; }
+[[ -n "$JOB_PAYLOAD" ]] || { log 'ERROR no usable FASTQ pairs'; exit 1; }
+mapfile -t JOBS <<< "$JOB_PAYLOAD"
 total=${#JOBS[@]}; done_count=0; fail_count=0; completed_count=0
 log "[PIG][fastp] stage_start total=${total} max_parallel=${MAX_PARALLEL} threads=${THREADS}"
 declare -a PIDS=(); declare -A PID_INDEX=(); declare -A PID_SAMPLE=()
 
 run_fastp_one() {
-  local sample="$1" pair="$2" r1="$3" r2="$4"
+  local sample="$1" pair="$2" r1="$3" r2="$4" relative="$5"
   safe_sample=$(printf '%s' "$sample" | tr -cs 'A-Za-z0-9._-' '_')
   safe_pair=$(printf '%s' "$pair" | tr -cs 'A-Za-z0-9._-' '_')
-  raw_parent=""
-  if [[ -n "$RAW_INPUT_DIR" && "$r1" == "${RAW_INPUT_DIR%/}/"* ]]; then
-    raw_rel="${r1#${RAW_INPUT_DIR%/}/}"
-    raw_parent="${raw_rel%/*}"
-    [[ "$raw_parent" == "$raw_rel" ]] && raw_parent=""
-  fi
-  safe_parent=$(printf '%s' "$raw_parent" | sed 's#[^A-Za-z0-9._/-]#_#g')
-  odir="${DATA}"
-  rdir="${REPORT}"
-  [[ -n "$safe_parent" ]] && odir="${odir}/${safe_parent}" && rdir="${rdir}/${safe_parent}"
-  odir="${odir}/${safe_pair}/${safe_sample}"
-  rdir="${rdir}/${safe_pair}/${safe_sample}"
+  odir="${DATA}/${relative}"
+  rdir="${REPORT}/${relative}"
   mkdir -p "$odir" "$rdir"
   marker="${odir}/.DONE"
   out1="${odir}/${safe_pair}_R1.fq.gz"; out2="${odir}/${safe_pair}_R2.fq.gz"
@@ -133,11 +127,11 @@ record_result() {
 }
 
 for job in "${JOBS[@]}"; do
-  IFS=$'\t' read -r sample pair r1 r2 <<< "$job"
+  IFS=$'\t' read -r sample pair r1 r2 relative <<< "$job"
   while (( ${#PIDS[@]} >= MAX_PARALLEL )); do
     pid="${PIDS[0]}"; PIDS=("${PIDS[@]:1}"); record_result "$pid"; unset 'PID_SAMPLE[$pid]'
   done
-  run_fastp_one "$sample" "$pair" "$r1" "$r2" &
+  run_fastp_one "$sample" "$pair" "$r1" "$r2" "$relative" &
   pid=$!; PIDS+=("$pid"); PID_SAMPLE["$pid"]="${sample}/${pair}"
 done
 while (( ${#PIDS[@]} > 0 )); do
@@ -154,7 +148,7 @@ for p in root.rglob('*.json'):
     s=d.get('summary',{}); before=s.get('before_filtering',{}); after=s.get('after_filtering',{})
     n1=before.get('total_reads',0); n2=after.get('total_reads',0)
     # paired-end fastp reports one total_reads count for each side in some versions.
-    output_dir=data/p.parent.relative_to(root); rows.append({'sample_id':p.parts[-2] if len(p.parts)>1 else '', 'pair_id':p.stem,
+    output_dir=data/p.parent.relative_to(root); rows.append({'sample_id':d.get('summary',{}).get('sample_id',p.parent.name), 'pair_id':p.stem,
                  'r1_output':str(output_dir/(p.stem+'_R1.fq.gz')),'r2_output':str(output_dir/(p.stem+'_R2.fq.gz')),
                  'r1_before':n1,'r1_after':n2,'r1_percent':round(100*n2/n1,2) if n1 else 0,
                  'r2_before':before.get('total_reads',0),'r2_after':after.get('total_reads',0),

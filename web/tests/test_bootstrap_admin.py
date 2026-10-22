@@ -22,7 +22,8 @@ class BootstrapAdminTests(unittest.TestCase):
                     'SCIGBLAST_ADMIN_DISPLAY_NAME': 'Deployment Admin'}
         for mock in (patch.object(web, 'STATE_ROOT', root),
                      patch.object(web, 'DB_PATH', root / 'test.sqlite3'),
-                     patch.dict(os.environ, settings), patch.object(web, 'schedule')):
+                     patch.dict(os.environ, settings), patch.object(web.MAILER, 'start'),
+                     patch.object(web.TREEMAP, 'start'), patch.object(web, 'schedule')):
             mock.start()
             self.addCleanup(mock.stop)
         web.init_db()

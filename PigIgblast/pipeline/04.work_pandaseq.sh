@@ -36,21 +36,25 @@ command -v "$BIN" >/dev/null 2>&1 || { log "ERROR pandaseq not found: $BIN"; exi
 (( MAX_PARALLEL * THREADS <= THREAD_BUDGET )) || { log "ERROR pandaseq concurrency exceeds thread budget"; exit 1; }
 (( MAX_PARALLEL * MEMORY_PER_SAMPLE_GB <= MEMORY_BUDGET_GB )) || { log "ERROR pandaseq concurrency exceeds memory budget"; exit 1; }
 mkdir -p "$OUT"; printf 'sample_id,pair_id,input_r1,input_r2,input_pairs,merged_sequences,merge_percent,status,error\n' > "$SUMMARY"
-mapfile -t JOBS < <("${PYTHON_BIN:-python3}" - "$MANIFEST" <<'PY'
+JOB_PAYLOAD="$("${PYTHON_BIN:-python3}" - "$MANIFEST" "${SCRIPT_DIR}/../.." "${RAW_INPUT_DIR:-}" "${SCIGBLAST_INPUT_MANIFEST:-}" <<'PY'
 import csv,sys
+sys.path.insert(0,sys.argv[2])
+from pipeline_input_manifest import pig_output_relative
 seen=set()
 for row in csv.DictReader(open(sys.argv[1],encoding='utf-8')):
  k=(row['sample_id'],row['pair_id'],row.get('r1_path',''))
- if row.get('status')=='OK' and k not in seen: seen.add(k); print('\t'.join((row['sample_id'],row['pair_id'],row.get('r1_path',''))))
+ if row.get('status')=='OK' and k not in seen: seen.add(k); print('\t'.join((row['sample_id'],row['pair_id'],row.get('r1_path',''),str(pig_output_relative(row['sample_id'],row['pair_id'],row['r1_path'],sys.argv[3],sys.argv[4])))))
 PY
-)
+)" || { log 'ERROR cannot resolve selected sample output paths'; exit 1; }
+[[ -n "$JOB_PAYLOAD" ]] || { log 'ERROR no usable FASTQ pairs'; exit 1; }
+mapfile -t JOBS <<< "$JOB_PAYLOAD"
 total=${#JOBS[@]}; ok=0; fail=0; completed=0; declare -a PIDS=(); declare -A PID_LABEL=(); declare -A PID_INDEX=()
 log "[PIG][pandaseq] stage_start total=${total} max_parallel=${MAX_PARALLEL} threads=${THREADS}"
 
 run_pandaseq_one() {
-  local sample="$1" pair="$2" raw_r1="$3" idx="$4"
-  ss=$(safe "$sample"); pp=$(safe "$pair"); raw_parent=""; if [[ -n "$RAW_INPUT_DIR" && "$raw_r1" == "${RAW_INPUT_DIR%/}/"* ]]; then raw_rel="${raw_r1#${RAW_INPUT_DIR%/}/}"; raw_parent="${raw_rel%/*}"; [[ "$raw_parent" == "$raw_rel" ]] && raw_parent=""; fi; safe_parent=$(printf '%s' "$raw_parent" | sed 's#[^A-Za-z0-9._/-]#_#g')
-  idir="${IN}"; odir="${OUT}"; [[ -n "$safe_parent" ]] && idir="${idir}/${safe_parent}" && odir="${odir}/${safe_parent}"; idir="${idir}/${pp}/${ss}"; odir="${odir}/${pp}/${ss}"; mkdir -p "$odir"
+  local sample="$1" pair="$2" raw_r1="$3" relative="$4" idx="$5"
+  ss=$(safe "$sample"); pp=$(safe "$pair")
+  idir="${IN}/${relative}"; odir="${OUT}/${relative}"; mkdir -p "$odir"
   r1="${idir}/${pp}_R1.fq.gz"; r2="${idir}/${pp}_R2.fq.gz"; fa="${odir}/${pp}_merged.fasta"; marker="${odir}/.DONE"; logf="${odir}/pandaseq.log"
   [[ -s "$r1" && -s "$r2" ]] || { printf '%s,%s,%s,%s,0,0,0,ERROR,missing_clean_FASTQ\n' "$sample" "$pair" "$r1" "$r2" > "${SUMMARY}.row.${idx}"; return 1; }
   fingerprint="$(pair_fingerprint "$r1" "$r2")"
@@ -81,9 +85,9 @@ record_result(){
 }
 job_index=0
 for job in "${JOBS[@]}"; do
-  IFS=$'\t' read -r sample pair raw_r1 <<< "$job"
+  IFS=$'\t' read -r sample pair raw_r1 relative <<< "$job"
   while (( ${#PIDS[@]} >= MAX_PARALLEL )); do pid="${PIDS[0]}"; PIDS=("${PIDS[@]:1}"); record_result "$pid"; unset 'PID_LABEL[$pid]' 'PID_INDEX[$pid]'; done
-  run_pandaseq_one "$sample" "$pair" "$raw_r1" "$job_index" &
+  run_pandaseq_one "$sample" "$pair" "$raw_r1" "$relative" "$job_index" &
   pid=$!; PIDS+=("$pid"); PID_LABEL["$pid"]="${sample}/${pair}"; PID_INDEX["$pid"]="$job_index"
   job_index=$((job_index+1))
 done

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+from functools import lru_cache
 
 CHAINS = ('IGH', 'IGK', 'IGL', 'TRA', 'TRB', 'TRD', 'TRG')
 MAX_FILES = 20000
@@ -155,8 +156,44 @@ def assign(snapshot, selections, pipeline, species='human'):
         rows.append({**row, 'sample_id': name, 'chains': chains, 'output_pair': output_pair})
     value = {'schema_version': 1, 'pipeline': pipeline, 'input_path': snapshot['input_path'],
              'species': 'pig' if pipeline == 'pig_igblast' else species, 'rows': sorted(rows, key=lambda r: r['pair_id'])}
+    if pipeline == 'pig_igblast':
+        value['output_layout'] = 'sample-v1'
     verify(value)
     return value
+
+
+@lru_cache(maxsize=8)
+def _layout_index(path, version):
+    value = json.loads(Path(path).read_text(encoding='utf-8'))
+    if value.get('pipeline') != 'pig_igblast':
+        raise ValueError('Pig 输出布局不能使用其他流程的输入清单')
+    layout = value.get('output_layout', 'legacy')
+    if layout not in {'legacy', 'sample-v1'}:
+        raise ValueError('未知 Pig 输出布局版本')
+    index = {(row['output_pair'], row['sample_id'], row['r1']): Path(safe_name(row['sample_id'])) for row in value['rows']}
+    return layout, value['input_path'], index
+
+
+def pig_output_relative(sample, pair, raw_r1, raw_root, manifest_path=''):
+    """One shared location for all Pig stages, with old-manifest compatibility."""
+    if manifest_path:
+        path = Path(manifest_path)
+        layout, input_root, index = _layout_index(str(path), tuple(fingerprint(path)))
+        if Path(input_root).resolve() != Path(raw_root).resolve():
+            raise ValueError('输出清单与当前输入根不一致')
+        if layout == 'sample-v1':
+            relative = index.get((pair, sample, str(raw_r1)))
+            if relative is None:
+                raise ValueError('Match 记录不在目录输入清单中')
+            return relative
+    parent = Path()
+    if raw_root:
+        try:
+            parent = Path(raw_r1).resolve().parent.relative_to(Path(raw_root).resolve())
+        except ValueError:
+            pass
+    safe = lambda value: re.sub(r'[^A-Za-z0-9._-]+', '_', str(value))
+    return Path(*[safe(part) for part in parent.parts]) / safe(pair) / safe(sample)
 
 
 def match_rows(path, pipeline, root):

@@ -45,3 +45,7 @@
 !pipeline_parallel.py
 !pipeline_input_manifest.py
 !web/input_manifest.py
+!web/notifications.py
+!web/postanalysis.py
+!analysis/__init__.py
+!analysis/treemap/*.py

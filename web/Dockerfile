@@ -28,7 +28,8 @@ RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
 
 COPY web/archive_results.py web/app.py web/submission.py web/auth.py web/manage_users.py web/pipeline_registry.json /app/
 COPY web/preflight.py web/table_preview.py web/process_identity.py web/artifact_download.py web/mapping_results.py /app/
-COPY web/input_manifest.py /app/
+COPY web/input_manifest.py web/notifications.py /app/
+COPY web/postanalysis.py /app/
 COPY web/templates /app/templates
 COPY web/static /app/static
 
@@ -43,6 +44,7 @@ COPY pipeline_parallel.py /opt/scigblast/pipeline_parallel.py
 COPY pipeline_input_manifest.py /opt/scigblast/pipeline_input_manifest.py
 COPY mapping/fasta.py /opt/scigblast/mapping/fasta.py
 COPY mapping/pipeline/ /opt/scigblast/mapping/pipeline/
+COPY analysis/ /opt/scigblast/analysis/
 COPY reference/8bp_barcodes.csv /opt/scigblast/reference/8bp_barcodes.csv
 COPY web/check_bundle.py /app/check_bundle.py
 RUN python /app/check_bundle.py

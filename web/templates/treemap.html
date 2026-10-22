@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>克隆树图 · SCigblast</title><link rel="stylesheet" href="/static/style.css?v={{ asset_version }}"><link rel="stylesheet" href="/static/treemap.css?v={{ asset_version }}"></head>
+<body><main class="app-shell treemap-shell">
+  <header class="topbar"><a class="brand" href="/"><span class="brand-mark"><i></i><i></i><i></i></span><span>SCIGBLAST</span></a>{% include 'user_nav.html' %}</header>
+  <section class="page-head"><div><p class="eyebrow">REPERTOIRE / TREEMAP</p><h1>克隆树图</h1><p class="page-subtitle">从已完成的分析结果生成单链树图与样本合图。</p></div><a class="button button-ghost" href="/">返回任务控制台</a></section>
+  <div class="tm-method"><span class="tm-method-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><p><strong>按有效记录数展示克隆组成</strong><span>相同 V、J 与 CDR3 氨基酸序列归为一个克隆。单链内方块面积表示记录占比；合图的链区大小采用固定排版，不代表链间丰度。</span></p></div>
+  <p id="tm-message" class="tm-message" role="status" aria-live="polite"></p>
+  <div class="tm-workspace">
+    <section class="panel tm-source" aria-labelledby="tm-source-title"><div class="tm-section-heading"><span class="tm-step">01</span><div><h2 id="tm-source-title">选择结果来源</h2><p>扫描后确认需要绘制的样本与链。</p></div></div>
+      <form id="tm-source-form">
+        <fieldset class="tm-source-choice"><legend class="visually-hidden">数据来源</legend><label><input type="radio" name="source" value="task" checked> 已完成任务</label><label><input type="radio" name="source" value="directory"> 服务器目录</label></fieldset>
+        <label class="field" id="tm-task-field"><span class="field-label">分析任务</span><select id="tm-task" required><option value="">正在加载任务…</option></select><small class="field-hint">仅列出可用的、未归档成功任务。</small></label>
+        <div class="field" id="tm-path-field" hidden><label class="field-label" for="tm-path">结果目录</label><input id="tm-path" placeholder="/colddata/.../results" spellcheck="false" disabled><button id="tm-browse" class="button button-ghost button-small tm-browse-button" type="button" aria-haspopup="dialog" aria-controls="tm-directory-dialog" disabled>浏览目录</button><small class="field-hint">填写服务器允许范围内的现有结果目录。</small></div>
+        <button id="tm-scan" class="button button-primary tm-wide" type="submit">扫描样本与链 <span aria-hidden="true">→</span></button>
+      </form>
+      <div class="tm-source-note"><strong>独立生成，结果可追溯</strong><p>树图使用既有分析结果。统计口径为记录数，不按 copy 或 UMI count 加权。</p><p>仅保留 productive 为 T 且 CDR3 非空的记录；已处理结果按对应文件的筛选规则读取。</p></div>
+    </section>
+    <section class="panel tm-selection" aria-labelledby="tm-selection-title"><div class="tm-section-heading"><span class="tm-step">02</span><div><h2 id="tm-selection-title">确认绘制范围</h2><p id="tm-selection-note">先扫描一个结果来源。</p></div></div>
+      <div class="tm-selection-tools"><label class="search-box"><span aria-hidden="true">⌕</span><input id="tm-search" type="search" aria-label="搜索样本或链" placeholder="搜索样本或链" disabled></label><div><button id="tm-all" class="button button-ghost button-small" disabled>全部有效项</button><button id="tm-none" class="button button-ghost button-small" disabled>清空选择</button></div></div>
+      <div class="table-wrap tm-selection-table"><table><thead><tr><th scope="col">选择</th><th scope="col">样本</th><th scope="col">链</th><th scope="col">检查结果</th></tr></thead><tbody id="tm-rows"><tr><td colspan="4"><div class="tm-empty"><strong>选择数据后开始</strong><span>扫描会列出可绘制的样本与链，你可以自由调整范围。</span></div></td></tr></tbody></table></div>
+      <div class="pagination"><span id="tm-page">尚未扫描</span><div><button id="tm-prev" class="button button-ghost button-small" disabled>上一页</button><button id="tm-next" class="button button-ghost button-small" disabled>下一页</button></div></div>
+      <form id="tm-generate-form" class="tm-generate"><label class="field"><span class="field-label">本次树图名称 <em>可选</em></span><input id="tm-name" maxlength="120" placeholder="例如：治疗前后克隆组成"></label><div class="tm-generate-action"><span id="tm-selected" role="status" aria-live="polite">已选 0 项</span><button id="tm-generate" type="submit" class="button button-primary" disabled>生成树图</button></div></form>
+    </section>
+  </div>
+  <section class="panel tm-history" aria-labelledby="tm-history-title"><div class="tm-history-heading"><div><p class="eyebrow">OUTPUTS</p><h2 id="tm-history-title">生成记录</h2><p class="muted">查看生成进度，预览和下载图片。</p></div><button id="tm-refresh" class="button button-ghost">刷新</button></div><div class="tm-history-layout"><aside><div id="tm-runs" class="tm-run-list" aria-label="选择生成记录"><p class="muted">正在加载…</p></div><div class="tm-history-pager"><button id="tm-runs-prev" class="button button-ghost button-small" disabled>上一页</button><span id="tm-runs-page"></span><button id="tm-runs-next" class="button button-ghost button-small" disabled>下一页</button></div></aside><div id="tm-run-detail" aria-label="生成结果"><div class="tm-empty"><strong>尚未选择生成记录</strong><span>选择左侧记录查看结果。</span></div></div></div></section>
+  <footer class="footer"><span>SCIGBLAST</span></footer>
+</main>
+<dialog id="tm-directory-dialog" class="tm-directory-dialog" aria-labelledby="tm-directory-title" aria-describedby="tm-directory-message">
+  <header class="file-picker-header"><div><h2 id="tm-directory-title">选择结果目录</h2></div><button id="tm-directory-close" type="button" class="close-button" aria-label="关闭目录浏览器" autofocus>×</button></header>
+  <div class="file-picker-path tm-directory-navigation"><button id="tm-directory-roots" type="button" class="button button-ghost button-small">根目录</button><button id="tm-directory-up" type="button" class="button button-ghost button-small" disabled>↑ 上一级</button><code id="tm-directory-current">允许的根目录</code></div>
+  <p id="tm-directory-message" class="file-picker-message" role="status" aria-live="polite">选择允许的根目录，再进入结果目录。</p>
+  <div id="tm-directory-entries" class="file-tree" aria-label="可浏览目录"></div>
+  <footer class="file-picker-footer"><button id="tm-directory-cancel" type="button" class="button button-ghost">取消</button><button id="tm-directory-select" type="button" class="button button-primary" disabled>选用当前目录</button></footer>
+</dialog>
+<script src="/static/ui.js?v={{ asset_version }}"></script><script src="/static/submission.js?v={{ asset_version }}"></script><script src="/static/treemap-view.js?v={{ asset_version }}"></script><script src="/static/treemap.js?v={{ asset_version }}"></script></body></html>

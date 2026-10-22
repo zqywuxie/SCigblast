@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from pipeline_igblast_cache import task_fingerprint
 from pipeline_parallel import FastaCountCache
+from pipeline_input_manifest import pig_output_relative
 
 
 class DatabaseArgsTest(unittest.TestCase):
@@ -27,6 +28,7 @@ class DatabaseArgsTest(unittest.TestCase):
                       DB_ROOT=root/'db', VERSION='pig_chain', RAW_INPUT_ROOT=None,
                       BIN='igblastn', THREADS=2, BAD_V={'', '*'},
                       FASTA_COUNTS=FastaCountCache(),
+                      pig_output_relative=pig_output_relative,
                       task_fingerprint=task_fingerprint, DEPENDENCIES={'chains': {'TRA': 'test-dependencies'}})
             exec(compile(functions, str(source), 'exec'), ns)
             fasta = root/'input'/'pair'/'sample'/'pair_merged.fasta'

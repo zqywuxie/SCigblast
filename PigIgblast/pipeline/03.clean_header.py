@@ -7,6 +7,8 @@ from pathlib import Path
 PIPELINE_DIR=Path(__file__).resolve().parent
 sys.path.insert(0, str(PIPELINE_DIR))
 from tools.pipeline_config import load_config
+sys.path.insert(0,str(PIPELINE_DIR.parents[1]))
+from pipeline_input_manifest import pig_output_relative
 
 HERE=PIPELINE_DIR
 CFG=load_config(); OUTPUT_ROOT=Path(CFG.get('SCIGBLAST_OUTPUT_ROOT') or CFG.get('OUTPUT_ROOT') or str(PIPELINE_DIR.parent/'output'))
@@ -153,8 +155,8 @@ def main():
 
     def handle(row):
             sample=safe(row['sample_id']); pair=safe(row['pair_id'])
-            rel_parent=Path(*[safe(part) for part in raw_relative_parent(Path(row['r1_path'])).parts])
-            in_base=IN/rel_parent/pair/sample; out_base=OUT/rel_parent/pair/sample
+            relative=pig_output_relative(row['sample_id'],row['pair_id'],row['r1_path'],RAW_INPUT_ROOT,os.environ.get('SCIGBLAST_INPUT_MANIFEST',''))
+            in_base=IN/relative; out_base=OUT/relative
             r1=in_base/(pair+'_R1.fq.gz'); r2=in_base/(pair+'_R2.fq.gz')
             o1=out_base/(pair+'_R1.fq.gz'); o2=out_base/(pair+'_R2.fq.gz'); marker=out_base/'.DONE'
             fingerprint=input_fingerprint(r1, r2)

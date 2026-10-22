@@ -17,6 +17,8 @@ import shlex
 import sys
 import submission
 import auth
+import notifications
+import postanalysis
 import preflight as runtime_preflight
 from table_preview import read_preview
 from process_identity import group_state, signal_group
@@ -128,6 +130,8 @@ def init_db() -> None:
             """
         )
         auth.init_schema(connection)
+        notifications.init_schema(connection)
+        postanalysis.init_schema(connection)
         columns = {column[1] for column in connection.execute('PRAGMA table_info(jobs)')}
         if 'execution_json' not in columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
@@ -136,11 +140,28 @@ def init_db() -> None:
 def update_job(job_id: str, **values: Any) -> None:
     if not values:
         return
+    if values.get('status') == 'QUEUED':
+        TREEMAP.guard_mutation(job_id)
     assignments = ", ".join(f"{key} = ?" for key in values)
     with db() as connection:
         connection.execute(
             f"UPDATE jobs SET {assignments} WHERE id = ?", (*values.values(), job_id)
         )
+        if values.get('status') in notifications.EVENTS:
+            enqueue_notification(connection, job_id)
+        if values.get('status') == 'SUCCEEDED':
+            try:
+                postanalysis.enqueue_auto(connection, job_id, now())
+            except Exception as error:
+                postanalysis.LOG.warning('Unable to queue Treemap: %s', type(error).__name__)
+
+
+def enqueue_notification(connection, job_id):
+    # Notification storage failures must not change a pipeline's outcome.
+    try:
+        notifications.enqueue(connection, job_id, REGISTRY)
+    except Exception as error:
+        notifications.LOG.warning('Unable to queue task notification: %s', type(error).__name__)
 
 
 def add_action(job_id: str, operator: str, action: str, details: str = "") -> None:
@@ -387,6 +408,7 @@ class CreateJob(BaseModel):
     input_assignments: list[dict] = []
     mapping_chains: list[str] = []
     mapping_samples: list[str] | None = None
+    generate_treemap: bool = False
 
 
 def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
@@ -479,6 +501,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
         options['mapping_inputs'] = mapping_inputs
     if directory_value is not None:
         options['input_assignments'] = [{key: row[key] for key in ('id', 'sample_id', 'chains')} for row in directory_value['rows']]
+        options['directory_output_layout'] = directory_value.get('output_layout', 'legacy')
         options['directory_manifest'] = directory_value
         options['directory_manifest_hash'] = pipeline_input_manifest.digest(directory_value)
     job = {
@@ -627,6 +650,27 @@ def pipeline_done(row: sqlite3.Row) -> bool:
     return False
 
 
+def execution_runtime(row, current=None):
+    """Elapsed wall time of the latest invocation, excluding queue/review waits."""
+    stopped_before_start = row['status'] == 'STOPPED' and 'last_error' in row.keys() and row['last_error'] == 'stopped before start'
+    if row['status'] == 'QUEUED' or stopped_before_start or not row['started_at']:
+        return None, False
+    running = row['status'] in {'RUNNING', 'MATCHING', 'STOPPING'} and not row['ended_at']
+    if not running and not row['ended_at']:
+        return None, False
+    try:
+        start = datetime.fromisoformat(row['started_at'])
+        end = (current or datetime.now(timezone.utc)) if running else datetime.fromisoformat(row['ended_at'])
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        seconds = (end - start).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    return (int(seconds), running) if seconds >= 0 else (None, False)
+
+
 def snapshot(row: sqlite3.Row) -> dict[str, Any]:
     if 'operator_display_name' in row.keys():
         operator_display_name = row['operator_display_name']
@@ -635,6 +679,7 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
             owner = connection.execute('SELECT display_name FROM users WHERE id=?', (row['owner_id'],)).fetchone()
         operator_display_name = owner['display_name'] if owner else row['operator']
     config = job_config(row)
+    runtime_seconds, runtime_running = execution_runtime(row)
     state = state_dir(row)
     done = []
     for stage in config["stages"]:
@@ -664,6 +709,7 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "directory_manifest_hash": json.loads(row['options_json']).get('directory_manifest_hash', ''),
         "mapping_chains": json.loads(row['options_json']).get('mapping_chains', []),
         "mapping_samples": json.loads(row['options_json']).get('mapping_samples'),
+        "generate_treemap": bool(json.loads(row['options_json']).get('generate_treemap')),
         "dataset": row["dataset"],
         "input_path": row["input_path"],
         "submission_path": row["submission_path"],
@@ -689,6 +735,8 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "exit_code": row["exit_code"],
         "last_error": row["last_error"],
         "created_at": row["created_at"],
+        "runtime_seconds": runtime_seconds,
+        "runtime_running": runtime_running,
         "started_at": row["started_at"],
         "ended_at": row["ended_at"],
         "log_path": str(log_path(row)),
@@ -887,10 +935,13 @@ def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
 
 def mark_interrupted_jobs() -> None:
     with db() as connection:
+        rows = connection.execute("SELECT id FROM jobs WHERE status IN ('RUNNING','MATCHING','STOPPING')").fetchall()
         connection.execute(
             "UPDATE jobs SET status='INTERRUPTED', ended_at=?, last_error='web container restarted' WHERE status IN ('RUNNING','MATCHING','STOPPING')",
             (now(),),
         )
+        for row in rows:
+            enqueue_notification(connection, row['id'])
 
 
 def summary_files(row: sqlite3.Row) -> list[str]:
@@ -1079,6 +1130,10 @@ def read_table(path: Path, offset=0, limit=50, query="", errors_only=False, excl
 
 app = FastAPI(title="SCigblast Pipeline Runner", version="0.1.0")
 app.include_router(auth.router(db))
+app.include_router(notifications.router(db))
+MAILER = notifications.Dispatcher(db)
+TREEMAP = postanalysis.Service(sys.modules[__name__])
+app.include_router(postanalysis.router(TREEMAP))
 
 
 @app.middleware('http')
@@ -1132,12 +1187,25 @@ def startup() -> None:
     init_db()
     auth.bootstrap_admin(db)
     mark_interrupted_jobs()
+    MAILER.start()
     schedule()
+    TREEMAP.start()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    TREEMAP.stop()
+    MAILER.stop()
 
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get('/treemap', response_class=HTMLResponse)
+def treemap_page(request: Request):
+    return templates.TemplateResponse('treemap.html', {'request': request})
 
 
 @app.get('/login', response_class=HTMLResponse)
@@ -1242,7 +1310,7 @@ def input_assignments(job_id: str):
         raise HTTPException(400, '任务不是目录识别模式')
     # Editing starts with a new scan; this view only restores saved assignments.
     return {'pipeline': row['pipeline'], 'input_path': row['input_path'], 'dataset_label': row['dataset'],
-            'assignments': options['input_assignments']}
+            'assignments': options['input_assignments'], 'generate_treemap': bool(options.get('generate_treemap'))}
 
 
 @app.post('/api/jobs/{job_id}/input-rematch')
@@ -1260,6 +1328,17 @@ def input_rematch(job_id: str, request: CreateJob):
         updated, _ = build_job(request)
         previous = json.loads(row['options_json'])
         updated_options = json.loads(updated['options_json'])
+        # Keep this task's layout when re-matching; never mix old and new files
+        # inside an existing result root. New tasks opt into the compact layout.
+        if row['pipeline'] == 'pig_igblast':
+            layout = previous.get('directory_output_layout', 'legacy')
+            value = updated_options['directory_manifest']
+            if layout == 'legacy':
+                value.pop('output_layout', None)
+            else:
+                value['output_layout'] = layout
+            updated_options['directory_output_layout'] = layout
+            updated_options['directory_manifest_hash'] = pipeline_input_manifest.digest(value)
         if 'approved_assignments' in previous:
             updated_options['approved_assignments'] = previous['approved_assignments']
         updated['options_json'] = json.dumps(updated_options, ensure_ascii=False)
@@ -1623,6 +1702,7 @@ def delete_job(job_id: str, request: dict):
                         raise HTTPException(409, '输出与原始数据或 Submission 路径重叠，禁止删除')
         if is_under(STATE_ROOT, [output]) or is_under(PIPELINE_ROOT, [output]):
             raise HTTPException(409, '输出包含程序或任务数据库，禁止删除')
+        TREEMAP.guard_mutation(job_id)
         if output.exists() and (not output.is_dir() or (
                 any(output.iterdir()) and not (output / '01.match' / row['dataset']).is_dir()
                 and not state_dir(row).is_dir())):
@@ -1638,6 +1718,7 @@ def delete_job(job_id: str, request: dict):
         except OSError as exc:
             raise HTTPException(500, f'删除未完成，任务记录已保留，可检查权限后重试：{exc}') from exc
         with db() as connection:
+            connection.execute('DELETE FROM derived_runs WHERE parent_job_id=?', (job_id,))
             connection.execute('DELETE FROM reviews WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM actions WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM jobs WHERE id=?', (job_id,))

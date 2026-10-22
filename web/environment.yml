@@ -12,6 +12,7 @@ dependencies:
   - blast=2.16.0
   - numpy=1.26.4
   - pandas=2.2.3
+  - pillow
   - biopython=1.85
   - scikit-bio=0.6.3
   - parmap=1.7.0

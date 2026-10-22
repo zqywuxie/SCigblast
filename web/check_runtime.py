@@ -9,6 +9,7 @@ from pathlib import Path
 def main():
     import fastapi, uvicorn, jinja2, openpyxl
     import numpy, pandas, parmap
+    from PIL import Image
     from Bio import SeqIO, pairwise2
     from skbio.diversity.alpha import shannon, pielou_e, gini_index, simpson, simpson_e
 

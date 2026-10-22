@@ -134,5 +134,25 @@ class DirectoryInputTests(unittest.TestCase):
             launch.assert_not_called()
         self.assertEqual(web.get_job_row(created['id'])['status'],'FAILED')
 
+    def test_pig_rematch_retains_task_output_layout(self):
+        body=self.body('pig_igblast')
+        job=self.client.post('/api/jobs',json=body).json()
+        options=json.loads(web.get_job_row(job['id'])['options_json'])
+        self.assertEqual(options['directory_output_layout'],'sample-v1')
+        # Emulate an existing pre-layout task without rewriting its source data.
+        value=json.loads(Path(options['directory_manifest_path']).read_text(encoding='utf-8'))
+        value.pop('output_layout')
+        path,digest=input_manifest.publish(web.STATE_ROOT,value)
+        options.pop('directory_output_layout')
+        options.update(directory_manifest_path=path,directory_manifest_hash=digest)
+        env=json.loads(web.get_job_row(job['id'])['env_json'])
+        env.update(SCIGBLAST_RUN_INPUT_MANIFEST=path,SCIGBLAST_RUN_INPUT_MANIFEST_HASH=digest)
+        web.update_job(job['id'],status='STOPPED',options_json=json.dumps(options),env_json=json.dumps(env))
+        response=self.client.post(f"/api/jobs/{job['id']}/input-rematch",json=self.body('pig_igblast'))
+        self.assertEqual(response.status_code,200,response.text)
+        after=json.loads(web.get_job_row(job['id'])['options_json'])
+        self.assertEqual(after['directory_output_layout'],'legacy')
+        self.assertNotIn('output_layout',input_manifest.load(web.STATE_ROOT,after['directory_manifest_path'],after['directory_manifest_hash']))
+
 
 if __name__=='__main__':unittest.main()

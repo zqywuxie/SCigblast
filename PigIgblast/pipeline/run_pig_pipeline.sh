@@ -303,7 +303,7 @@ stage_root(){ printf '%s/%s/%s\n' "$OUTPUT_ROOT" "$1" "$DATASET_LABEL"; }
 hash_file(){ if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else printf unknown; fi; }
 CONFIG_SHA256="$(hash_file "${SCRIPT_DIR}/00.pipeline_config.env")"
 stage_script(){ case "$1" in fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; clean) printf '%s/03.clean_header.py\n' "$SCRIPT_DIR";; pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; igblast) printf '%s/05.work_igblastn.py\n' "$SCRIPT_DIR";; esac; }
-stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; hash_file "${SCRIPT_DIR}/../../pipeline_input_manifest.py"; fi; if [[ "$1" == igblast ]]; then printf '%s\n' "${SCIGBLAST_IGBLAST_DEPENDENCIES:-missing}"; fi; } | sha256sum | awk '{print $1}'; }
+stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; hash_file "${SCRIPT_DIR}/../../pipeline_input_manifest.py"; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; fi; if [[ "$1" == igblast ]]; then printf '%s\n' "${SCIGBLAST_IGBLAST_DEPENDENCIES:-missing}"; fi; } | sha256sum | awk '{print $1}'; }
 stage_summary_rows(){
   "${PYTHON_BIN}" - "$1" "$2" <<'PY'
 import csv,sys

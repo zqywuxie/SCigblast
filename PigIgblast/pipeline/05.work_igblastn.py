@@ -9,6 +9,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from tools.pipeline_config import load_config
 sys.path.insert(0, str(HERE.parents[1]))
+from pipeline_input_manifest import pig_output_relative
 from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
 from pipeline_parallel import FastaCountCache, bounded_completed
 
@@ -81,11 +82,12 @@ def filter_tsv(source, target):
 
 def task(job):
     sample, pair, chain, raw_r1 = job; parent = safe_parent(raw_r1)
-    base = INPUT / parent / safe(pair) / safe(sample); fasta = base / (safe(pair) + "_merged.fasta")
-    task_dir = OUTPUT / ".tasks" / parent / safe(pair) / safe(sample); task_dir.mkdir(parents=True, exist_ok=True)
+    relative = pig_output_relative(sample,pair,raw_r1,RAW_INPUT_ROOT,os.environ.get('SCIGBLAST_INPUT_MANIFEST',''))
+    base = INPUT / relative; fasta = base / (safe(pair) + "_merged.fasta")
+    task_dir = OUTPUT / ".tasks" / relative; task_dir.mkdir(parents=True, exist_ok=True)
     filtered = task_dir / f"{safe(chain)}.tsv"; raw = Path(str(filtered) + ".raw.tsv"); done = Path(str(filtered) + ".DONE")
     n = count_fasta(fasta)
-    common = {"sample_id": sample, "pair_id": pair, "chain": chain, "input_sequences": n, "raw_rows": 0, "mapped_rows": 0, "productive_rows": 0, "output_rows": 0, "status": "ERROR", "error": "", "path": None, "parent": str(parent)}
+    common = {"sample_id": sample, "pair_id": pair, "chain": chain, "input_sequences": n, "raw_rows": 0, "mapped_rows": 0, "productive_rows": 0, "output_rows": 0, "status": "ERROR", "error": "", "path": None, "parent": str(parent), "relative": str(relative)}
     if not fasta.is_file(): common["error"] = "missing merged FASTA"; return common
     try:
         fingerprint = task_fingerprint(fasta, DEPENDENCIES["chains"][chain])
@@ -144,7 +146,7 @@ def main():
         raise SystemExit("no usable Pig samples/chains in sample_manifest.csv")
     OUTPUT.mkdir(parents=True, exist_ok=True); results=[]; print(f"[PIG][igblast] started total={len(jobs)} max_jobs={MAX_JOBS}", flush=True)
     for sample,pair,chain,raw_r1 in jobs:
-        (OUTPUT/safe_parent(raw_r1)/safe(pair)/safe(sample)/("TCR.tsv" if chain in TCR else "BCR.tsv")).unlink(missing_ok=True)
+        (OUTPUT/pig_output_relative(sample,pair,raw_r1,RAW_INPUT_ROOT,os.environ.get("SCIGBLAST_INPUT_MANIFEST",""))/("TCR.tsv" if chain in TCR else "BCR.tsv")).unlink(missing_ok=True)
     for name in ("igblast_summary.tsv", "chain_summary.csv"):
         (OUTPUT/name).unlink(missing_ok=True)
     if not shutil.which(BIN): raise SystemExit(f"igblastn not found: {BIN}")
@@ -163,9 +165,9 @@ def main():
     for result in results:
         if result["status"] != "OK" or not result.get("path"): continue
         cell="TCR" if result["chain"] in TCR else "BCR"
-        grouped.setdefault((result["parent"], safe(result["pair_id"]), safe(result["sample_id"]), cell), []).append(result["path"])
-    for (parent, pair, sample, cell), paths in grouped.items():
-        dest=OUTPUT / parent / pair / sample / f"{cell}.tsv"; dest.parent.mkdir(parents=True, exist_ok=True)
+        grouped.setdefault((result["relative"], cell), []).append(result["path"])
+    for (relative, cell), paths in grouped.items():
+        dest=OUTPUT / relative / f"{cell}.tsv"; dest.parent.mkdir(parents=True, exist_ok=True)
         temp=dest.with_suffix(dest.suffix+".tmp")
         with temp.open("w", encoding="utf-8") as out:
             first=True
