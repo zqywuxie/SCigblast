@@ -30,6 +30,8 @@ reMapping 结果页按样本和链展示最终 UMI 文件；条数/保留比例�
 
 新建任务窗口采用顶部流程选择、单正文滚动区与固定操作栏。reMapping 的 `mappingRows/mappingSelected` 保存完整清单与选择，搜索和每页 20 项仅影响显示，不能从当前页 DOM 生成完整样本请求；目录模式继续以不可变 row.id 保存 selected/drafts。纯搜索、分页不使配置检查失效；输入、选择和 Chain 修改则失效。提交先读取请求快照，再锁定控件，`taskSubmitting` 防止重复请求；失败恢复输入和选择。保持重新 Match 的流程、来源和输入目录锁定。
 
+页面主题由 `appearance_head.html` 在首屏加载 `appearance.js/appearance.css`；右上角切换日间/夜间，只在当前浏览器 localStorage 的 `scigblast-theme` 保存偏好，未设置时跟随系统。五个页面共用，不能改变树图图片和导出文件配色。单选下拉优先使用可定制 picker 样式，旧浏览器保留有样式的原生控件与键盘/表单行为。任务列表显示可逐项移除的筛选标签；“重置筛选”和状态栏“全部”均清除流程、操作者、搜索与状态并回到第一页，其他状态 Tab 保留右侧条件。轮询不能重建未变化的筛选标签，避免夺走焦点。
+
 链选择组件在 `web/static/ui.js` 的 `chainPicker/bindChainPicker`，统一按 IG 与 TCR 分组，保留原 checkbox 值与多链选择。reMapping 显示扫描文件数，未发现的链禁用，“全部可用链”和本组快捷选择不能勾选禁用项；默认仍仅选扫描到的 IGH。目录批量勾选只是模板，点击应用才覆盖全部已选样本；`syncBatch()` 展示已使用该组合的样本数。逐样本设置继续独立保存，不根据批量区当前勾选生成请求。
 
 详情页仅保留一处状态与下一步说明，阶段明细按需展开，Tab 吸顶且 reMapping 隐藏 Match。克隆树图为输出文件旁的独立 Tab，支持 `#treemap` 直达、浏览偏好恢复和键盘切换；只在该 Tab 可见时加载/轮询树图，不随输出文件刷新。`region()` 按内容变化更新结构，时间、阶段内进度等局部更新；轮询不能重建未变化的操作按钮、展开区或夺取焦点。吸顶导航高度通过 ResizeObserver 写入详情页的 `--detail-tabs-height`，结果 sticky 预览与跳转偏移沿用该变量。保留原有 Tab 初次落点与键盘操作，不用任务状态轮询强行切换 Tab。任务列表操作列的 `<td>` 保留 table-cell 布局，按钮 flex 放在内部 `.row-actions` 容器，表头和按钮左对齐，不能直接把表格单元格设为 flex。

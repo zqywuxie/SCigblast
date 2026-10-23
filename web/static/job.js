@@ -31,7 +31,7 @@
   function errorText(error){let data;try{data=JSON.parse(error.message);}catch{}return data?.errors?.map(i=>i.message||i.code).join('；')||data?.message||error.message||String(error);}
   const fail=e=>{const node=$('#page-error');node.textContent=errorText(e);node.classList.remove('hidden');};
   function connectionError(error){$('#job-connection span').textContent=`连接暂时中断，${lastUpdate?`当前显示为 ${lastUpdate} 更新的数据`:'尚未获取任务信息'}。${errorText(error)}`;$('#job-connection').classList.remove('hidden');}
-  function nextStep(){return job.status_detail||({QUEUED:'任务已排队，轮到后自动启动。',WAITING_REVIEW:'核对样本并完成全部标注，然后点击“审核并继续”。',SUCCEEDED:'分析已完成，可按样本查看和下载结果。',ARCHIVING:'正在归档，完成后可下载压缩包。',ARCHIVED:'结果已归档，可下载完整压缩包。',FAILED:'查看失败原因和日志，修正后可断点续跑。',STOPPED:'中间结果已保留，可断点续跑。',INTERRUPTED:'执行已中断，请查看当前执行状态后续跑。'})[job.status]||'分析中，已完成的阶段会保留。';}
+  function nextStep(){return job.status_detail||({QUEUED:'任务已排队，轮到后自动启动。',WAITING_REVIEW:'核对样本并完成全部标注，然后点击“审核并继续”。',SUCCEEDED:'分析已完成，可按样本查看和下载结果。',ARCHIVING:'分析已完成，正在压缩并校验结果；归档结束后可下载完整压缩包。',ARCHIVED:'结果已归档，可下载完整压缩包。',FAILED:'查看失败原因和日志，修正后可断点续跑。',STOPPED:'中间结果已保留，可断点续跑。',INTERRUPTED:'执行已中断，请查看当前执行状态后续跑。'})[job.status]||'分析中，已完成的阶段会保留。';}
   const statusLabels={QUEUED:'排队中',RUNNING:'运行中',MATCHING:'匹配中',WAITING_REVIEW:'待审核',SUCCEEDED:'已完成',ARCHIVING:'归档中',ARCHIVED:'已归档',FAILED:'失败',STOPPED:'已停止',STOPPING:'停止中',INTERRUPTED:'已中断',COMPLETED_WITHOUT_MARKER:'需检查'};
   const actionLabels = {create:'创建任务', 'confirm-match':'确认 Match 并继续', review:'审核标注', rematch:'更新资料并重新匹配', resume:'断点续跑', stop:'停止任务'};
   function actionDetail(a) {

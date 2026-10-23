@@ -1,5 +1,5 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · SCigblast</title><link rel="stylesheet" href="/static/style.css?v={{ asset_version }}"></head>
-<body class="auth-page"><main class="auth-layout">
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · SCigblast</title><link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">{% include 'appearance_head.html' %}</head>
+<body class="auth-page">{% include 'theme_toggle.html' %}<main class="auth-layout">
 <section class="auth-intro"><a href="/login" class="brand">SCIGBLAST</a><h1>序列分析工作台</h1><p>提交任务、审核样本、查看结果。</p></section>
 <section class="panel auth-card"><div class="auth-tabs" role="tablist" aria-label="登录或注册"><button class="button button-primary" type="button" role="tab" aria-selected="true" data-auth-tab="login">登录</button><button class="button button-ghost" type="button" role="tab" aria-selected="false" data-auth-tab="register">注册码注册</button></div>
 <form id="login-form" class="auth-form"><h2>登录</h2><label class="field"><span class="field-label">姓名</span><input name="display_name" required maxlength="60" autocomplete="username" placeholder="填写注册时的姓名"></label><label class="field"><span class="field-label">密码</span><input type="password" name="password" required minlength="6" maxlength="128" autocomplete="current-password"></label><button class="button button-primary" type="submit">登录</button></form>

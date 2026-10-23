@@ -1,4 +1,5 @@
 <nav class="user-nav" aria-label="用户菜单">
+  {% include 'theme_toggle.html' %}
   <a href="/account">{{ request.state.user.display_name }}</a>
   {% if request.state.user.role == 'admin' %}<a href="/admin">用户管理</a>{% endif %}
   <button type="button" class="button button-ghost button-small" data-logout>退出</button>

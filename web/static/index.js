@@ -48,7 +48,8 @@
     const query=$('#mapping-sample-search').value.trim().toLocaleLowerCase();
     const filtered=mappingRows.filter(row=>`${row.sample_id} ${row.sample_key}`.toLocaleLowerCase().includes(query));
     mappingPage=Math.min(mappingPage,Math.max(0,Math.ceil(filtered.length/mappingPageSize)-1));
-    $('#mapping-samples').innerHTML=filtered.slice(mappingPage*mappingPageSize,(mappingPage+1)*mappingPageSize).map(row=>`<label><input type="checkbox" value="${esc(row.sample_key)}" data-chains="${esc(JSON.stringify(row.chains))}" data-chain-counts="${esc(JSON.stringify(row.chain_counts||{}))}" ${mappingSelected.has(row.sample_key)?'checked':''}><span><strong>${esc(row.sample_id)}</strong><small>${esc(row.sample_key)} · ${esc(row.chains.join(', '))} · ${row.file_count} 个文件</small><small class="sample-scope"></small></span></label>`).join('')||'<p class="field-hint">没有符合条件的样本</p>';
+    $('#mapping-samples').innerHTML=filtered.slice(mappingPage*mappingPageSize,(mappingPage+1)*mappingPageSize).map(row=>`<label><input type="checkbox" value="${esc(row.sample_key)}" data-chains="${esc(JSON.stringify(row.chains))}" data-chain-counts="${esc(JSON.stringify(row.chain_counts||{}))}" ${mappingSelected.has(row.sample_key)?'checked':''}><span class="mapping-sample-copy"><strong>${esc(row.sample_id)}</strong>${row.sample_key!==row.sample_id?`<small>${esc(row.sample_key)}</small>`:''}<small class="sample-scope"></small></span><span class="mapping-sample-meta">${esc(row.chains.join(' / '))}<small>${row.file_count} 个文件</small></span></label>`).join('')||`<div class="mapping-samples-empty">${mappingRows.length?'未找到匹配样本，请调整搜索关键词。':'此目录下没有可处理的样本。'}</div>`;
+    $('#mapping-sample-pager').classList.toggle('hidden',filtered.length<=mappingPageSize);
     $('#mapping-sample-page').textContent=`${filtered.length} 个样本 · 第 ${mappingPage+1} / ${Math.max(1,Math.ceil(filtered.length/mappingPageSize))} 页`;
     $('#mapping-sample-prev').disabled=mappingPage===0;
     $('#mapping-sample-next').disabled=(mappingPage+1)*mappingPageSize>=filtered.length;
@@ -56,7 +57,13 @@
   }
   function syncMappingSubmit() {
     const chains = mappingSelection(), samples = mappingSampleSelection();
-    $('#mapping-samples-all').disabled=$('#mapping-samples-none').disabled=taskSubmitting||mappingScanning;
+    $('#mapping-selection').classList.toggle('hidden',!scannedInput||!mappingRows.length);
+    $('#mapping-fields').setAttribute('aria-busy',String(mappingScanning));
+    $('#mapping-scan').textContent=mappingScanning?'正在扫描…':scannedInput?'重新扫描':'扫描输入目录';
+    $('#mapping-samples-all').disabled=$('#mapping-samples-none').disabled=taskSubmitting||mappingScanning||!mappingRows.length;
+    $('#mapping-sample-search').disabled=taskSubmitting||mappingScanning||!mappingRows.length;
+    $('#mapping-sample-prev').disabled=taskSubmitting||mappingScanning||mappingPage===0;
+    $('#mapping-sample-next').disabled=taskSubmitting||mappingScanning||(mappingPage+1)*mappingPageSize>=mappingRows.filter(row=>`${row.sample_id} ${row.sample_key}`.toLocaleLowerCase().includes($('#mapping-sample-search').value.trim().toLocaleLowerCase())).length;
     $('#mapping-samples').querySelectorAll('input').forEach(input=>input.disabled=taskSubmitting||mappingScanning);
     $('#mapping-chain-selection').textContent=!scannedInput?'扫描目录后选择处理链':chains.length?`已选 ${chains.length} 条链 · ${chains.join('、')}`:'尚未选择处理链';
     $('#mapping-all').disabled=taskSubmitting||mappingScanning||!scannedInput||!$('#mapping-chains input:not(:disabled)');
@@ -71,7 +78,7 @@
     });
     $('#mapping-sample-count').textContent = `已选 ${samples.length} / ${mappingRows.length} 个样本`;
     const scope=mappingScanning?'正在扫描 CSV 目录…':!mappingCurrent?scannedInput?'请重新扫描成功后提交，原选择已保留':'请先扫描 CSV 目录':!chains.length?'请选择要处理的链':!samples.length?'请选择至少一个样本':fileCount?`实际处理 ${sampleCount} 个样本 · ${fileCount} 个样本/链文件`:'所选样本与链没有交集，请调整选择';
-    $('#mapping-scope').textContent=scannedInput?scope:'';
+    $('#mapping-scope').textContent=scannedInput&&mappingRows.length?scope:'';
     $('#mapping-scope').classList.toggle('error',Boolean(scannedInput)&&!fileCount);
     const mapping=selectedPipeline()==='mapping';
     $('#new-job-form button[type="submit"]').disabled=taskSubmitting||!DirectoryInput.ready()||mapping&&(!mappingCurrent||mappingScanning||!scannedInput||scannedInput!==$('[name="input_path"]').value.trim()||!chains.length||!samples.length||!fileCount);
@@ -83,7 +90,8 @@
     $('#mapping-chains').textContent = '';
     mappingRows=[];mappingSelected.clear();mappingPage=0;$('#mapping-sample-search').value='';
     renderMappingSamples();
-    $('#mapping-scan-status').textContent = '先扫描目录，再选择要处理的链和样本。';
+    $('#mapping-scan-status').textContent = '扫描 CSV 目录后，选择要处理的链与样本。';
+    $('#mapping-scan-status').classList.remove('error');
     $('#mapping-scan').disabled = false;
     $('#mapping-ignored').classList.add('hidden');
     syncMappingSubmit();
@@ -222,8 +230,8 @@
     const details = {
       ir_split: '用于 Bulk IR 数据，barcode 用于定位样本。支持原始数据和带 UMI 标签的已拆分数据；先进行 fastp 质量过滤，已拆分数据保留原有 barcode 信息。代表序列流程在样本内按 UMI 选择代表序列，再完成 IgBLAST 比对。',
       '10x_split': '用于单细胞数据，barcode 标识细胞。R1 检查 TSO、R2 检查 barcode 后进行序列合并，再按样本内的 barcode + UMI 选择代表序列，完成 IgBLAST 比对。',
-      igblast_base: '不进行 barcode 拆分或 UMI 代表序列提取。按 Submission 的 Note 匹配样本，并按 Chain 选择数据库。',
-      pig_igblast: '核对 Submission 中的 Pig 物种、样本与 Chain，使用猪专用链数据库比对，不进行 IR/10X 拆分。'
+      igblast_base: '不进行 barcode 拆分或 UMI 代表序列提取。支持扫描目录指定样本与 Chain，或按 Submission 的 Note 匹配样本；按 Chain 选择数据库。',
+      pig_igblast: '支持扫描目录指定样本与 Chain，或使用 Species=Pig 的 Submission。使用猪专用链数据库比对，不进行 IR/10X 拆分。'
     };
     const finalStages = {
       ir_split: {
@@ -248,8 +256,8 @@
       mapping: {input:'Human 免疫组库 CSV', output:'按样本与链整理的 UMI count 结果', folder:'remapping/input', expected:'识别 Demo_A、Demo_B 两个样本，IGH、IGK 两种链，共 3 个文件、6 条输入序列。默认全选样本；只选 IGK 时应处理 Demo_A 的 1 个文件。'},
       ir_split: {input:'Bulk IR 配对 FASTQ + Submission + Barcode', output:'样本 UMI、链结果与 Datapoint.csv 指标', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
       '10x_split': {input:'单细胞配对 FASTQ + Submission + Barcode', output:'按细胞 Barcode 整理的链与 UMI 结果', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
-      igblast_base: {input:'配对 FASTQ + Submission', output:'IgBLAST AIRR 注释与比对汇总', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
-      pig_igblast: {input:'猪配对 FASTQ + Species=Pig 的 Submission', output:'使用猪参考库生成的 IgBLAST 注释', folder:'fastq/input', expected:'使用 pig_igblast.xlsx，保持 Species=Pig。将 Note 改为 fastq/input 的服务器绝对路径；Match 应识别 2 对 FASTQ。'}
+      igblast_base: {input:'配对 FASTQ；扫描目录或使用 Submission', output:'IgBLAST AIRR 注释与比对汇总', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
+      pig_igblast: {input:'猪配对 FASTQ；扫描目录或使用 Submission', output:'使用猪参考库生成的 IgBLAST 注释', folder:'fastq/input', expected:'使用 pig_igblast.xlsx，保持 Species=Pig。将 Note 改为 fastq/input 的服务器绝对路径；Match 应识别 2 对 FASTQ。'}
     };
     const guide=teaching[key] || {input:info.description,output:'分析结果',folder:'',expected:''};
     const isMapping=key==='mapping';
@@ -258,11 +266,12 @@
       steps=['下载并解压示例包，将 fastq/input 放到服务器允许的输入目录。',`新建 ${info.label}，样本信息来源选择“扫描目录，无需 Submission”；扫描后全选有效配对，统一设置 Chain，也可逐样本修改。`,'检查配置后创建任务；核对 Match 的样本、Chain 和配对路径。教学 FASTQ 建议练习到审核步骤后停止任务。'];
       guide.expected='应识别 2 个有效配对，默认候选名为 Demo_A_A01_L01 和 Demo_B_A02_L01；可改成 Demo_A、Demo_B。指定 IGH 后应提交 2 个样本、2 对 FASTQ，无需工作簿。';
     }
-    $('#pipeline-help-content').innerHTML = `<section class="guide-intro"><span class="guide-kicker">流程说明</span><h3>${esc(info.label)}</h3><p>${esc(pipelineDescriptions[key] || info.description)}</p><div class="guide-facts"><div><span>需要准备</span><strong>${esc(guide.input)}</strong></div><div><span>正式分析主要结果</span><strong>${esc(guide.output)}</strong></div></div></section>
-      <section class="guide-section"><h4>处理步骤 <span>${(info.stages || []).length} 个阶段</span></h4><ol class="guide-flow">${(info.stages || []).map((stage,i)=>`<li><span>${String(i+1).padStart(2,'0')}</span>${esc(info.stage_labels?.[stage] || stage)}</li>`).join('')}</ol><p class="guide-review">${isMapping ? '无需 Submission 和 Match 审核；先扫描目录，按所选样本与链提交。' : 'Match 完成后需要审核样本匹配结果，再继续正式分析。'}</p></section>
-      <section class="guide-demo" aria-labelledby="guide-demo-title"><div class="guide-demo-heading"><div><span class="guide-kicker">动手练习</span><h4 id="guide-demo-title">合成教学数据 <span>v1 · 操作练习</span></h4></div><a class="button button-primary button-small" href="/static/demos/scigblast-teaching-v1.zip" download>下载示例包 ZIP ↓</a></div><p>包含 2 个样本的 CSV、配对 FASTQ、4 份 Submission 模板及 Barcode CSV。</p><ol class="guide-instructions">${steps.map(step=>`<li>${esc(step)}</li>`).join('')}</ol><div class="guide-expected"><strong>练习检查点</strong><p>${esc(guide.expected)}</p></div><p class="guide-demo-limit">合成数据用于学习格式、选择与提交流程，不是完整生物学验证数据。FASTQ 未模拟 IR / 10X 建库结构；继续分析可能为空或失败。reMapping 的注释可为空，不能以输入条数推断最终结果。</p><a class="guide-readme" href="/static/demos/README.txt" download>下载详细教程与文件清单 TXT ↗</a></section>
-      <details class="guide-technical"><summary>了解处理逻辑与结果字段</summary><p>${esc(details[key] || info.description)}</p>${finalSection}${representative}${isMapping ? '<p>CSV 文件名：样本__链.csv；必需列：CDR3(pep)、copy、joinedSeq。umi_count 从序列标识末尾还原原始 copy；结果条数不等于 copy 总和。</p>' : ''}</details>`;
-    $('#help-pipeline-nav').innerHTML=Object.entries(pipelineInfo).map(([id,pipeline])=>`<button type="button" data-help-pipeline="${esc(id)}" aria-pressed="${id===key}"><strong>${esc(pipeline.label)}</strong><small>${esc(pipelineDescriptions[id] || pipeline.description)}</small></button>`).join('');
+    $('#pipeline-help-content').innerHTML = `<div class="guide-layout"><div class="guide-main"><section class="guide-intro"><div class="guide-title-line"><h3>${esc(info.label)}</h3><span>${isMapping?'CSV 数据':key==='10x_split'?'单细胞数据':key==='ir_split'?'Bulk IR 数据':key==='pig_igblast'?'猪 FASTQ':'通用 FASTQ'}</span></div><p>${esc(pipelineDescriptions[key] || info.description)}</p><div class="guide-facts"><div><span>输入数据</span><strong>${esc(guide.input)}</strong></div><div><span>分析结果</span><strong>${esc(guide.output)}</strong></div></div></section>
+      <section class="guide-section"><h4>分析流程 <span>${(info.stages || []).length} 个阶段</span></h4><ol class="guide-flow">${(info.stages || []).map((stage,i)=>`<li><span>${String(i+1).padStart(2,'0')}</span><div><strong>${esc(info.stage_labels?.[stage] || stage)}</strong></div>${stage==='01.match'?'<em>需审核</em>':''}</li>`).join('')}</ol><p class="guide-review">${isMapping?'扫描目录后选择样本与链，无需 Match 审核。':'样本匹配完成后需审核，再继续后续步骤。'}</p></section>
+      <details class="guide-technical"><summary>处理逻辑与结果字段</summary><p>${esc(details[key] || info.description)}</p>${finalSection}${representative}${isMapping ? '<p>CSV 文件名：样本__链.csv；必需列：CDR3(pep)、copy、joinedSeq。umi_count 从序列标识末尾还原原始 copy；结果条数不等于 copy 总和。</p>' : ''}</details></div>
+      <aside class="guide-demo" aria-labelledby="guide-demo-title"><div class="guide-demo-heading"><h4 id="guide-demo-title">用示例数据练习</h4><span>合成数据 · v1</span></div><p>2 个样本，包含 CSV、配对 FASTQ、Submission 模板与 Barcode CSV。</p><a class="button button-ghost" href="/static/demos/scigblast-teaching-v1.zip" download>下载示例包 <span>ZIP ↓</span></a><h5>如何开始</h5><ol class="guide-instructions">${steps.map(step=>`<li>${esc(step)}</li>`).join('')}</ol><details class="guide-expected"><summary>练习检查点</summary><p>${esc(guide.expected)}</p></details><p class="guide-demo-limit">合成数据仅用于操作练习。FASTQ 未模拟 IR / 10X 建库结构，继续分析可能为空或失败；reMapping 注释也可能为空，输入条数不代表最终结果。</p><a class="guide-readme" href="/static/demos/README.txt" download>详细教程与文件清单 TXT ↓</a></aside></div>`;
+    $('#help-pipeline-nav').innerHTML=Object.entries(pipelineInfo).map(([id,pipeline])=>`<button type="button" data-help-pipeline="${esc(id)}" aria-pressed="${id===key}">${esc(pipeline.label)}</button>`).join('');
+    $('#guide-current-pipeline').textContent=`当前流程：${info.label}`;
     $('#pipeline-help-content').scrollTop=0;
 
   }
@@ -291,7 +300,7 @@
       candidate.innerHTML=`
       <td><a class="job-link" data-focus-key="job" href="/jobs/${job.id}"><strong>${esc(job.dataset)}</strong><span class="job-id">${esc(job.id)}</span></a></td>
       <td><span class="pipeline-chip ${job.pipeline}"><i></i>${esc(job.pipeline_label)}</span></td>
-      <td><span class="stage-name">${esc(job.execution_phase === 'waiting_resource' ? '等待运行资源' : job.stage_labels?.[job.current_stage] || job.current_stage || '等待启动')}</span>${job.status === 'ARCHIVING' ? '<small>归档完成后可下载</small>' : ''}</td>
+      <td><span class="stage-name">${esc(job.status === 'ARCHIVING' ? '结果压缩与校验' : job.execution_phase === 'waiting_resource' ? '等待运行资源' : job.stage_labels?.[job.current_stage] || job.current_stage || '等待启动')}</span>${job.status === 'ARCHIVING' ? '<small>分析已完成，归档后可下载压缩包</small>' : ''}</td>
       <td><div class="progress-cell"><div class="progress-track"><span style="width:${Math.max(0, Math.min(100, job.progress))}%"></span></div><b>${job.progress}%</b></div></td>
       <td><span class="operator-name">${esc(job.operator_display_name||job.operator)}</span><small class="time-text">${formatTime(job.started_at || job.created_at)}</small></td>
       <td><span class="status-badge ${job.status.toLowerCase()}"><i></i>${esc(statusText(job.status))}</span>${job.last_error ? `<small class="error-text" title="${esc(job.last_error)}">${esc(job.last_error)}</small>` : ''}</td>
@@ -352,8 +361,39 @@
     for(const [name,selector] of [['pipeline','#pipeline-filter'],['operator','#operator-filter'],['query','#job-search']])if($(selector).value.trim())params.set(name,$(selector).value.trim());
     return params.toString();
   }
+  function syncJobFilterTabs() {
+    document.querySelectorAll('.filter-tab').forEach(tab => {
+      const active=tab.dataset.filter===filter;
+      tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));
+    });
+  }
+  function renderJobFilters() {
+    const entries=[];
+    if(filter!=='all')entries.push(['status',`状态：${{active:'进行中',review:'待审核',done:'已结束'}[filter]}`]);
+    for(const [name,selector,title] of [['pipeline','#pipeline-filter','流程'],['operator','#operator-filter','操作者']]){
+      const select=$(selector);if(select.value)entries.push([name,`${title}：${select.selectedOptions[0]?.textContent||select.value}`]);
+    }
+    if($('#job-search').value.trim())entries.push(['search',`搜索：${$('#job-search').value.trim()}`]);
+    $('#job-filter-summary').classList.toggle('hidden',!entries.length);
+    const markup=entries.map(([name,label])=>`<button type="button" class="job-filter-chip" data-clear-filter="${name}" aria-label="移除${esc(label)}筛选"><span>${esc(label)}</span><b aria-hidden="true">×</b></button>`).join('');
+    if($('#job-filter-chips')._markup!==markup){$('#job-filter-chips').innerHTML=markup;$('#job-filter-chips')._markup=markup;}
+  }
+  function resetJobFilters() {
+    clearTimeout(searchTimer);filter='all';page=0;
+    $('#pipeline-filter').value='';$('#operator-filter').value='';$('#job-search').value='';
+    syncJobFilterTabs();refreshJobs();$('.filter-tab[data-filter="all"]').focus({preventScroll:true});
+  }
+  $('#job-filter-reset').addEventListener('click',resetJobFilters);
+  $('#job-filter-chips').addEventListener('click',event=>{
+    const button=event.target.closest('[data-clear-filter]');if(!button)return;
+    const name=button.dataset.clearFilter;
+    const input=name==='status'?$('.filter-tab[data-filter="all"]'):$(name==='pipeline'?'#pipeline-filter':name==='operator'?'#operator-filter':'#job-search');
+    if(name==='status'){filter='all';syncJobFilterTabs();}else input.value='';
+    clearTimeout(searchTimer);page=0;refreshJobs();input.focus({preventScroll:true});
+  });
   async function refreshJobs() {
     clearTimeout(pollTimer);
+    renderJobFilters();
     if(document.hidden)return;
     if(busy){refreshPending=true;return;}busy=true;const requested=jobsQuery();
     try{
@@ -447,17 +487,17 @@
     const priorRows=new Map(mappingRows.map(row=>[row.sample_key,row])),priorSelected=new Set(mappingSelected),priorChains=mappingSelection();
     const locked=[...$('#mapping-chains').querySelectorAll('input,button')].map(node=>[node,node.disabled]);locked.forEach(([node])=>node.disabled=true);
     mappingScanning=true;mappingCurrent=false;invalidateValidation();syncMappingSubmit();
-    $('#mapping-scan').disabled = true; $('#mapping-scan-status').textContent = '正在扫描 CSV 文件…';
+    $('#mapping-scan').disabled = true; $('#mapping-scan-status').classList.remove('error'); $('#mapping-scan-status').textContent = '正在识别 CSV 文件中的样本与链…';
     try {
       const result = await Submission.api('/api/mapping/scan', {input_path:path});
       if (generation !== scanGeneration) return;
       scannedInput = path;
       $('#mapping-chains').innerHTML=UI.chainPicker({counts:Object.fromEntries(result.chains.map(chain=>[chain.chain,chain.file_count])),selected:restoring?priorChains:['IGH']});
       mappingRows=result.samples||[];mappingSelected=new Set(mappingRows.filter(row=>!restoring||!priorRows.has(row.sample_key)||priorSelected.has(row.sample_key)&&Boolean(row.source_version)&&row.source_version===priorRows.get(row.sample_key).source_version).map(row=>row.sample_key));mappingCurrent=true;renderMappingSamples();
-      $('#mapping-scan-status').textContent = result.chains.length ? `发现 ${(result.samples||[]).length} 个样本、${result.chains.length} 种链，未识别命名 ${result.unrecognized_files} 个 CSV。${restoring?'已保留未变化样本的选择；变化样本请重新选择。':result.chains.some(c=>c.chain==='IGH')?'默认选择 IGH，样本全部选中。':'未发现 IGH，请选择要处理的链。'}` : '未找到有效链；文件需命名为 样本__链.csv。';
+      $('#mapping-scan-status').textContent = result.chains.length ? `已识别 ${mappingRows.length} 个样本 · ${result.chains.length} 种链。${restoring?'已保留未变化样本的选择；变化样本请重新选择。':result.chains.some(c=>c.chain==='IGH')?'默认选择 IGH 和全部样本。':'未发现 IGH，请选择处理链。'}${result.unrecognized_files?` ${result.unrecognized_files} 个 CSV 未识别，详见下方。`:''}` : '未找到可处理的 CSV，请检查目录及文件名（样本__链.csv）。';
       $('#mapping-ignored').classList.toggle('hidden', !result.unrecognized_files);
       $('#mapping-ignored ul').innerHTML=(result.ignored_files||[]).map(f=>`<li>${esc(f)}：文件名或链不符合 样本__链.csv 约定。</li>`).join('');
-    } catch (error) { if (generation === scanGeneration) $('#mapping-scan-status').textContent = `${error.message}${restoring?'；原选择已保留，请重新扫描后提交。':''}`; }
+    } catch (error) { if (generation === scanGeneration) { $('#mapping-scan-status').classList.add('error'); $('#mapping-scan-status').textContent = `扫描失败：${error.message}${restoring?'；原选择已保留，请重新扫描后提交。':''}`; } }
     finally { if (generation === scanGeneration) { mappingScanning=false;locked.forEach(([node,disabled])=>node.disabled=disabled);$('#mapping-scan').disabled = false; syncMappingSubmit(); } }
   };
   let searchTimer; $('#operator-filter').addEventListener('change', () => { page = 0; refreshJobs(); });
@@ -466,7 +506,7 @@
   document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', () => openPicker(button.dataset.browseKind, button.dataset.browseTarget)));
   $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });
   $('#file-picker-entries').addEventListener('click', (event) => { const entry = event.target.closest('.file-tree-entry'); if (!entry) return; const path = entry.dataset.path; if (entry.dataset.entryType === 'directory') { loadPicker(path); } else { choosePickerPath(path); } });
-  document.querySelectorAll('.filter-tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.filter-tab').forEach((item) => { item.classList.remove('active'); item.setAttribute('aria-selected', 'false'); }); tab.classList.add('active'); tab.setAttribute('aria-selected', 'true'); filter = tab.dataset.filter; page = 0; refreshJobs(); }));
+  document.querySelectorAll('.filter-tab').forEach(tab=>tab.addEventListener('click',()=>{if(tab.dataset.filter==='all'){resetJobFilters();return;}filter=tab.dataset.filter;page=0;syncJobFilterTabs();refreshJobs();}));
   document.addEventListener('keydown', event => {
     if(event.key!=='Tab'||document.querySelector('dialog[open]'))return;
     const shell=$('#file-picker-shell.open')||$('#drawer-shell.open');if(!shell)return;

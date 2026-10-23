@@ -6,6 +6,7 @@
   <title>SCigblast · 任务控制台</title>
 <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">
 <link rel="stylesheet" href="/static/treemap.css?v={{ asset_version }}">
+{% include 'appearance_head.html' %}
 </head>
 <body>
   <main class="app-shell">
@@ -34,6 +35,7 @@
         <div class="filter-tabs" role="tablist" aria-label="任务状态筛选"><button class="filter-tab active" role="tab" aria-selected="true" data-filter="all">全部 <span id="count-all">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="active">进行中 <span id="count-active">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="review">待审核 <span id="count-review">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="done">已结束 <span id="count-done">0</span></button></div>
         <div class="toolbar-tools"><select id="pipeline-filter" aria-label="按 Pipeline 筛选"><option value="">全部流程</option></select><select id="operator-filter" aria-label="按操作者筛选"><option value="">全部操作者</option></select><label class="search-box"><span>⌕</span><input id="job-search" placeholder="搜索 Job 或 Dataset" aria-label="搜索任务"></label></div>
       </div>
+      <div id="job-filter-summary" class="job-filter-summary hidden" aria-label="当前筛选条件"><div id="job-filter-chips"></div><button id="job-filter-reset" type="button" class="button button-ghost button-small">重置筛选</button></div>
       <div class="table-wrap"><table><thead><tr><th>任务 / 数据集</th><th>Pipeline</th><th>当前阶段</th><th>进度</th><th>操作者</th><th>状态</th><th class="action-col">操作</th></tr></thead><tbody id="jobs"></tbody></table><div id="empty-state" class="empty-state hidden"><div class="empty-icon">＋</div><strong>没有符合条件的任务</strong><span>调整筛选条件，或创建一个新任务</span></div></div>
       <div class="pagination"><span id="page-summary">—</span><div><button id="page-prev" class="button button-ghost button-small" disabled>← 上一页</button><button id="page-next" class="button button-ghost button-small" disabled>下一页 →</button></div></div>
     </section>
@@ -59,15 +61,19 @@
 
           <label class="field"><span class="field-label">原始数据目录</span><div class="path-input-row"><div class="input-with-state"><input name="input_path" required placeholder="/colddata/.../raw" spellcheck="false"><span class="path-state" data-for="input_path"></span></div><button type="button" class="button button-ghost button-small browse-button" data-browse-kind="input" data-browse-target="input_path">浏览</button></div><span class="field-hint">输入目录需位于服务器允许根目录</span></label>
           <fieldset id="mapping-fields" class="field hidden">
-            <legend class="field-label">处理链与样本 · Human</legend>
-            <div class="chain-scan-row"><button id="mapping-scan" type="button" class="button button-ghost button-small">扫描输入目录</button><small>根据 CSV 文件识别可处理的链与样本</small></div>
-            <p id="mapping-scan-status" class="field-hint" role="status" aria-live="polite">先扫描目录，再选择要处理的链。</p>
-            <section class="chain-selection" aria-labelledby="mapping-chain-title"><div class="chain-selection-head"><div><strong id="mapping-chain-title">选择处理链 <small>可多选</small></strong><p id="mapping-chain-selection" role="status" aria-live="polite">扫描目录后选择处理链</p></div><div class="chain-selection-actions"><button id="mapping-all" type="button" class="button button-ghost button-small" disabled>选择全部可用链</button><button id="mapping-none" type="button" class="button button-ghost button-small" disabled>清空链选择</button></div></div><div id="mapping-chains" class="mapping-chains chain-picker"></div></section>
-            <div class="submission-inline-tools"><strong>识别到的样本</strong><button id="mapping-samples-all" type="button" class="button button-ghost button-small">全部样本</button><button id="mapping-samples-none" type="button" class="button button-ghost button-small">清空样本</button><span id="mapping-sample-count" class="field-hint" role="status"></span></div>
-            <input id="mapping-sample-search" type="search" aria-label="搜索 reMapping 样本" placeholder="搜索样本名称或相对目录"><div id="mapping-samples" class="mapping-samples"></div><div class="directory-pager"><span id="mapping-sample-page"></span><button id="mapping-sample-prev" type="button" class="button button-ghost button-small">上一页</button><button id="mapping-sample-next" type="button" class="button button-ghost button-small">下一页</button></div>
+            <legend class="field-label">处理链与样本 <span class="mapping-species">Human</span></legend>
+            <div class="mapping-scan-bar"><div><strong>识别输入数据</strong><p id="mapping-scan-status" class="field-hint" role="status" aria-live="polite">扫描 CSV 目录后，选择要处理的链与样本。</p></div><button id="mapping-scan" type="button" class="button button-ghost button-small">扫描输入目录</button></div>
+            <div id="mapping-selection" class="hidden">
+              <section class="chain-selection" aria-labelledby="mapping-chain-title"><div class="chain-selection-head"><div><strong id="mapping-chain-title">选择处理链 <small>可多选</small></strong><p id="mapping-chain-selection" role="status" aria-live="polite"></p></div><div class="chain-selection-actions"><button id="mapping-all" type="button" class="button button-ghost button-small" disabled>全选可用链</button><button id="mapping-none" type="button" class="button button-ghost button-small" disabled>清空</button></div></div><div id="mapping-chains" class="mapping-chains chain-picker"></div></section>
+              <section class="mapping-sample-section" aria-labelledby="mapping-sample-title">
+                <div class="mapping-sample-heading"><div><strong id="mapping-sample-title">选择样本</strong><span id="mapping-sample-count" class="field-hint" role="status"></span></div><div class="mapping-sample-actions"><button id="mapping-samples-all" type="button" class="button button-ghost button-small" disabled>全选样本</button><button id="mapping-samples-none" type="button" class="button button-ghost button-small" disabled>清空</button></div></div>
+                <input id="mapping-sample-search" type="search" aria-label="搜索 reMapping 样本" placeholder="搜索样本名称或相对目录" disabled>
+                <div id="mapping-samples" class="mapping-samples"></div>
+                <div id="mapping-sample-pager" class="directory-pager hidden"><span id="mapping-sample-page"></span><button id="mapping-sample-prev" type="button" class="button button-ghost button-small">上一页</button><button id="mapping-sample-next" type="button" class="button button-ghost button-small">下一页</button></div>
+              </section>
+            </div>
             <p id="mapping-scope" class="scope-summary" role="status" aria-live="polite"></p>
             <details id="mapping-ignored" class="advanced-details hidden"><summary>未识别的 CSV</summary><ul></ul></details>
-            <small class="field-hint">样本默认全选，仅处理所选样本中的所选链：FASTA → IgBLAST → UMI count 整理</small>
           </fieldset>
 
           <fieldset id="directory-fields" class="field hidden" disabled><legend class="field-label">识别样本与指定 Chain</legend><button id="directory-scan" type="button" class="button button-ghost button-small">扫描样本</button><p id="directory-status" class="field-hint" role="status" aria-live="polite"></p><section class="directory-batch chain-selection" aria-labelledby="directory-chain-title"><div class="chain-selection-head"><div><strong id="directory-chain-title">批量指定处理链 <small>可多选</small></strong><p id="directory-chain-selection" role="status" aria-live="polite">尚未选择批量链</p></div></div><div id="directory-global-chains" class="directory-chain-options chain-picker"></div><div class="chain-apply-row"><div><p id="directory-chain-feedback" role="status" aria-live="polite"></p><small>批量设置覆盖全部已选样本，包括其他页与搜索结果外的样本；仍可逐个修改。</small></div><button id="directory-apply" type="button" class="button button-primary button-small" disabled>应用到已选样本</button></div></section><div class="directory-tools"><button id="directory-all" type="button" class="button button-ghost button-small">全选全部有效样本</button><button id="directory-none" type="button" class="button button-ghost button-small">清空全部选择</button><input id="directory-search" aria-label="搜索目录样本" placeholder="搜索样本或相对目录"></div><p id="directory-scope" class="field-hint" role="status" aria-live="polite"></p><div id="directory-rows"></div><div class="directory-pager"><span id="directory-page"></span><button id="directory-prev" type="button" class="button button-ghost button-small">上一页</button><button id="directory-next" type="button" class="button button-ghost button-small">下一页</button></div><small class="field-hint">每个配对单独识别，同名目录和多个 lane 不自动合并。指定 Chain 后仍需核对 Match；物种沿用流程配置，Pig 为猪。</small></fieldset>
@@ -101,12 +107,12 @@
     </section>
   </div>
   <dialog id="pipeline-help" class="pipeline-help" aria-labelledby="pipeline-help-title" aria-describedby="pipeline-help-subtitle">
-    <header class="guide-header"><div><span class="task-dialog-eyebrow">SCIGBLAST / 使用指南</span><h2 id="pipeline-help-title">选择流程，从示例开始</h2><p id="pipeline-help-subtitle">了解输入要求与结果，再用合成数据练习操作。</p></div><button id="pipeline-help-close" type="button" class="close-button" aria-label="关闭流程说明" autofocus>×</button></header>
+    <header class="guide-header"><div><h2 id="pipeline-help-title">流程与示例</h2><p id="pipeline-help-subtitle">选择适合数据的流程，了解输入与结果。</p></div><button id="pipeline-help-close" type="button" class="close-button" aria-label="关闭流程说明" autofocus>×</button></header>
     <div class="guide-body">
-      <nav class="guide-nav" aria-label="选择要了解的流程"><label class="field guide-select"><span class="field-label">分析流程</span><select id="help-pipeline"></select></label><div id="help-pipeline-nav"></div><div class="guide-nav-note">初次使用？<br>推荐先练习 reMapping 的目录扫描和样本选择。</div></nav>
+      <nav class="guide-nav" aria-label="选择要了解的流程"><label class="field guide-select"><span class="field-label">分析流程</span><select id="help-pipeline"></select></label><div id="help-pipeline-nav"></div></nav>
       <div id="pipeline-help-content" class="guide-content" tabindex="0" aria-label="当前流程使用说明"></div>
     </div>
-    <footer class="guide-footer"><span>示例文件需解压到服务器允许的目录</span><button id="help-create-task" type="button" class="button button-primary">使用此流程新建任务 →</button></footer>
+    <footer class="guide-footer"><span id="guide-current-pipeline"></span><button id="help-create-task" type="button" class="button button-primary">使用此流程新建任务 →</button></footer>
   </dialog>
 <script src="/static/ui.js?v={{ asset_version }}"></script><script src="/static/submission.js?v={{ asset_version }}"></script><script src="/static/directory-input.js?v={{ asset_version }}"></script><script src="/static/index.js?v={{ asset_version }}"></script>
 </body>
