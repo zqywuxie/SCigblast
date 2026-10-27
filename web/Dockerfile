@@ -57,5 +57,6 @@ COPY reference/8bp_barcodes.csv /opt/scigblast/reference/8bp_barcodes.csv
 COPY web/check_bundle.py /app/check_bundle.py
 RUN python /app/check_bundle.py
 
+USER $MAMBA_USER
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/_entrypoint.sh"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

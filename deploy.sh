@@ -58,6 +58,30 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 2
 fi
 
+# Persist the host account identity without sourcing the secrets file as shell code.
+configure_runtime_id() {
+  local key="$1" fallback="$2" value="${!1:-}"
+  if [[ -z "$value" ]]; then
+    value="$(sed -n "s/^${key}=//p" "$ENV_FILE" | tail -n 1 | tr -d '[:space:]"\047')"
+  fi
+  if [[ -z "$value" ]]; then
+    value="$fallback"
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "请在 web/.env 中配置非 root 的 ${key}。"
+    if grep -q "^${key}=" "$ENV_FILE"; then
+      sed -i "s/^${key}=.*$/${key}=${value}/" "$ENV_FILE"
+    else
+      printf '\n%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+    fi
+  fi
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "${key} 必须是非零数字 ID。"
+  printf -v "$key" '%s' "$value"
+  export "$key"
+}
+configure_runtime_id SCIGBLAST_UID "$(id -u)"
+configure_runtime_id SCIGBLAST_GID "$(id -g)"
+log "运行账号 UID:GID=${SCIGBLAST_UID}:${SCIGBLAST_GID}"
+mkdir -p "${WEB_DIR}/runtime"
+
 # --project-directory keeps the relative ./runtime bind mount stable even
 # when deploy.sh is called from another directory.
 compose=(docker compose --env-file "${ENV_FILE}" --project-directory "${WEB_DIR}" -f "${COMPOSE_FILE}")
@@ -83,6 +107,22 @@ if [[ "$BUILD_IMAGE" == 1 ]]; then
   # A build may take minutes; recheck tasks immediately before replacement.
   check_idle
 fi
+log "检查普通用户的状态与结果目录权限"
+"${compose[@]}" run --rm --no-deps --entrypoint python "$SERVICE" -c '
+import os,tempfile
+from pathlib import Path
+assert os.getuid() != 0, "Web must run as a non-root user"
+for key in ("SCIGBLAST_STATE_DIR", "SCIGBLAST_DEFAULT_OUTPUT_ROOT"):
+    path=Path(os.environ[key]);path.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryFile(dir=path) as handle:handle.write(b"permission check")
+database=Path(os.environ["SCIGBLAST_STATE_DIR"])/"scigblast.sqlite3"
+assert not database.exists() or os.access(database,os.R_OK|os.W_OK), "State database needs ownership migration"
+lock=Path(os.environ["SCIGBLAST_RESOURCE_LOCK_FILE"])
+assert not lock.exists() or os.access(lock,os.R_OK|os.W_OK), "Shared resource lock needs ownership migration"
+Path.home().mkdir(parents=True,exist_ok=True)
+print("Runtime permissions OK: %s:%s" % (os.getuid(),os.getgid()))
+' || die "普通用户无法访问已有状态或结果，请先通过 Docker 完成旧 root 文件权限迁移；未替换现有容器。"
+check_idle
 log "启动 ${SERVICE}；部署期间请勿提交新任务"
 "${compose[@]}" up -d --no-build --force-recreate "$SERVICE"
 log "容器状态"

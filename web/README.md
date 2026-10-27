@@ -62,6 +62,12 @@ bash deploy.sh
 
 ### 镜像内分析环境
 
+结果文件的属主由容器运行账号决定。镜像只在安装/打包阶段使用 root，最后切回普通用户；Compose 必须指定宿主机账号的 `SCIGBLAST_UID` / `SCIGBLAST_GID`。`deploy.sh` 在配置缺失或空值时用 `id -u` / `id -g` 自动填入 `web/.env`，拒绝零 UID/GID。直接使用 Compose 前需先填写这两个数字；例如 remote_nanhua 的 zhengqinyun 为 `1012:1014`。`SCIGBLAST_DATA_GID` 可追加一个共享数据组，留空沿用主 GID；该服务器的 nhstu 组为 `1024`。账号映射采用数字 ID，宿主机新产物会显示为该宿主机用户，无需在容器内创建同名账号。任意 UID/GID 的运行方式见 [micromamba 官方说明](https://micromamba-docker.readthedocs.io/en/stable/advanced_usage.html#changing-the-user-id-or-name)。
+
+容器 HOME 与缓存位于可写的运行状态目录 `/var/lib/scigblast-web/home`。部署会先用目标用户检查状态、SQLite、结果和共享锁的访问权限，失败时保留旧服务。旧 root 部署首次迁移时，需等待主分析、树图及归档进程结束，备份 `web/runtime` 后将该目录和本平台结果目录中 root 拥有的对象移交给目标 UID/GID；保留其他用户的文件、权限、ACL、锁文件及参考库。已有 Docker 权限的账号可通过一次性维护容器完成，无需 sudo；不可只切换运行用户后忽略旧 SQLite/结果文件的权限。
+
+Base/Pig 逐链结果及 Pig 完成标记的原子写入遵循正常文件创建模式和目录 ACL：使用独占创建的唯一临时文件，按 umask/default ACL 生成最终权限，而不保留 mkstemp 的固定 0600。没有默认 ACL 时，umask 0022/0002 对应 0644/0664；有 ACL 时由内核计算有效权限。该修复影响后续写入，不自动更改历史文件的属主或权限；单纯修复旧文件权限无需重新 mapping。
+
 Web 和四条 pipeline 使用同一个 `/opt/conda` 环境。`environment.yml` 固定核心分析依赖版本（fastp、PANDAseq、IgBLAST、BLAST、NumPy、pandas、Biopython、scikit-bio、parmap），`requirements.txt` 固定 Web 直接依赖版本。构建时执行 `check_runtime.py` 检查导入和工具启动，实际解析出的 Conda/Python 包清单保存在镜像 `/app/conda-explicit.txt`、`/app/python-packages.txt`。这些是版本记录，不是已预生成的全依赖锁文件。
 
 镜像设置 `SCIGBLAST_RUNTIME_BIN_DIR=/opt/conda/bin`，四条 pipeline 只覆盖 Python/fastp/PANDAseq/IgBLAST 的可执行路径，包括 Pig 原先写死的 IgBLAST 路径；数据库、模型计算定义、过滤及并发参数不变。脱离容器且未设置这个变量时，仍使用各自 `00.pipeline_config.env` 的工具配置。网页续跑旧任务也使用当前镜像环境，不沿用旧 PATH。

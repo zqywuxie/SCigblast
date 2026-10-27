@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
-import tempfile
+import uuid
 
 CHAINS = frozenset(('TRA', 'TRB', 'TRD', 'TRG', 'IGH', 'IGK', 'IGL'))
 FIELDS = ('sample_id', 'pair_id', 'sample_key', 'chain', 'input_rows', 'output_rows',
@@ -164,7 +164,10 @@ def cached(task, output):
 def atomic_text(path, write):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+    temporary = path.parent / f'.{path.name}.{uuid.uuid4().hex}.tmp'
+    # O_EXCL keeps creation safe while 0666 lets the kernel apply umask/default
+    # ACL, matching ordinary result files. mkstemp's 0600 masks inherited ACLs.
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
             write(handle)

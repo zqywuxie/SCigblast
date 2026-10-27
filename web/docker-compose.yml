@@ -5,6 +5,9 @@ services:
       context: ..
       dockerfile: web/Dockerfile
     container_name: scigblast-web
+    user: "${SCIGBLAST_UID:?Run deploy.sh or set the host UID}:${SCIGBLAST_GID:?Run deploy.sh or set the host GID}"
+    group_add:
+      - "${SCIGBLAST_DATA_GID:-${SCIGBLAST_GID}}"
     restart: unless-stopped
     init: true
     ports:
@@ -18,6 +21,8 @@ services:
     environment:
       SCIGBLAST_PIPELINE_ROOT: /opt/scigblast
       SCIGBLAST_STATE_DIR: /var/lib/scigblast-web
+      HOME: /var/lib/scigblast-web/home
+      XDG_CACHE_HOME: /var/lib/scigblast-web/home/.cache
       SCIGBLAST_DEFAULT_OUTPUT_ROOT: ${SCIGBLAST_DEFAULT_OUTPUT_ROOT:-/colddata/SCigblast/results}
       SCIGBLAST_RESOURCE_LOCK_FILE: ${SCIGBLAST_RESOURCE_LOCK_FILE:-/colddata/SCigblast/results/.scigblast-resource.lock}
       SCIGBLAST_TREEMAP_TIMEOUT_SECONDS: ${SCIGBLAST_TREEMAP_TIMEOUT_SECONDS:-1800}

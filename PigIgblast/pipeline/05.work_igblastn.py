@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pig IgBLAST: filter and merge results inside each sample only."""
 from __future__ import annotations
-import csv, hashlib, os, re, shutil, subprocess, sys, tempfile
+import csv, hashlib, os, re, shutil, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -12,7 +12,7 @@ sys.path.insert(0, str(HERE.parents[1]))
 from pipeline_input_manifest import pig_output_relative
 from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
 from pipeline_parallel import FastaCountCache, bounded_completed
-from pipeline_locus_split import filter_mapping_airr
+from pipeline_locus_split import atomic_text, filter_mapping_airr
 
 def safe(value): return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
 
@@ -38,15 +38,7 @@ MAX_JOBS = max(1, min(4, int(cfg.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", cfg.
                       int(cfg.get('SCIGBLAST_MEMORY_BUDGET_GB', '300')) // max(1, int(cfg.get('SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB', '32'))) or 1))
 TCR = {"TRA", "TRB", "TRD", "TRG"}
 def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
-            handle.write(text)
-        os.replace(tmp_name, path)
-    finally:
-        try: os.unlink(tmp_name)
-        except FileNotFoundError: pass
+    atomic_text(path, lambda handle: handle.write(text))
 
 RAW_INPUT_ROOT = Path(cfg.get("RAW_INPUT_DIR", "")) if cfg.get("RAW_INPUT_DIR") else None
 def safe_parent(raw_path):
