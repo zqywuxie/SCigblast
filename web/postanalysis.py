@@ -30,6 +30,7 @@ LOG = logging.getLogger(__name__)
 VERSION = 'qr-records-v1'
 COMPOSITION_VERSION = 'multi-chain-only-v1'
 CHAIN_PARTITION_VERSION = 'row-chain-locus-v1'
+IMAGE_LAYOUT_VERSION = 'flat-individual-v1'
 ACTIVE_SQL = "(status IN ('queued','running','cancelling') OR pid IS NOT NULL)"
 CHAINS = ('TRA', 'TRB', 'TRD', 'TRG', 'IGH', 'IGK', 'IGL')
 
@@ -84,9 +85,38 @@ def allocate_output(connection, base, created_at):
     return candidate
 
 
-def image_relative(sample_key, sample_label, kind, chain=''):
-    """Stable, collision-safe layout, also used to package historical manifests."""
-    name = re.sub(r'[^\w.-]', '_', sample_label)[:60] or 'sample'
+def image_name(sample_label):
+    return re.sub(r'[^\w.-]', '_', sample_label)[:60] or 'sample'
+
+
+def chain_image_names(items):
+    """Disambiguate flat filenames once, using the complete selection."""
+    samples = {item['sample_key']: image_name(item['sample_label']) for item in items}
+    groups = {}
+    for key, name in samples.items():
+        groups.setdefault(name.casefold(), []).append(key)
+    reserved = set(groups)
+    names = {}
+    for normalized in sorted(groups):
+        keys = groups[normalized]
+        if len(keys) < 2:
+            continue
+        for key in sorted(keys):
+            stem = samples[key] + '_' + digest(key)[:12]
+            candidate, number = stem, 1
+            while candidate.casefold() in reserved:
+                number += 1
+                candidate = f'{stem}_{number}'
+            reserved.add(candidate.casefold())
+            names[key] = candidate
+    return names
+
+
+def image_relative(sample_key, sample_label, kind, chain='', *, names=None, flat=True):
+    """Flat single-chain images; preserve the old layout for existing runs."""
+    name = image_name(sample_label)
+    if kind == 'chain' and flat:
+        return Path('individual_treemaps') / f'{(names or {}).get(sample_key, name)}__{chain}.png'
     directory = 'individual_treemaps' if kind == 'chain' else 'multi_chain_treemaps'
     filename = f'{name}__{chain}.png' if kind == 'chain' else f'{name}.png'
     return Path(directory) / (name + '_' + digest(sample_key)[:12]) / filename
@@ -164,7 +194,8 @@ def enqueue_auto(connection, job_id, now):
     run_id = uuid.uuid4().hex
     folder = allocate_output(connection, Path(row['output_root']) / 'treemap', now)
     data = dict(pending_discovery=True, items=[], files=[], input_root=row['output_root'], metric='records',
-                clone_table_version=clone_table_version(), chain_partition_version=CHAIN_PARTITION_VERSION)
+                clone_table_version=clone_table_version(), chain_partition_version=CHAIN_PARTITION_VERSION,
+                image_names={})
     inserted = connection.execute('INSERT OR IGNORE INTO derived_runs '
                        '(id,owner_id,parent_job_id,attempt_no,name,source_type,dedupe_key,output_root,data_json,created_at) '
                        'VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -331,6 +362,7 @@ class Service:
         run_id = uuid.uuid4().hex
         key = digest(dict(version=VERSION, clone_table_version=clone_table_version(), composition_version=COMPOSITION_VERSION,
                           chain_partition_version=CHAIN_PARTITION_VERSION,
+                          image_layout_version=IMAGE_LAYOUT_VERSION,
                           parent=data['parent_job_id'], attempt=data['attempt_no'],
                           input_root=data['input_root'], items=items))
         output_base = Path(parent['output_root']) / 'treemap' if parent is not None else self.app.default_job_output(user, 'treemap').parent
@@ -338,7 +370,8 @@ class Service:
         name = body.name.strip() or (parent['dataset'] if parent is not None else Path(data['input_root']).name)
         owner_id = parent['owner_id'] if parent is not None else user['id']
         payload = dict(items=[dict(item, status='queued') for item in items], files=[], input_root=data['input_root'], metric='records',
-                       clone_table_version=clone_table_version(), chain_partition_version=CHAIN_PARTITION_VERSION)
+                       clone_table_version=clone_table_version(), chain_partition_version=CHAIN_PARTITION_VERSION,
+                       image_names=chain_image_names(items))
         with self.app.PROCESS_LOCK, self.app.db() as connection:
             connection.execute('BEGIN IMMEDIATE')
             if parent is not None:
@@ -667,6 +700,9 @@ class Service:
             raise HTTPException(409, '结果已过期或归档，请从来源任务查看当前结果或完整归档')
         data = self.data(row)
         labels = {item['sample_key']: item['sample_label'] for item in data['items']}
+        names = data.get('image_names')
+        if names is None:
+            names = chain_image_names(data['items'])
         if sample_key is not None and sample_key not in labels:
             raise HTTPException(404, '未找到所选样本')
         artifacts = [item for item in data['files']
@@ -685,7 +721,7 @@ class Service:
                 raise HTTPException(409, '结果文件已变化或不可用，请刷新后重试') from None
             archive_name = ('treemap_summary.csv' if item['kind'] == 'stats' else 'clone_top.csv' if item['kind']=='clone_top' else
                             image_relative(item['sample_key'], labels[item['sample_key']],
-                                           item['kind'], item['chain']).as_posix())
+                                           item['kind'], item['chain'], names=names).as_posix())
             files.append((path, archive_name))
         filename = f"Treemap_{row['id']}{'_sample' if sample_key is not None else ''}.zip"
         return StreamingResponse(stream_zip(files), media_type='application/zip',
@@ -723,6 +759,8 @@ class Service:
                         source['version'] = version(safe_path(source['path'], data['input_root'], file=True))
                     data['items'].append(dict(discovered,status='queued'))
                 data['pending_discovery'] = False
+                if 'image_names' in data:
+                    data['image_names'] = chain_image_names(data['items'])
                 self.save(row,data)
                 if not any(source.get('valid') for source in data['items']):
                     raise ValueError('没有适用于 Treemap 的最终样本链结果')
@@ -734,7 +772,9 @@ class Service:
                 selected = queued[:budget['workers']]
                 requests = [dict(kind='chain', sources=entry['sources'], chain=entry['chain'],
                                  partition_by_chain=bool(data.get('chain_partition_version')),
-                                 target=str(Path(row['output_root']) / image_relative(entry['sample_key'], entry['sample_label'], 'chain', entry['chain']))) for entry in selected]
+                                 target=str(Path(row['output_root']) / image_relative(
+                                     entry['sample_key'], entry['sample_label'], 'chain', entry['chain'],
+                                     names=data.get('image_names'), flat='image_names' in data))) for entry in selected]
                 if data.get('clone_table_version'):
                     for entry, request in zip(selected,requests):
                         request.update(clone_table_target=str(Path(row['output_root'])/'.clone_tables'/f"{entry['id']}.csv"),

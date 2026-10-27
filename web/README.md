@@ -188,7 +188,7 @@ QQ 参数可参考[腾讯官方 SMTP 配置表](https://intl.cloud.tencent.com/z
 
 绘图复用 `treemap_g.py` 的 QR 样式：只统计 `productive == T` 且 CDR3 非空的最终记录，按完整 V/J/CDR3 聚合，每条记录计 1，**不按 copy/umi_count/umi_counts 加权**。块面积表示链内记录占比；多链图的链区采用固定比例排版，面积不表示链间丰度。无有效记录、缺字段、来源文件缺失和绘图失败分别展示。首版不提供俄罗斯方块或 V/J 环形图。
 
-Base/Pig 主流程为五阶段，链筛选已合并进 `05.igblastn_out`。每个“样本 × Chain”任务选用该链参考库比对，一结束就在同一 worker 内单次流式处理原始 AIRR，同时保留 V 命中、productive 且 `locus` 与该任务配置链一致的记录；不等待其他链完成后统一筛选。最终 `<CHAIN>.tsv` 原子发布到 05 的既有样本目录，保留全部 AIRR 列（包括 c_call），筛选后才写逐链完成标记，零结果仅表头。raw 中间文件成功后清理，IgBLAST 日志保留；各链全部完成后只发布总摘要与兼容的 TCR.tsv/BCR.tsv，不再执行独立第六阶段。
+Base/Pig 主流程为五阶段，链筛选已合并进 `05.igblastn_out`。每个“样本 × Chain”任务选用该链参考库比对，一结束就在同一 worker 内单次流式处理原始 AIRR，同时保留 V 命中、productive 且 `locus` 与该任务配置链一致的记录；不等待其他链完成后统一筛选。最终 `<CHAIN>.tsv` 原子发布到 05 的既有样本目录，保留全部 AIRR 列（包括 c_call），筛选后才写逐链完成标记，零结果仅表头。raw 中间文件成功后清理，IgBLAST 日志保留；各链全部完成后只发布 igblast_summary.tsv 与 chain_summary.csv 总摘要，不再生成 TCR.tsv/BCR.tsv 聚合副本，也不再执行独立第六阶段。
 
 `chain_summary.csv` / `igblast_summary.tsv` 增加 locus_input_rows（V/productive 通过数）、excluded_locus_rows（其中其他链或未知 locus 的数量）、unknown_locus_rows（排除的子集）及 locus_filter_version。output_rows 是最终目标链保留数。缺少 locus 或格式错误使该链失败且不写 DONE；已有成功链保留供续跑。筛选版本纳入任务/阶段指纹，旧筛选缓存会失效，升级后明确续跑可能重新执行 mapping。
 
@@ -209,7 +209,7 @@ Treemap 和 Clone Top 新任务直接使用 05 摘要指向的已筛选单链结
 
 表格与图片复用同一次聚合结果，不重新读取来源数据；失败链不写入克隆表，原因保留在 `treemap_summary.csv`，全部无有效克隆时仅输出表头。失败重试后重新合并总表，避免重复记录。历史生成记录不会自动补算，可从树图 Tab 或工作台重新生成以获得表格。
 
-关联任务的派生输出在 `<任务输出>/treemap/YYYYMMDD_HHMMSS/`；纯目录绘图由服务器分配到 `<默认输出根>/<用户>/treemap/YYYYMMDD_HHMMSS/`，不写回输入目录。目录时间采用北京时间，同秒多次生成依次加 `_02`、`_03`，并在数据库写事务内检查已登记路径和现存目录，避免覆盖。生成记录 ID 与执行次数保留在数据库；历史记录继续使用已登记的原路径，不迁移目录。单链图位于 `individual_treemaps/<安全样本标识>/`，合图位于 `multi_chain_treemaps/<安全样本标识>/`。各运行保留来源版本、选择、计数规则、PNG、`clone_top.csv` 和 `treemap_summary.csv`。ZIP 流式打包，不在结果目录创建压缩包；全量 ZIP 包含两份 CSV，当前样本 ZIP 仅含该样本图片。历史图片保持原路径，下载 ZIP 时也整理为上述两个目录。关联任务续跑后旧图标为过期；归档时 CSV/PNG 随完整压缩包保存，在线副本可以移除，归档后不能补生成。纯目录绘图首版不纳入 pipeline 的 14 天自动归档规则。
+关联任务的派生输出在 `<任务输出>/treemap/YYYYMMDD_HHMMSS/`；纯目录绘图由服务器分配到 `<默认输出根>/<用户>/treemap/YYYYMMDD_HHMMSS/`，不写回输入目录。目录时间采用北京时间，同秒多次生成依次加 `_02`、`_03`，并在数据库写事务内检查已登记路径和现存目录，避免覆盖。生成记录 ID 与执行次数保留在数据库；历史记录继续使用已登记的原路径，不迁移目录。单链图直接位于 `individual_treemaps/样本名__CHAIN.png`，不再按样本建子目录；重名或名称清理、截断后冲突时，仅为冲突样本添加稳定短标识，避免覆盖。合图仍位于 `multi_chain_treemaps/<安全样本标识>/样本名.png`。各运行保留来源版本、选择、计数规则、PNG、`clone_top.csv` 和 `treemap_summary.csv`。ZIP 流式打包，不在结果目录创建压缩包；全量 ZIP 包含两份 CSV，当前样本 ZIP 仅含该样本图片。历史图片保持原路径，下载 ZIP 时也整理为上述两个目录。关联任务续跑后旧图标为过期；归档时 CSV/PNG 随完整压缩包保存，在线副本可以移除，归档后不能补生成。纯目录绘图首版不纳入 pipeline 的 14 天自动归档规则。
 
 PNG 文件名：单链为 `样本名__CHAIN.png`（如 `Demo_A__IGH.png`），多链合图直接为 `样本名.png`（如 `Demo_A.png`）。ZIP 使用相同命名；不同来源的同名样本由各自的安全样本子目录隔离。历史磁盘文件保留原名称和访问路径。
 
@@ -306,7 +306,7 @@ Base / Pig 新建任务支持“扫描目录，无需 Submission”：选择服�
 
 目录扫描只读取名称和元信息，不解压读取全部 FASTQ；最多检查 20000 个文件、5000 项配对。沿用流程配置的扩展名和读端后缀，支持 vendor counter。不同目录或 lane 不自动合并；Pig 不同目录同名配对因现有输出语义会阻止提交。目录模式不再要求 Pig 文件名含 Dual Index；物种固定为 pig，Base 沿用其物种配置。
 
-新建 Pig 目录任务采用单层样本输出布局：`02.fastp/<dataset>/data/<sample>/`、`03.clean_data/<dataset>/<sample>/`、`04.pandaseq/<dataset>/<sample>/` 和 `05.igblastn_out/<dataset>/<sample>/<CHAIN>.tsv`（兼容汇总 TCR.tsv/BCR.tsv 保留）。清单记录 `output_layout=sample-v1`，四个阶段共用路径解析；改名后使用确认的样本名。没有该字段的历史任务及 Submission 任务沿用原目录结构，重新 Match 保留该任务的布局版本，避免历史缓存与新路径混用。
+新建 Pig 目录任务采用单层样本输出布局：`02.fastp/<dataset>/data/<sample>/`、`03.clean_data/<dataset>/<sample>/`、`04.pandaseq/<dataset>/<sample>/` 和 `05.igblastn_out/<dataset>/<sample>/<CHAIN>.tsv`（仅保留单链 TSV，不生成 TCR.tsv/BCR.tsv 聚合副本）。清单记录 `output_layout=sample-v1`，四个阶段共用路径解析；改名后使用确认的样本名。没有该字段的历史任务及 Submission 任务沿用原目录结构，重新 Match 保留该任务的布局版本，避免历史缓存与新路径混用。
 
 服务器将实际选择保存为独立不可变输入清单（`state/input_manifests`），扫描快照绑定用户/流程/输入根，24 小时有效，每位用户保留最多 16 个。检查、创建、启动和续跑校验所选文件的大小与 mtime_ns；发生改变时需重新扫描，不自动纳入后来新增的文件。此指纹用于变更检测，不是内容哈希。任务详情“编辑资料 / 重新 Match”可恢复目录选择，重新扫描时新增配对默认不选；已批准的样本分配仍受现有确认限制。
 

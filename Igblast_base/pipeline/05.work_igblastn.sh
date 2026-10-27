@@ -141,17 +141,6 @@ def run_task(job: tuple[str, str, str, str, str]):
         Path(str(marker)+".tmp").unlink(missing_ok=True)
     return result
 
-def merge_group(paths: list[Path], destination: Path):
-    destination.parent.mkdir(parents=True,exist_ok=True); temp=destination.with_suffix(destination.suffix+".tmp")
-    with temp.open("w",encoding="utf-8") as out:
-        wrote_header=False
-        for source in sorted(paths,key=lambda p:p.name):
-            with source.open(encoding="utf-8",errors="replace") as src:
-                for index,line in enumerate(src):
-                    if not wrote_header or index > 0: out.write(line)
-                wrote_header=True
-    os.replace(temp,destination)
-
 def main() -> int:
     global DEPENDENCIES, FASTA_COUNTS
     FASTA_COUNTS = FastaCountCache()
@@ -168,8 +157,8 @@ def main() -> int:
                     seen.add(task_key); jobs.append((key[0],key[1],chain,key[2],row.get("species","") or SPECIES))
     if not jobs: raise SystemExit("no valid sample-specific Chain tasks in manifest")
     OUTPUT.mkdir(parents=True,exist_ok=True); results=[]
-    # Invalidate only aggregates owned by this invocation, before any task can
-    # fail. Compact successful task outputs remain available for resume.
+    # Remove legacy aggregates owned by this invocation. Publish only per-chain
+    # TSVs; successful task outputs remain available for resume.
     for sample,pair,chain,raw_r1,_ in jobs:
         rel_stage=stage_dir(relative_parent(raw_r1),safe(Path(str(pair).replace("\\","/")).name),safe(sample))
         (OUTPUT/rel_stage/("TCR.tsv" if chain in TCR else "BCR.tsv")).unlink(missing_ok=True)
@@ -183,14 +172,6 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=MAX_JOBS) as executor:
         for index,(_,result) in enumerate(bounded_completed(executor,run_task,jobs,MAX_JOBS*2),1):
             results.append(result); print(f"[BASE][igblast] progress={index}/{len(jobs)} percent={index*100//len(jobs)} sample={result['sample_id']}/{result['pair_id']}/{result['chain']} status={result['status']}",flush=True)
-    grouped={}
-    for result in results:
-        if result["status"]!="OK" or not result["path"]: continue
-        cell="TCR" if result["chain"] in TCR else "BCR"
-        rel_stage = stage_dir(Path(result["parent"]), safe(Path(str(result["pair_id"]).replace("\\", "/")).name), safe(result["sample_id"]))
-        key=(str(rel_stage),cell)
-        grouped.setdefault(key,[]).append(result["path"])
-    for (rel_stage,cell),paths in grouped.items(): merge_group(paths,OUTPUT/Path(rel_stage)/f"{cell}.tsv")
     fields=["sample_id","pair_id","species","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","locus_input_rows","excluded_locus_rows","unknown_locus_rows","locus_filter_version","status","error","output_path"]
     for result in results:
         n=result["input_sequences"]; mapped=int(result["mapped_rows"]); productive=int(result["productive_rows"]); filtered=int(result["output_rows"])

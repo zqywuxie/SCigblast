@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pig IgBLAST: filter and merge results inside each sample only."""
+"""Pig IgBLAST: filter and publish each sample/chain result independently."""
 from __future__ import annotations
 import csv, hashlib, os, re, shutil, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
@@ -131,29 +131,13 @@ def main():
     DEPENDENCIES=dependency_snapshot(mode="pig",db_root=DB_ROOT,binary=BIN,species="pig",
         database_version=VERSION,threads=THREADS,chains=[job[2] for job in jobs],
         implementation=HERE/"05.work_igblastn.py",inherited=os.environ.get("SCIGBLAST_IGBLAST_DEPENDENCIES",""))
-    # Remove legacy raw/aggregate products from earlier versions.  This stage
-    # publishes only sample-local filtered TCR.tsv/BCR.tsv files.
+    # Remove legacy raw/aggregate products from earlier versions. This stage
+    # publishes only sample-local filtered <CHAIN>.tsv files.
     shutil.rmtree(OUTPUT / "raw", ignore_errors=True)
     for legacy in OUTPUT.glob("all_samples_*.tsv"): legacy.unlink(missing_ok=True)
     with ThreadPoolExecutor(max_workers=MAX_JOBS) as executor:
         for idx, (_, result) in enumerate(bounded_completed(executor, task, jobs, MAX_JOBS*2), 1):
             results.append(result); print(f"[PIG][igblast] {result['status'].lower()} {idx}/{len(jobs)} {result['sample_id']}/{result['pair_id']}/{result['chain']}", flush=True)
-    grouped={}
-    for result in results:
-        if result["status"] != "OK" or not result.get("path"): continue
-        cell="TCR" if result["chain"] in TCR else "BCR"
-        grouped.setdefault((result["relative"], cell), []).append(result["path"])
-    for (relative, cell), paths in grouped.items():
-        dest=OUTPUT / relative / f"{cell}.tsv"; dest.parent.mkdir(parents=True, exist_ok=True)
-        temp=dest.with_suffix(dest.suffix+".tmp")
-        with temp.open("w", encoding="utf-8") as out:
-            first=True
-            for path in sorted(paths, key=lambda p: p.name):
-                with path.open(encoding="utf-8", errors="replace") as src:
-                    for line_no, line in enumerate(src):
-                        if first or line_no > 0: out.write(line)
-                first=False
-        os.replace(temp,dest)
     fields=["sample_id","pair_id","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","locus_input_rows","excluded_locus_rows","unknown_locus_rows","locus_filter_version","status","error","output_path"]
     summary_temp=SUMMARY.with_suffix(SUMMARY.suffix+".tmp")
     with summary_temp.open("w", encoding="utf-8", newline="") as fh:
