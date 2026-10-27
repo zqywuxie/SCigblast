@@ -48,6 +48,8 @@ IR/10X stage7 后处理仅在本次进程内复用同一 FASTA 的计数，按�
 
 ## Treemap 派生结果
 
+合图仅在同一样本至少有两条不同链的可用单链图片时生成；只选一条链，或其他链为空/失败后仅剩一张图时跳过合图，但仍保存该样本合图阶段完成标记，继续发布 Clone Top 和统计文件。规则同时适用于 v1/v2 运行，计数、单链图、合图比例和文件命名保持原约定。手动生成去重键包含 `COMPOSITION_VERSION`，便于重新生成时使用新规则；自动意图键不变，不自动重跑或删除已完成历史图片。
+
 用户提供的 `treemap_g.py` QR 核心移植到 `analysis/treemap/`，仅按 `productive == T` 且 CDR3 非空的最终记录数聚合完整 V/J/CDR3，不读取 copy/UMI 权重。CDR3 优先 junction_aa，否则 cdr3_aa；保留原始字符串、配色、排序、3000×3000/300 DPI 和固定比例合图。合图链区面积不代表链间丰度。`sources.py` 用各流程最终摘要与真实 output_path 识别来源，不重复统计聚合文件；10X 合并文件以 locus 拆链，IR 使用 preprocessing 的 junction_peps。
 
 新增 `clone_top.csv`（kind=clone_top）：按样本链内 record_count 降序排名，V/J/CDR3 文本打破并列，保留全部克隆。frequency_percent/cumulative_frequency_percent 以本样本本链有效记录数为分母，不能改成跨链或 UMI 口径。`clone_table.py` 写 UTF-8 BOM CSV，复用绘图聚合结果，先原子发布每链 `.clone_tables/<entry_id>.csv`，由 item.clone_table 保存内部版本；该字段不能回传详情 API。合图完成后独立 clone_merge 子进程流式汇总，不在 Web 的 PROCESS_LOCK 内读取大表。CSV 总表进入 manifest、单文件下载与全量 ZIP，样本 ZIP 仍仅含该样本图片；空数据仅表头，失败链排除且原因保留在摘要。重试重新合并总表，成功中间表正常复用，缺失/变更时仅重处理对应链。新手动运行的去重键包含 clone_table_version；自动意图键及 PNG 版本保持不变，重启不能为已完成旧任务自动补算；旧记录无该格式标识时保持原行为，可手动重新生成以获得表格。Docker 打包检查须包含 clone_table.py。
@@ -56,7 +58,11 @@ IR/10X stage7 后处理仅在本次进程内复用同一 FASTA 的计数，按�
 
 独立入口 `/treemap` 可选有权限的成功任务或受控服务器目录，`/api/treemap/scan` 返回绑定用户和有效期的快照，提交 selected_ids；跨页/搜索只影响显示。纯目录表格必须有明确样本链身份，原始 FASTQ/FASTA/官方未注释 CSV 不适用。手填平台任务路径仍检查任务归属。关联运行归属于来源任务所有者，独立运行归属于提交者。产物按 run/attempt 独立保存，PNG/manifest 原子发布；下载用产物 ID 并核验所有权、版本、真实路径和符号链接。历史列表只读进度摘要，详情才载入产物，不在每次列表轮询扫描所有图。
 
-Web 入口包含新建任务开关、任务输出页共用预览组件及独立工作台（treemap-view.js/treemap.js/treemap.css）；适用于五流程最终 mapping 结果及兼容 AIRR 目录，不限制为 Pig。默认不加载图片，选择样本和链/合图后点击查看才加载单张图；轮询保留选择与预览。新输出与 ZIP 使用 `individual_treemaps/<安全样本标识>/`、`multi_chain_treemaps/<安全样本标识>/`；历史文件不迁移，ZIP 按 manifest 的 kind/sample_key 整理路径。支持全部结果/当前样本流式 ZIP，权限、版本及路径检查必须全部通过，不静默遗漏文件；全量含根目录统计 CSV，样本 ZIP 仅含该样本图片。旧任务未设置不会自动补生成。关联任务图随任务归档，纯目录绘图不自动进入旧归档脚本。Docker 白名单打包 analysis/treemap 与 postanalysis.py，环境显式依赖 Pillow。聚合/像素保真测试、五流程来源测试和 API/生命周期测试位于 analysis/treemap/tests/test_core.py、tests/test_sources.py、web/tests/test_treemap.py。
+Web 入口包含新建任务开关、任务输出页共用预览组件及独立工作台（treemap-view.js/treemap.js/treemap.css）；适用于五流程最终 mapping 结果及兼容 AIRR 目录，不限制为 Pig。默认不加载图片；选择样本或链/合图类型后直接展示，两项可组合筛选，无需确认。共用组件按筛选结果分页，每页最多 7 张，仅为当前页创建 img，采用懒加载；“查看全部”清除筛选并仅展示第一页。轮询保留筛选、页码与未变化的图片节点，所选样本/链暂时缺图时保留条件，不能悄悄切回全部；切换生成记录重置视图。新输出与 ZIP 使用 `individual_treemaps/<安全样本标识>/`、`multi_chain_treemaps/<安全样本标识>/`；历史文件不迁移，ZIP 按 manifest 的 kind/sample_key 整理路径。支持全部结果/当前样本流式 ZIP，权限、版本及路径检查必须全部通过，不静默遗漏文件；全量含根目录统计 CSV，样本 ZIP 仅含该样本图片。旧任务未设置不会自动补生成。关联任务图随任务归档，纯目录绘图不自动进入旧归档脚本。Docker 白名单打包 analysis/treemap 与 postanalysis.py，环境显式依赖 Pillow。聚合/像素保真测试、五流程来源测试和 API/生命周期测试位于 analysis/treemap/tests/test_core.py、tests/test_sources.py、web/tests/test_treemap.py。
+
+任务详情的树图组件采用 `mount(..., {embedded:true, metaTarget, actionsTarget})`：共用筛选与分页图库，名称不在正文重复显示，状态/处理数量/创建时间与取消或重试按钮合并到任务树图标题栏。只有生成中显示进度条，完成后数量显示在状态旁；计数口径折叠为“计数说明”。当前已有生成记录时不再显示无效的“生成树图”按钮，失败/空结果等通过该记录的重试操作处理；多条记录才显示折叠的“其他生成记录”，入口链接到工作台。轮询保留折叠状态、筛选与图片节点。
+
+Treemap 新输出统一为关联任务的 `<任务输出>/treemap/YYYYMMDD_HHMMSS/` 或纯目录模式的 `<默认输出根>/<用户>/treemap/YYYYMMDD_HHMMSS/`。自动与手动生成共用 `allocate_output()`，在 SQLite 写事务内检查 indexed output_root 与磁盘占用，同秒冲突增加 `_02`、`_03`；时间采用北京时间。记录 ID/attempt 仍在数据库，不能以新约定推算历史记录路径，也不能自动迁移旧目录。下载与重试继续使用记录中的 output_root。
 
 ## Mapping 当前状态
 

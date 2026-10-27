@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -27,6 +28,7 @@ from process_identity import group_state, signal_group
 
 LOG = logging.getLogger(__name__)
 VERSION = 'qr-records-v1'
+COMPOSITION_VERSION = 'multi-chain-only-v1'
 ACTIVE_SQL = "(status IN ('queued','running','cancelling') OR pid IS NOT NULL)"
 CHAINS = ('TRA', 'TRB', 'TRD', 'TRG', 'IGH', 'IGK', 'IGL')
 
@@ -54,6 +56,7 @@ def init_schema(connection):
         );
         CREATE INDEX IF NOT EXISTS idx_derived_due ON derived_runs(status,created_at);
         CREATE INDEX IF NOT EXISTS idx_derived_parent ON derived_runs(parent_job_id,attempt_no);
+        CREATE INDEX IF NOT EXISTS idx_derived_output ON derived_runs(output_root);
     ''')
     columns = {row[1] for row in connection.execute('PRAGMA table_info(derived_runs)')}
     for name in ('done', 'total'):
@@ -64,6 +67,20 @@ def init_schema(connection):
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def allocate_output(connection, base, created_at):
+    """Reserve a readable run folder while the caller holds its write transaction."""
+    created = datetime.fromisoformat(created_at)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    stamp = created.astimezone(timezone(timedelta(hours=8))).strftime('%Y%m%d_%H%M%S')
+    candidate, number = Path(base) / stamp, 1
+    while candidate.exists() or candidate.is_symlink() or connection.execute(
+            'SELECT 1 FROM derived_runs WHERE output_root=? LIMIT 1', (str(candidate),)).fetchone():
+        number += 1
+        candidate = Path(base) / f'{stamp}_{number:02d}'
+    return candidate
 
 
 def image_relative(sample_key, sample_label, kind, chain=''):
@@ -144,7 +161,7 @@ def enqueue_auto(connection, job_id, now):
     if not row or row['status'] != 'SUCCEEDED' or not json.loads(row['options_json']).get('generate_treemap'):
         return
     run_id = uuid.uuid4().hex
-    folder = Path(row['output_root']) / 'analysis' / 'treemap' / f"attempt-{row['attempt_no']}" / f'run-{run_id}'
+    folder = allocate_output(connection, Path(row['output_root']) / 'treemap', now)
     data = dict(pending_discovery=True, items=[], files=[], input_root=row['output_root'], metric='records',
                 clone_table_version=clone_table_version())
     inserted = connection.execute('INSERT OR IGNORE INTO derived_runs '
@@ -311,13 +328,11 @@ class Service:
             if parent['attempt_no'] != data['attempt_no']:
                 raise HTTPException(409, '来源任务已重新执行，请重新扫描')
         run_id = uuid.uuid4().hex
-        key = digest(dict(version=VERSION, clone_table_version=clone_table_version(),
+        key = digest(dict(version=VERSION, clone_table_version=clone_table_version(), composition_version=COMPOSITION_VERSION,
                           parent=data['parent_job_id'], attempt=data['attempt_no'],
                           input_root=data['input_root'], items=items))
-        if parent is not None:
-            output = Path(parent['output_root']) / 'analysis' / 'treemap' / f"attempt-{parent['attempt_no']}" / f'run-{run_id}'
-        else:
-            output = self.app.default_job_output(user, 'treemap') / f'run-{run_id}'
+        output_base = Path(parent['output_root']) / 'treemap' if parent is not None else self.app.default_job_output(user, 'treemap').parent
+        created_at = self.app.now()
         name = body.name.strip() or (parent['dataset'] if parent is not None else Path(data['input_root']).name)
         owner_id = parent['owner_id'] if parent is not None else user['id']
         payload = dict(items=[dict(item, status='queued') for item in items], files=[], input_root=data['input_root'], metric='records',
@@ -328,10 +343,11 @@ class Service:
                 current = connection.execute('SELECT status,attempt_no FROM jobs WHERE id=?', (parent['id'],)).fetchone()
                 if not current or current['status'] != 'SUCCEEDED' or current['attempt_no'] != data['attempt_no']:
                     raise HTTPException(409, '来源任务已变化，请重新扫描')
+            output = allocate_output(connection, output_base, created_at)
             inserted = connection.execute('INSERT OR IGNORE INTO derived_runs '
                                '(id,owner_id,parent_job_id,attempt_no,name,source_type,dedupe_key,output_root,data_json,created_at,total) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                (run_id, owner_id, data['parent_job_id'], data['attempt_no'], name,
-                                'job' if parent is not None else 'directory', key, str(output), json.dumps(payload, ensure_ascii=False), self.app.now(), len(items)))
+                                'job' if parent is not None else 'directory', key, str(output), json.dumps(payload, ensure_ascii=False), created_at, len(items)))
             if inserted.rowcount:
                 derived_store.replace(connection, run_id, payload)
             existing = connection.execute('SELECT id FROM derived_runs WHERE owner_id=? AND dedupe_key=?', (owner_id, key)).fetchone()
@@ -772,7 +788,10 @@ class Service:
                         if version(path)!=artifact['version']:
                             raise ValueError('合图来源图片已变化，请重试生成')
                 images = {f['chain']:str(Path(row['output_root'])/f['relative_path']) for f in data['files'] if f['kind']=='chain' and f['sample_key']==sample}
-                if images:
+                # A single chain already has its own image; composing it again
+                # only duplicates the output. Count usable chains per sample,
+                # including cases where other selected chains failed or were empty.
+                if len(images) > 1:
                     label = next(i['sample_label'] for i in data['items'] if i['sample_key']==sample)
                     target = Path(row['output_root']) / image_relative(sample, label, 'combined')
                     result = self.work_unit(row, dict(kind='combined',images=images,target=str(target)))

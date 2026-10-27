@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>克隆树图 · SCigblast</title><link rel="stylesheet" href="/static/style.css?v={{ asset_version }}"><link rel="stylesheet" href="/static/treemap.css?v={{ asset_version }}">{% include 'appearance_head.html' %}</head>
 <body><main class="app-shell treemap-shell">
   <header class="topbar"><a class="brand" href="/"><span class="brand-mark"><i></i><i></i><i></i></span><span>SCIGBLAST</span></a>{% include 'user_nav.html' %}</header>
-  <section class="page-head"><div><p class="eyebrow">REPERTOIRE / TREEMAP</p><h1>克隆树图</h1><p class="page-subtitle">从已完成的分析结果生成单链树图与样本合图。</p></div><a class="button button-ghost" href="/">返回任务控制台</a></section>
+  <section class="page-head"><div><p class="eyebrow">REPERTOIRE / TREEMAP</p><h1>克隆树图</h1><p class="page-subtitle">从已完成的分析结果生成单链树图，同一样本有两条及以上链出图时生成合图。</p></div><a class="button button-ghost" href="/">返回任务控制台</a></section>
   <div class="tm-method"><span class="tm-method-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><p><strong>按有效记录数展示克隆组成</strong><span>相同 V、J 与 CDR3 氨基酸序列归为一个克隆。单链内方块面积表示记录占比；合图的链区大小采用固定排版，不代表链间丰度。</span></p></div>
   <p id="tm-message" class="tm-message" role="status" aria-live="polite"></p>
   <div class="tm-workspace">

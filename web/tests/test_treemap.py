@@ -119,7 +119,8 @@ class TreemapTests(unittest.TestCase):
     def test_real_subprocess_selected_only_counts_records_and_preserves_inputs(self):
         source = self.airr()
         omitted = self.airr(sample='B', chain='TRB')
-        before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (source, omitted)}
+        omitted_chain = self.airr(chain='IGK')
+        before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (source, omitted, omitted_chain)}
         scan = self.scan()
         selected = [r['id'] for r in scan['rows'] if r['chain'] == 'IGH']
         run = self.create_run(scan, selected)
@@ -128,10 +129,11 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(result['status'], 'succeeded', result)
         self.assertEqual(len(result['items']), 1)
         self.assertEqual((result['items'][0]['productive_count'], result['items'][0]['clone_count']), (3, 2))
-        self.assertCountEqual([f['kind'] for f in result['files']], ['chain', 'combined', 'clone_top', 'stats'])
+        self.assertCountEqual([f['kind'] for f in result['files']], ['chain', 'clone_top', 'stats'])
         self.assertNotIn('clone_table',result['items'][0])
         with web.db() as connection:
             stored = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
+        self.assertFalse((Path(stored['output_root']) / 'multi_chain_treemaps').exists())
         for artifact in self.service.data(stored)['files']:
             if artifact['kind'] in {'chain', 'combined'}:
                 expected = 'individual_treemaps' if artifact['kind'] == 'chain' else 'multi_chain_treemaps'
@@ -166,7 +168,99 @@ class TreemapTests(unittest.TestCase):
         self.assertEqual(summary['progress'], {'done': 1, 'total': 1})
         self.assertEqual((summary['items'], summary['files']), ([], []))
 
-    def zip_run(self, *, parent=False):
+    def test_single_chain_v1_run_finishes_without_composition(self):
+        self.airr()
+        run = self.create_run()
+        with web.db() as connection:
+            row = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
+            data = derived_store.load(connection, row)
+            connection.execute('UPDATE derived_runs SET storage_version=1,data_json=? WHERE id=?', (json.dumps(data), run['id']))
+            derived_store.delete(connection, [run['id']])
+        with patch.object(self.service, 'work_unit', wraps=self.service.work_unit) as worker:
+            result = self.deliver(run['id'])
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertNotIn('combined', [call.args[1]['kind'] for call in worker.call_args_list])
+        self.assertCountEqual([file['kind'] for file in result['files']], ['chain', 'clone_top', 'stats'])
+        with web.db() as connection:
+            self.assertEqual(connection.execute('SELECT storage_version FROM derived_runs WHERE id=?', (run['id'],)).fetchone()[0], 1)
+
+    def test_empty_second_chain_does_not_create_single_image_composite(self):
+        self.airr(chain='IGH')
+        self.airr(chain='IGK', empty=True)
+        run = self.create_run()
+        with patch.object(self.service, 'work_unit', wraps=self.service.work_unit) as worker:
+            result = self.deliver(run['id'])
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual({item['chain']: item['status'] for item in result['items']}, {'IGH': 'succeeded', 'IGK': 'empty'})
+        self.assertNotIn('combined', [call.args[1]['kind'] for call in worker.call_args_list])
+        self.assertCountEqual([file['kind'] for file in result['files']], ['chain', 'clone_top', 'stats'])
+
+    def test_manual_generation_does_not_reuse_old_composition_policy(self):
+        self.airr()
+        scan = self.scan()
+        legacy = self.create_run(scan)
+        with web.db() as connection:
+            snapshot = json.loads(connection.execute('SELECT data_json FROM treemap_scans WHERE id=?', (scan['id'],)).fetchone()[0])
+            old_key = postanalysis.digest(dict(version=postanalysis.VERSION, clone_table_version=postanalysis.clone_table_version(),
+                                              parent=snapshot['parent_job_id'], attempt=snapshot['attempt_no'],
+                                              input_root=snapshot['input_root'], items=snapshot['items']))
+            connection.execute("UPDATE derived_runs SET dedupe_key=?,status='succeeded' WHERE id=?", (old_key, legacy['id']))
+        current = self.create_run(scan)
+        self.assertNotEqual(current['id'], legacy['id'])
+        self.assertEqual(self.create_run(scan)['id'], current['id'])
+        self.assertEqual(self.run_info(legacy['id'])['status'], 'succeeded')
+
+    def test_run_folders_use_beijing_time_and_avoid_database_and_disk_collisions(self):
+        self.airr(chain='IGH'); self.airr(chain='IGK')
+        for associated in (False, True):
+            with self.subTest(associated=associated):
+                if associated:
+                    job_id = self.job()
+                    source = self.job_results(job_id)
+                    other = self.airr(source.parent, chain='IGK')
+                    with (source.parent.parent/'chain_summary.csv').open('a',encoding='utf-8',newline='') as handle:
+                        csv.writer(handle).writerow(['A','IGK','OK',str(other)])
+                    web.update_job(job_id,status='SUCCEEDED')
+                    scan = self.scan(job_id=job_id)
+                else:
+                    scan = self.scan()
+                selected = {item['chain']:item['id'] for item in scan['rows'] if item['valid']}
+                with patch.object(web,'now',return_value='2026-10-26T08:00:00+00:00'):
+                    first = self.create_run(scan,[selected['IGH']])
+                    self.assertEqual(self.create_run(scan,[selected['IGH']])['id'],first['id'])
+                    second = self.create_run(scan,[selected['IGK']])
+                    with web.db() as connection:
+                        roots = {item['id']:Path(item['output_root']) for item in connection.execute('SELECT id,output_root FROM derived_runs')}
+                    base = roots[first['id']].parent
+                    (base/'20261026_160000_03').mkdir(parents=True)
+                    third = self.create_run(scan,list(selected.values()))
+                with web.db() as connection:
+                    third_root = Path(connection.execute('SELECT output_root FROM derived_runs WHERE id=?',(third['id'],)).fetchone()[0])
+                self.assertEqual(roots[first['id']].name,'20261026_160000')
+                self.assertEqual(roots[second['id']],base/'20261026_160000_02')
+                self.assertEqual(third_root,base/'20261026_160000_04')
+                self.assertEqual(base.name,'treemap')
+                if associated:
+                    self.assertEqual(base,Path(web.get_job_row(job_id)['output_root'])/'treemap')
+                else:
+                    self.assertEqual(base.parent.parent,self.out)
+
+    def test_auto_attempts_use_separate_flat_output_folders(self):
+        job_id = self.job(enabled=True)
+        with patch.object(web,'now',return_value='2026-10-26T08:00:00+00:00'):
+            web.update_job(job_id,status='SUCCEEDED',attempt_no=1)
+            web.update_job(job_id,status='FAILED')
+            web.update_job(job_id,status='SUCCEEDED',attempt_no=2)
+            web.update_job(job_id,status='SUCCEEDED')
+        with web.db() as connection:
+            rows = connection.execute('SELECT * FROM derived_runs WHERE parent_job_id=? ORDER BY attempt_no',(job_id,)).fetchall()
+        self.assertEqual(len(rows),2)
+        base = Path(web.get_job_row(job_id)['output_root'])/'treemap'
+        self.assertEqual(Path(rows[0]['output_root']),base/'20261026_160000')
+        self.assertEqual(Path(rows[1]['output_root']),base/'20261026_160000_02')
+        self.assertEqual([row['attempt_no'] for row in rows],[1,2])
+
+    def zip_run(self, *, parent=False, legacy_layout=False):
         if parent:
             job_id = self.job()
             self.job_results(job_id)
@@ -174,8 +268,13 @@ class TreemapTests(unittest.TestCase):
             run = self.create_run(self.scan(job_id=job_id))
         else:
             self.airr(self.raw / 'one', sample='Same', chain='IGH')
+            self.airr(self.raw / 'one', sample='Same', chain='IGK')
             self.airr(self.raw / 'two', sample='Same', chain='TRB')
             run = self.create_run()
+        if legacy_layout:
+            old_root = Path(web.get_job_row(job_id)['output_root'])/'analysis'/'treemap'/'attempt-0'/f"run-{run['id']}"
+            with web.db() as connection:
+                connection.execute('UPDATE derived_runs SET output_root=? WHERE id=?',(str(old_root),run['id']))
         def small_png(row, request):
             if request['kind']=='clone_merge':
                 from analysis.treemap.clone_table import merge_clone_tables
@@ -196,6 +295,19 @@ class TreemapTests(unittest.TestCase):
         with web.db() as connection:
             row = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
         return result, row, self.service.data(row)
+
+    def test_legacy_run_folder_download_and_retry_stay_at_recorded_location(self):
+        result,row,_ = self.zip_run(parent=True,legacy_layout=True)
+        original = row['output_root']
+        self.assertEqual(Path(original).parts[-4:],('analysis','treemap','attempt-0',f"run-{row['id']}"))
+        self.assertEqual(self.client.get(next(file['url'] for file in result['files'] if file['kind']=='chain')).status_code,200)
+        self.assertEqual(self.client.get(f"/api/treemap/runs/{row['id']}/download").status_code,200)
+        with web.db() as connection:
+            connection.execute("UPDATE derived_runs SET status='partial' WHERE id=?",(row['id'],))
+        self.assertEqual(self.client.post(f"/api/treemap/runs/{row['id']}/retry",json={}).status_code,200)
+        self.assertEqual(self.deliver(row['id'])['status'],'succeeded')
+        with web.db() as connection:
+            self.assertEqual(connection.execute('SELECT output_root FROM derived_runs WHERE id=?',(row['id'],)).fetchone()[0],original)
 
     def test_zip_all_and_sample_keep_image_bytes_and_collision_safe_directories(self):
         result, row, data = self.zip_run()
@@ -220,11 +332,17 @@ class TreemapTests(unittest.TestCase):
                     label = next(i['sample_label'] for i in data['items'] if i['sample_key'] == artifact['sample_key'])
                     name = postanalysis.image_relative(artifact['sample_key'], label, artifact['kind'], artifact['chain']).as_posix()
                 self.assertEqual(archive.read(name), (Path(row['output_root']) / artifact['relative_path']).read_bytes())
-        sample = result['items'][0]['sample_key']
+        sample = next(item['sample_key'] for item in result['items'] if item['chain'] == 'IGH')
         selected = self.client.get(endpoint, params={'sample_key': sample})
         with zipfile.ZipFile(io.BytesIO(selected.content)) as archive:
-            self.assertEqual(len(archive.namelist()), 2)
+            self.assertEqual(len(archive.namelist()), 3)
             self.assertTrue(all(name.endswith('.png') for name in archive.namelist()))
+        single_sample = next(item['sample_key'] for item in result['items'] if item['chain'] == 'TRB')
+        single = self.client.get(endpoint, params={'sample_key': single_sample})
+        with zipfile.ZipFile(io.BytesIO(single.content)) as archive:
+            self.assertEqual(len(archive.namelist()), 1)
+            self.assertTrue(archive.namelist()[0].startswith('individual_treemaps/'))
+        self.assertEqual(len([file for file in result['files'] if file['kind'] == 'combined']), 1)
         self.assertEqual(self.client.get(endpoint, params={'sample_key': '../unknown'}).status_code, 404)
         self.assertEqual(self.other_client().get(endpoint).status_code, 404)
         self.assertEqual(list(Path(row['output_root']).rglob('*.zip')), [])
@@ -516,7 +634,7 @@ class TreemapTests(unittest.TestCase):
         with patch.object(self.service, 'work_unit', side_effect=fail_one):
             partial = self.deliver(run['id'])
         self.assertEqual(partial['status'], 'partial', partial)
-        self.assertEqual(composites, [{'TRB'}])
+        self.assertEqual(composites, [])
         partial_table=next(file for file in partial['files'] if file['kind']=='clone_top')
         partial_rows=list(csv.DictReader(io.StringIO(self.client.get(partial_table['url']).content.decode('utf-8-sig'))))
         self.assertEqual({row['chain'] for row in partial_rows},{'TRB'})
