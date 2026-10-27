@@ -75,6 +75,14 @@ docker compose exec scigblast-web python /app/check_runtime.py
 
 环境安装方式参考 [micromamba 官方 Docker 指南](https://micromamba-docker.readthedocs.io/en/latest/quick_start.html)。工具/库版本固定不等于与旧宿主机环境结果逐字一致；首次迁移应使用已有小数据对照验收。
 
+若构建在 `libltdl7` 下载时出现 `Could not connect to deb.debian.org:80`，这是 Debian 源连接超时。该后置安装步骤默认改用清华 HTTPS 镜像，并配置 3 次重试和 30 秒连接/读超时；原 Conda、pip 安装步骤及其之前的指令保留，以便继续复用成功缓存。不要使用 `--no-cache` 重试。镜像地址是 `SCIGBLAST_APT_MIRROR` 构建参数（不是运行时环境变量），从仓库根目录可使用其他镜像，例如：
+
+```bash
+rtk proxy docker compose --progress plain --env-file web/.env --project-directory web -f web/docker-compose.yml build --build-arg SCIGBLAST_APT_MIRROR=https://mirrors.ustc.edu.cn scigblast-web
+```
+
+该命令仅构建镜像，不替换运行中的容器；构建通过后再使用正常部署流程。此配置只改变 Conda/pip 之后的 APT 步骤，以保留其缓存；全新构建前置系统依赖步骤仍使用基础镜像的源。
+
 > 如果服务器的 8000 端口已被占用，可在 `.env` 中设置 `SCIGBLAST_WEB_PORT=8080`，此时访问 `http://服务器地址:8080`。
 
 页面首页是全宽任务控制台：可以按状态、Pipeline 和关键词筛选任务；“新建任务”以居中弹窗打开，先选择 Pipeline，再填写路径。输入目录、Submission、Barcode CSV 和输出目录都可以手动填写，也可以点击“浏览”通过服务器文件树选择（仅显示 `SCIGBLAST_ALLOWED_*_ROOTS` 下的内容）。详情页提供运行概览、Match 审核、实时日志、输出文件、参数记录和 IgBLAST 统计。日志按字节增量读取，支持暂停刷新、自动滚动和复制。

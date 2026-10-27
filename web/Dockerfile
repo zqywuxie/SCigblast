@@ -20,8 +20,15 @@ COPY web/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 # PANDAseq requires the libltdl.so.7 runtime library.
 # Keep this after environment installation to reuse the expensive Conda layer.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libltdl7 \
+ARG SCIGBLAST_APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
+RUN set -eu; \
+    for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+        if [ -f "$source" ]; then \
+            sed -i -E "s|https?://deb.debian.org/debian|${SCIGBLAST_APT_MIRROR}/debian|g; s|https?://security.debian.org/debian-security|${SCIGBLAST_APT_MIRROR}/debian-security|g" "$source"; \
+        fi; \
+    done; \
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends libltdl7 \
     && rm -rf /var/lib/apt/lists/*
 COPY web/check_runtime.py /app/check_runtime.py
 RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
