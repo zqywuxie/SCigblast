@@ -132,18 +132,17 @@ Pig 会在链专属 C 区数据库存在时传入 `-c_region_db`，让 IgBLAST �
 
 同日已将该猪库 V/J 的 344 条参考 ID 去掉开头 `2026pig`，例如 `2026pigIGHV1-10*01` → `IGHV1-10*01`，版本为 `pig-vj-canonical-20261027_115846`。核苷酸序列与 D/C 标识保留；现存 V/J 索引重建，`pig.aux` 添加规范 J ID 别名且兼容旧库，内部 V 注释保留并经对照验证。完整备份（包括刚补入的 C 库、内部注释及 aux）位于 remote_nanhua 的 `/colddata/zqy/igblast/backups/pig_chain_before_vj_rename_20261027_115658/`，`SHA256.json` 校验全部 316 个原文件。现用库路径不变，详情与验证记录在库内 `.reference_sources/pig-vj-canonical-20261027_115846/`；新 mapping 使用规范名称，已有结果不会自动改名。恢复数据库时须同时恢复配套 aux，并持有平台门锁的独占锁，避免与分析进程并行替换参考。
 
-必须使用单 Web 实例、单 Uvicorn worker。第三条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，两条任务共用，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前获取共享门锁及两个槽位之一的独占 `flock`，Web 与终端直接启动的任务合计最多执行两条。Treemap 持有门锁的独占模式，保持与主分析互斥。默认门锁为 `/colddata/SCigblast/results/.scigblast-resource.lock`，槽位文件为同路径加 `.slot-1` / `.slot-2`；文件不能在任务运行时删除。锁和槽位必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。
+必须使用单 Web 实例、单 Uvicorn worker。第三条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，两条任务共用，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前获取共享门锁及两个槽位之一的独占 `flock`，Web 与终端直接启动的任务合计最多执行两条。Treemap 持有门锁的独占模式，保持与主分析互斥。默认门锁为 `/colddata/SCigblast/results/.scigblast-resource.lock`，槽位文件为同路径加 `.slot-1` / `.slot-2`；文件不能在任务运行时删除。锁和槽位必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。IgBLAST 链任务的默认及硬上限为每条 pipeline 4 个，五条正式流程均限制；更高配置或 --parallel 值不能突破 4，CPU/内存不足时仍按原资源预算限制执行。这里的 4 是进程任务数，各进程线程数仍由 SCIGBLAST_IGBLAST_THREADS 设置。
 
 `.env.example` 中 `SCIGBLAST_ALLOWED_*_ROOTS` 是容器内路径，并且必须已被 Compose 挂载；Linux 多根用冒号分隔。设置允许根不会自动增加挂载。路径验证不等于数据库/工具真实运行成功；部署后仍需各类型小数据验收，特别是 cgroup 内存限制。`deploy.sh` 检测到运行/排队任务会拒绝重建；更新期间不要提交新任务。
 
 ### 验证
 
 ```bash
-python -m pip install -r web/requirements.txt httpx
-python -m unittest discover -s web/tests -v
+rtk proxy docker compose --env-file web/.env --project-directory web -f web/docker-compose.yml build scigblast-web
 ```
 
-测试使用临时 XLSX/清单和模拟进程，不执行分析工具。`web/tests/serve_fixture.py` 是本地浏览器测试入口（127.0.0.1:8001），禁用于正式部署。真实 Linux 工具链及两任务峰值内存需在服务器另行验收。
+按维护要求已移除项目测试代码。构建时仍执行正式运行所需的 `check_runtime.py`（依赖导入、分析工具与合成序列组装）和 `check_bundle.py`（打包完整性）检查。后续额外验证放在独立临时目录，结束后清理临时脚本、日志和缓存；正式任务、IgBLAST 和部署日志保留。真实 Linux 工具链及两任务峰值内存仍需按实际输入验收。
 
 ## 邮件提醒与 QQ 发件邮箱
 
@@ -183,11 +182,13 @@ QQ 参数可参考[腾讯官方 SMTP 配置表](https://intl.cloud.tencent.com/z
 
 绘图复用 `treemap_g.py` 的 QR 样式：只统计 `productive == T` 且 CDR3 非空的最终记录，按完整 V/J/CDR3 聚合，每条记录计 1，**不按 copy/umi_count/umi_counts 加权**。块面积表示链内记录占比；多链图的链区采用固定比例排版，面积不表示链间丰度。无有效记录、缺字段、来源文件缺失和绘图失败分别展示。首版不提供俄罗斯方块或 V/J 环形图。
 
-Base/Pig 的主流程新增 `06.locus_split`：读取 `05.igblastn_out` 摘要中的真实单链 task TSV，按每个样本在 Match 中选择的 Chain 核对行内 `locus`，只保留目标链，其他链及空/未知 locus 排除。原 05 文件保留，拆分文件位于 `06.locus_split/<数据集>/<样本>/<链>.tsv`（重名样本自动区分），全部 AIRR 列保持；零结果仅表头。`locus_split_summary.csv` 记录 input_rows、output_rows、excluded_locus_rows 和 unknown_locus_rows（未知为排除数量的子集）。缺少 locus 或输入缺失/变化会导致该阶段失败。逐行流式读取，按输入及输出版本逐文件续跑；仅缺失或变化的结果重新拆分。两条 runner 都必须完成拆分阶段才能完成主任务；任务详情和流程介绍显示第 6 阶段。
+Base/Pig 主流程为五阶段，链筛选已合并进 `05.igblastn_out`。每个“样本 × Chain”任务选用该链参考库比对，一结束就在同一 worker 内单次流式处理原始 AIRR，同时保留 V 命中、productive 且 `locus` 与该任务配置链一致的记录；不等待其他链完成后统一筛选。最终 `<CHAIN>.tsv` 原子发布到 05 的既有样本目录，保留全部 AIRR 列（包括 c_call），筛选后才写逐链完成标记，零结果仅表头。raw 中间文件成功后清理，IgBLAST 日志保留；各链全部完成后只发布总摘要与兼容的 TCR.tsv/BCR.tsv，不再执行独立第六阶段。
 
-Treemap 和 Clone Top 使用 06 拆分结果，并按 `locus` 再核对目标链，新任务缺少拆分结果时不回退到 05。目录扫描不会同时统计同一数据集的 05 与 06。旧五阶段任务没有 06 时仍可读取历史 05 结果，旧图不自动重算；续跑旧任务会新增第 6 阶段，再创建树图生成记录即可使用拆分数据。reMapping 仍使用 `03.umi_count`，IR 使用 `08.preprocessing/junction_peps`，10X 使用 `08.cluster`。普通独立来源在聚合前核对 `chain`，无此列时使用 `locus`；字段为空、未知或属于其他链的记录不计入目标链，两个字段都没有的明确单链文件才沿用文件身份。已有绘图运行保留原统计策略，避免续跑时混用新旧结果。
+`chain_summary.csv` / `igblast_summary.tsv` 增加 locus_input_rows（V/productive 通过数）、excluded_locus_rows（其中其他链或未知 locus 的数量）、unknown_locus_rows（排除的子集）及 locus_filter_version。output_rows 是最终目标链保留数。缺少 locus 或格式错误使该链失败且不写 DONE；已有成功链保留供续跑。筛选版本纳入任务/阶段指纹，旧筛选缓存会失效，升级后明确续跑可能重新执行 mapping。
 
-已有 05 结果也可单独执行拆分，不重新比对：在项目根目录运行 `python pipeline_locus_split.py --summary <任务输出>/05.igblastn_out/<数据集>/chain_summary.csv --manifest <任务输出>/01.match/<数据集>/sample_manifest.csv --output <任务输出>/06.locus_split/<数据集>`。`--check` 只核验完成状态，`--force` 强制重新拆分。命令不会修改 Web 任务状态；拆分成功后可从树图工作台重新扫描生成。
+Treemap 和 Clone Top 新任务直接使用 05 摘要指向的已筛选单链结果，并明确按 `locus` 核对；未完成新筛选的旧 05 结果不能冒充最终结果。目录扫描优先新 05 摘要，忽略同数据集残留的旧 06，避免重复计数。旧六阶段任务仍可查看其 06 结果及阶段信息，旧图不自动重算；明确续跑才转为新五阶段。reMapping 仍使用 `03.umi_count`，IR 使用 `08.preprocessing/junction_peps`，10X 使用 `08.cluster`。普通独立来源在聚合前核对 `chain`，无此列时使用 `locus`；字段为空、未知或属于其他链的记录不计入目标链，两个字段都没有的明确单链文件才沿用文件身份。已有绘图运行保留原统计策略，避免续跑时混用新旧结果。
+
+历史 05 结果仍可手工离线拆分，不重新比对：在项目根目录运行 `rtk proxy python pipeline_locus_split.py --summary <任务输出>/05.igblastn_out/<数据集>/chain_summary.csv --manifest <任务输出>/01.match/<数据集>/sample_manifest.csv --output <任务输出>/06.locus_split/<数据集>`。这是兼容旧结果的工具，不是新主流程阶段；`--check` 只核验完成状态，`--force` 强制重新拆分，不修改 Web 任务状态。
 
 新生成的记录另输出一份 `clone_top.csv`，可点击“下载 Clone Top CSV”，全量 ZIP 也包含该表。默认保留所有克隆，按每个样本、每条链的有效记录数降序排列，可用 `rank` 筛选 Top 10/50/100；计数相同按 V、J、CDR3 原始文本排序。CSV 使用 UTF-8 BOM，字段为：
 
@@ -219,7 +220,7 @@ PNG 文件名：单链为 `样本名__CHAIN.png`（如 `Demo_A__IGH.png`），�
 
 例如 4 个 worker、每个 2048 MiB，需同时将总预算设为 `8192`，且容器实际 CPU/内存允许才会生效。每个新批次重新检测 cgroup v1/v2 和主机资源，保留至少 256 MiB 或当前可用内存的 5% 余量。单 worker 和进程组 RSS 周期监测属于预算控制，不是容器硬性内存隔离。超预算明确报错，不截断克隆或丢弃低频记录。更改 Python/绘图代码或增加 Pillow 依赖后须重建镜像。
 
-验证命令：`rtk proxy python -m pytest analysis/treemap/tests/test_core.py tests/test_sources.py -q`；`rtk proxy python -m unittest discover -s web/tests -p test_treemap.py -q`。测试使用合成数据、独立临时输出，不发送真实邮件。
+Treemap 验证应使用合成数据和独立临时输出，检查单链/合图、Clone Top 及 ZIP，不发送真实邮件；临时脚本与日志结束后清理。
 
 ## 安全边界
 
@@ -291,15 +292,7 @@ Treemap 新运行在 SQLite 使用 `storage_version=2`，状态、产物和合�
 
 部署仍需重建镜像，启动时自动增加兼容表/索引。发布前等待主分析与派生任务退出并备份 SQLite。**数据库已产生 v2 记录后，不能只回退到不支持 v2 的旧程序**：优先向前修复；如需降级，停服并备份当前库，由维护人员在事务中用 `derived_store.load()` 恢复完整 v1 JSON、切换 storage_version 后核对记录/产物数量，或恢复与旧程序对应的数据库备份。不要在在线服务中转换、清理新表，也不要自动迁移历史任务。
 
-维护基准：
-
-```bash
-rtk proxy python web/tools/benchmark_web_state.py --archive-files 10000
-rtk proxy python -m unittest discover -s web/tests -q
-rtk proxy python -m pytest analysis/treemap/tests/test_core.py tests/test_sources.py -q
-```
-
-基准只生成临时合成数据。快照缓存、JSON 序列化字节、SQLite 查询与归档 Python 内存分开报告；不是实际 IgBLAST 加速承诺。当前归档枚举 10,000 文件的合成测量约 16 MiB Python 分配峰值，本轮保留原完整内容核验与清理机制。
+额外性能验证使用临时合成数据，分别检查快照缓存、JSON 序列化、SQLite 查询和归档内存；不能将这些指标当成实际 IgBLAST 加速承诺。验证结束后清理临时脚本与日志，保留正式归档的完整内容核验与清理机制。
 
 ## 流程介绍与合成教学包
 
@@ -307,7 +300,7 @@ Base / Pig 新建任务支持“扫描目录，无需 Submission”：选择服�
 
 目录扫描只读取名称和元信息，不解压读取全部 FASTQ；最多检查 20000 个文件、5000 项配对。沿用流程配置的扩展名和读端后缀，支持 vendor counter。不同目录或 lane 不自动合并；Pig 不同目录同名配对因现有输出语义会阻止提交。目录模式不再要求 Pig 文件名含 Dual Index；物种固定为 pig，Base 沿用其物种配置。
 
-新建 Pig 目录任务采用单层样本输出布局：`02.fastp/<dataset>/data/<sample>/`、`03.clean_data/<dataset>/<sample>/`、`04.pandaseq/<dataset>/<sample>/` 和 `05.igblastn_out/<dataset>/<sample>/TCR.tsv`（或 BCR.tsv）。清单记录 `output_layout=sample-v1`，四个阶段共用路径解析；改名后使用确认的样本名。没有该字段的历史任务及 Submission 任务沿用原目录结构，重新 Match 保留该任务的布局版本，避免历史缓存与新路径混用。
+新建 Pig 目录任务采用单层样本输出布局：`02.fastp/<dataset>/data/<sample>/`、`03.clean_data/<dataset>/<sample>/`、`04.pandaseq/<dataset>/<sample>/` 和 `05.igblastn_out/<dataset>/<sample>/<CHAIN>.tsv`（兼容汇总 TCR.tsv/BCR.tsv 保留）。清单记录 `output_layout=sample-v1`，四个阶段共用路径解析；改名后使用确认的样本名。没有该字段的历史任务及 Submission 任务沿用原目录结构，重新 Match 保留该任务的布局版本，避免历史缓存与新路径混用。
 
 服务器将实际选择保存为独立不可变输入清单（`state/input_manifests`），扫描快照绑定用户/流程/输入根，24 小时有效，每位用户保留最多 16 个。检查、创建、启动和续跑校验所选文件的大小与 mtime_ns；发生改变时需重新扫描，不自动纳入后来新增的文件。此指纹用于变更检测，不是内容哈希。任务详情“编辑资料 / 重新 Match”可恢复目录选择，重新扫描时新增配对默认不选；已批准的样本分配仍受现有确认限制。
 
@@ -315,4 +308,4 @@ Base / Pig 新建任务支持“扫描目录，无需 Submission”：选择服�
 
 教学包完全合成：2 个样本、3 份 reMapping CSV（6 条序列）、2 对 FASTQ（各 20 对 reads）、4 份 Submission XLSX 及 Barcode CSV。用户需将文件解压到服务器允许的路径，并将 Submission 的 Note 占位路径改为实际输入路径。网页不自动上传或提交任务。FASTQ 用于练习到 Match 审核，不模拟 IR/10X 建库结构；reMapping 随机序列也可能无有效注释，不能用作完整分析或生物学准确性验证。
 
-维护时运行 `python web/tools/build_teaching_demo.py` 重新生成 ZIP，再运行 `python -m unittest discover -s web/tests -p test_teaching_demo.py -v`：直接验证发布包的 FASTQ 格式、真实 CSV 转换和四条流程的 Match。`web/Dockerfile.dockerignore` 明确允许打包上述两个静态文件；镜像更新仍需重建。
+维护时运行 `rtk proxy python web/tools/build_teaching_demo.py` 重新生成 ZIP，在临时目录检查发布包的 FASTQ 格式、CSV 转换和四条流程的 Match。该脚本和合成教学包属于产品功能，保留用于用户学习。`web/Dockerfile.dockerignore` 明确允许打包上述两个静态文件；镜像更新仍需重建。

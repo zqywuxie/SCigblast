@@ -360,7 +360,8 @@ def _discover_locus_split(root: Path, dataset: str, stage_path: Path | None = No
         return [_issue(dataset, dataset, None, f'invalid locus split summary: {exc}')]
 
 
-def _discover_base_or_pig(root: Path, dataset: str, pipeline: str, stage_path: Path | None = None) -> list[dict[str, Any]] | None:
+def _discover_base_or_pig(root: Path, dataset: str, pipeline: str, stage_path: Path | None = None,
+                          *, require_locus_filter: bool = False) -> list[dict[str, Any]] | None:
     stage = stage_path or (root / "05.igblastn_out" / dataset)
     summary = next((p for p in (stage / "chain_summary.csv", stage / "igblastn_run_summary.tsv", stage / "igblast_summary.tsv") if p.is_file() and not p.is_symlink()), None)
     if summary is None:
@@ -368,6 +369,7 @@ def _discover_base_or_pig(root: Path, dataset: str, pipeline: str, stage_path: P
     entries: list[dict[str, Any]] = []
     try:
         summary = _confined_file(root, summary)
+        require_locus_filter = require_locus_filter or 'locus_filter_version' in _raw_header(summary)
         rows = _read_dict_rows(summary)
     except (OSError, ValueError) as exc:
         return [_issue(dataset, dataset, None, f"invalid {pipeline} IgBLAST summary: {exc}")]
@@ -376,6 +378,10 @@ def _discover_base_or_pig(root: Path, dataset: str, pipeline: str, stage_path: P
         pair = row.get("pair_id") or ""
         sample_key = _stable_sample_key(f"{pair}/{sample}" if pair else sample, sample)
         chain = _known_chain(row.get("chain"))
+        inline = row.get('locus_filter_version') == '1'
+        if require_locus_filter and not inline:
+            entries.append(_issue(sample_key, sample, chain, 'mapping task has not completed selected-locus filtering'))
+            continue
         status = row.get("status", "").upper()
         if status != "OK":
             entries.append(_issue(sample_key, sample, chain, f"{pipeline} IgBLAST status is {status or 'unknown'}"))
@@ -389,7 +395,10 @@ def _discover_base_or_pig(root: Path, dataset: str, pipeline: str, stage_path: P
             continue
         checked, error = _checked_source(root, output)
         if checked:
-            entries.append(_entry(sample_key, sample, chain, [_source(root, checked, chain)]))
+            if inline and 'locus' not in _raw_header(Path(checked)):
+                entries.append(_issue(sample_key, sample, chain, 'filtered mapping table lacks locus column'))
+            else:
+                entries.append(_entry(sample_key, sample, chain, [_source(root, checked, chain, **({'chain_column':'locus'} if inline else {}))]))
         else:
             entries.append(_issue(sample_key, sample, chain, error))
     return entries
@@ -494,13 +503,16 @@ def discover_job(row: dict) -> list[dict[str, Any]]:
     elif pipeline == "10x_split":
         entries = _discover_10x(root, dataset)
     elif pipeline in {"igblast_base", "pig_igblast"}:
-        entries = _discover_locus_split(root, dataset)
-        if entries is None:
-            options = row.get('options_json') or {}
-            if isinstance(options, str):
-                options = json.loads(options)
-            entries = ([_issue(dataset, dataset, None, 'locus split final outputs are missing')]
-                       if options.get('locus_split_version') else _discover_base_or_pig(root, dataset, pipeline))
+        options = row.get('options_json') or {}
+        if isinstance(options, str):
+            options = json.loads(options)
+        if options.get('inline_locus_filter_version'):
+            entries = _discover_base_or_pig(root, dataset, pipeline, require_locus_filter=True)
+        else:
+            entries = _discover_locus_split(root, dataset)
+            if entries is None:
+                entries = ([_issue(dataset, dataset, None, 'locus split final outputs are missing')]
+                           if options.get('locus_split_version') else _discover_base_or_pig(root, dataset, pipeline))
     else:
         entries = [_issue(dataset, dataset, None, f"unsupported pipeline: {pipeline or 'unknown'}")]
     if entries is None:
@@ -585,11 +597,21 @@ def discover_directory(root: Path) -> list[dict[str, Any]]:
     base_names = ("chain_summary.csv", "igblastn_run_summary.tsv", "igblast_summary.tsv")
     base_summaries = [path for name in base_names for path in directory.rglob(name)
                       if path.is_file() and not any(part.is_symlink() for part in _path_chain(directory, path))]
+    inline_stages = set()
+    for summary in base_summaries:
+        try:
+            if 'locus_filter_version' in _raw_header(summary):
+                inline_stages.add(summary.parent)
+        except (OSError, ValueError):
+            pass  # The authoritative discovery below reports invalid summaries.
+    replaced_split_stages = {stage.parent.parent / '06.locus_split' / stage.name
+                             for stage in inline_stages if stage.parent.name == '05.igblastn_out'}
+    summaries = [item for item in summaries if not (item[0] == '06.locus_split' and item[1].parent in replaced_split_stages)]
     for summary in sorted(set(base_summaries)):
         parts = list(summary.parent.relative_to(directory).parts)
         if '05.igblastn_out' in parts:
             parts[parts.index('05.igblastn_out')] = '06.locus_split'
-            if (directory / Path(*parts)).exists():
+            if summary.parent not in inline_stages and (directory / Path(*parts)).exists():
                 continue  # Never count mapping intermediates alongside stage 6.
         summaries.append(("05.igblastn_out", summary, _discover_base_or_pig))
 

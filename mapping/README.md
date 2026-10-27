@@ -27,7 +27,7 @@ CLI 输入和输出不得相互嵌套。默认每个 IgBLAST 进程 8 线程、�
 
 CLI 可附加 `--samples sampleA subdir/sampleB` 只处理指定样本键；省略时默认全部样本。网页将具体样本键以 JSON 数组保存到 `SCIGBLAST_MAPPING_SAMPLES`，显式空选择不允许提交。
 
-实际比对并行度还受主机可用内存、cgroup v1/v2 限制及使用量、CPU 配额和进程亲和性约束。运行保留有效内存上限的 5%（至少 256 MiB）；余量后无法容纳一个配置的比对进程时明确停止并报告原因。CPU 配额较小时会降低每进程线程数。日志中的 `resource_budget` 给出实际 worker、线程及可用预算；`SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB` 是单 worker 内存估计，不是硬性 RSS 限制。资源检查使用标准库，不增加 pandas 等依赖。
+IgBLAST 默认最多 4 个并行任务，运行时硬上限为 4；实际比对并行度还受主机可用内存、cgroup v1/v2 限制及使用量、CPU 配额和进程亲和性约束。运行保留有效内存上限的 5%（至少 256 MiB）；余量后无法容纳一个配置的比对进程时明确停止并报告原因。CPU 配额较小时会降低每进程线程数。日志中的 `resource_budget` 给出实际 worker、线程及可用预算；`SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB` 是单 worker 内存估计，不是硬性 RSS 限制。资源检查使用标准库，不增加 pandas 等依赖。
 
 ## 输出与续跑
 
@@ -38,7 +38,4 @@ CLI 可附加 `--samples sampleA subdir/sampleB` 只处理指定样本键；省�
 
 网页“输出文件”可查看三个汇总报告，并选择 FASTA/AIRR/UMI 文件下载或预览表格。任一所选文件失败，整条任务标为失败，成功产物保留。用相同参数重新运行或网页“断点续跑”，只重做输入、配置或产物变化的文件；仅 UMI 整理失败不会重跑已完成 IgBLAST。网页续跑保留原链选择，改链需新建任务。
 
-```bash
-rtk proxy python -m unittest discover -s mapping/tests -v
-rtk proxy python -m unittest discover -s web/tests -v
-```
+项目测试代码已按维护要求移除；额外验证在独立临时目录进行，完成后清理临时脚本、日志和缓存。正式任务与 IgBLAST 日志继续保留。

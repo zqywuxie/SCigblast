@@ -15,6 +15,58 @@ FIELDS = ('sample_id', 'pair_id', 'sample_key', 'chain', 'input_rows', 'output_r
           'excluded_locus_rows', 'unknown_locus_rows', 'status', 'error', 'output_path')
 SUMMARY = 'locus_split_summary.csv'
 VERSION = 'selected-locus-v1'
+MAPPING_FILTER_VERSION = 'productive-valid-v-selected-locus-v1'
+BAD_V = frozenset(('', '*', '-', 'NA', 'N/A', 'NONE', 'NULL', 'NO_HIT', 'UNMAPPED', 'NOT_FOUND'))
+
+
+def filter_mapping_airr(source, target, chain):
+    """Filter one completed mapping task in one pass, before its DONE marker."""
+    chain = str(chain).strip().upper()
+    if chain not in CHAINS:
+        raise ValueError(f'unknown target chain: {chain}')
+    report = dict(raw_rows=0, mapped_rows=0, productive_rows=0, output_rows=0,
+                  locus_input_rows=0, excluded_locus_rows=0, unknown_locus_rows=0,
+                  locus_filter_version=1)
+
+    def write(handle):
+        header = None
+        with Path(source).open(encoding='utf-8-sig', newline='') as incoming:
+            writer = csv.writer(handle, delimiter='\t', lineterminator='\n')
+            for record in csv.reader(incoming, delimiter='\t'):
+                if not record or record[0].startswith('#'):
+                    continue
+                if header is None:
+                    if 'sequence_id' not in record or 'v_call' not in record:
+                        continue
+                    header = record
+                    if 'locus' not in header:
+                        raise ValueError(f'missing locus column: {source}')
+                    vi, li = header.index('v_call'), header.index('locus')
+                    pi = header.index('productive') if 'productive' in header else -1
+                    writer.writerow(header)
+                    continue
+                if len(record) != len(header):
+                    raise ValueError(f'malformed AIRR record: {source}')
+                report['raw_rows'] += 1
+                good_v = record[vi].strip().upper() not in BAD_V
+                good_p = pi >= 0 and record[pi].strip().upper() in {'T', 'TRUE'}
+                report['mapped_rows'] += int(good_v)
+                report['productive_rows'] += int(good_p)
+                if not good_v or not good_p:
+                    continue
+                report['locus_input_rows'] += 1
+                locus = record[li].strip().upper()
+                if locus == chain:
+                    writer.writerow(record)
+                    report['output_rows'] += 1
+                else:
+                    report['excluded_locus_rows'] += 1
+                    report['unknown_locus_rows'] += int(locus not in CHAINS)
+        if header is None:
+            raise ValueError(f'malformed IgBLAST AIRR TSV: {source}')
+
+    atomic_text(target, write)
+    return report
 
 
 def signature(path):

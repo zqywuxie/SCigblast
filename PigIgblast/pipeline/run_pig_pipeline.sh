@@ -169,7 +169,9 @@ memory_guard(){
 FASTP_REQUIRED_GB="$(( ${SCIGBLAST_FASTP_MAX_PARALLEL_SAMPLES:-${MAX_JOBS:-2}} * ${SCIGBLAST_FASTP_MEMORY_LIMIT_GB:-${FASTP_MEMORY_GB:-8}} ))"
 CLEAN_REQUIRED_GB="$(( ${SCIGBLAST_CLEAN_MAX_PARALLEL_SAMPLES:-${CLEAN_MAX_PARALLEL_SAMPLES:-2}} * ${SCIGBLAST_CLEAN_MEMORY_LIMIT_GB:-${CLEAN_MEMORY_GB:-8}} ))"
 PANDASEQ_REQUIRED_GB="$(( ${SCIGBLAST_PANDASEQ_MAX_PARALLEL_SAMPLES:-${PANDASEQ_MAX_PARALLEL_SAMPLES:-2}} * ${SCIGBLAST_PANDASEQ_MEMORY_LIMIT_GB:-${PANDASEQ_MEMORY_GB:-64}} ))"
-IGBLAST_REQUIRED_GB="$(( ${SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS:-${MAX_JOBS:-2}} * ${SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB:-${IGBLAST_MEMORY_GB:-48}} ))"
+export SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS="${SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS:-${MAX_JOBS:-4}}"
+if (( SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS > 4 )); then SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS=4; fi
+IGBLAST_REQUIRED_GB="$(( SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS * ${SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB:-${IGBLAST_MEMORY_GB:-48}} ))"
 children_of(){
   if command -v pgrep >/dev/null 2>&1; then pgrep -P "$1" 2>/dev/null || true
   else ps -eo pid=,ppid= | awk -v parent="$1" '$2 == parent {print $1}'; fi
@@ -302,7 +304,7 @@ STATE_DIR="${OUTPUT_ROOT}/.pipeline_state/${DATASET_LABEL}"
 stage_root(){ printf '%s/%s/%s\n' "$OUTPUT_ROOT" "$1" "$DATASET_LABEL"; }
 hash_file(){ if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else printf unknown; fi; }
 CONFIG_SHA256="$(hash_file "${SCRIPT_DIR}/00.pipeline_config.env")"
-stage_script(){ case "$1" in fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; clean) printf '%s/03.clean_header.py\n' "$SCRIPT_DIR";; pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; igblast) printf '%s/05.work_igblastn.py\n' "$SCRIPT_DIR";; locus_split) printf '%s/../../pipeline_locus_split.py\n' "$SCRIPT_DIR";; esac; }
+stage_script(){ case "$1" in fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; clean) printf '%s/03.clean_header.py\n' "$SCRIPT_DIR";; pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; igblast) printf '%s/05.work_igblastn.py\n' "$SCRIPT_DIR";; esac; }
 stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; hash_file "${SCRIPT_DIR}/../../pipeline_input_manifest.py"; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; fi; if [[ "$1" == igblast ]]; then printf '%s\n' "${SCIGBLAST_IGBLAST_DEPENDENCIES:-missing}"; fi; } | sha256sum | awk '{print $1}'; }
 stage_summary_rows(){
   "${PYTHON_BIN}" - "$1" "$2" <<'PY'
@@ -370,8 +372,7 @@ stage_output_ready(){ case "$1" in
   fastp) local root rows files; root="$(stage_root 02.fastp)"; [[ -d "$root/data" && -d "$root/report" && -s "$root/report/fastp_summary.csv" ]] || return 1; rows="$(stage_artifacts_ready "$root/report/fastp_summary.csv" ',' r1_output r2_output)" || return 1; files="$(find "$root/data" -type f \( -name '*.fq.gz' -o -name '*.fastq.gz' \) 2>/dev/null | wc -l)"; (( files >= rows * 2 ));;
   clean) local root rows files; root="$(stage_root 03.clean_data)"; [[ -s "$root/clean_summary.csv" ]] || return 1; rows="$(stage_artifacts_ready "$root/clean_summary.csv" ',' r1_output r2_output)" || return 1; files="$(find "$root" -type f \( -name '*.fq.gz' -o -name '*.fastq.gz' \) 2>/dev/null | wc -l)"; (( files >= rows * 2 ));;
   pandaseq) local root rows files; root="$(stage_root 04.pandaseq)"; [[ -s "$root/pandaseq_summary.csv" ]] || return 1; rows="$(stage_pandaseq_ready "$root/pandaseq_summary.csv" "$root")" || return 1; files="$(find "$root" -type f \( -name '*.fa' -o -name '*.fasta' \) 2>/dev/null | wc -l)"; (( files >= rows ));;
-  igblast) local root summary delimiter rows files; root="$(stage_root 05.igblastn_out)"; [[ -s "$root/chain_summary.csv" || -s "$root/igblastn_run_summary.tsv" ]] || return 1; if [[ -s "$root/chain_summary.csv" ]]; then summary="$root/chain_summary.csv"; delimiter=','; else summary="$root/igblastn_run_summary.tsv"; delimiter=$'\t'; fi; rows="$(stage_artifacts_ready "$summary" "$delimiter" output_path)" || return 1; files="$(find "$root/.tasks" -type f -name '*.tsv' 2>/dev/null | wc -l)"; (( files >= rows ));;
-  locus_split) "${PYTHON_BIN}" "${SCRIPT_DIR}/../../pipeline_locus_split.py" --check --summary "$(stage_root 05.igblastn_out)/chain_summary.csv" --manifest "$(stage_root 01.match)/sample_manifest.csv" --output "$(stage_root 06.locus_split)";;
+  igblast) local root summary delimiter rows; root="$(stage_root 05.igblastn_out)"; [[ -s "$root/chain_summary.csv" || -s "$root/igblastn_run_summary.tsv" ]] || return 1; if [[ -s "$root/chain_summary.csv" ]]; then summary="$root/chain_summary.csv"; delimiter=','; else summary="$root/igblastn_run_summary.tsv"; delimiter=$'\t'; fi; rows="$(stage_artifacts_ready "$summary" "$delimiter" output_path)" || return 1; (( rows > 0 ));;
   *) return 1;; esac; }
 MAPPING_SHA256="unknown"
 stage_done(){
@@ -388,7 +389,7 @@ mark_stage(){
   local label="$1"
   local marker="${STATE_DIR}/.pipeline_stage_${label}.DONE"
   local tmp="${marker}.tmp.${BASHPID:-$$}"
-  { printf 'status=DONE\nstage=%s\nconfig_sha256=%s\nmapping_sha256=%s\nstage_sha256=%s\ntimestamp=%s\n' "$label" "$CONFIG_SHA256" "$MAPPING_SHA256" "$(stage_fingerprint "$label")" "$(date -Iseconds)"; } > "$tmp"
+  { printf 'status=DONE\nstage=%s\nconfig_sha256=%s\nmapping_sha256=%s\nstage_sha256=%s\ntimestamp=%s\n' "$label" "$CONFIG_SHA256" "$MAPPING_SHA256" "$(stage_fingerprint "$label")" "$(date -Iseconds)"; if [[ "$label" == igblast ]]; then printf 'locus_filter_version=1\n'; fi; } > "$tmp"
   mv -f "$tmp" "$marker"
 }
 run_stage(){ local label="$1" required_gb="$2"; shift 2; if stage_done "$label"; then echo "[PIG] reusing completed ${label} stage"; return 0; fi; echo "[PIG] ${label} (sample-level resume enabled)"; run_monitored_stage "$label" "$required_gb" "$@" || return $?; stage_output_ready "$label" || { echo "[PIG] ${label} completed but required output is missing" >&2; return 1; }; mark_stage "$label"; }
@@ -445,13 +446,7 @@ SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${SCRIPT_DIR}/../../pipeline_
   --species pig --database-version "$PIG_DB_VERSION" \
   --threads "${SCIGBLAST_IGBLAST_THREADS:-${IGBLAST_THREADS:-16}}" --implementation "${SCRIPT_DIR}/05.work_igblastn.py")"
 export SCIGBLAST_IGBLAST_DEPENDENCIES
-if ! stage_done igblast; then rm -f "${STATE_DIR}/.pipeline_stage_locus_split.DONE"; fi
+if ! stage_done igblast; then rm -f "${STATE_DIR}/.pipeline_stage_igblast.DONE" "${STATE_DIR}/.pipeline_stage_locus_split.DONE"; fi
 run_stage igblast "$IGBLAST_REQUIRED_GB" "${PYTHON_BIN}" "${SCRIPT_DIR}/05.work_igblastn.py"
-echo "[PIG] locus_split"
-split_args=()
-[[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 ]] || split_args+=(--force)
-if ! stage_done locus_split; then rm -f "${STATE_DIR}/.pipeline_stage_locus_split.DONE"; fi
-run_stage locus_split 1 "${PYTHON_BIN}" "${SCRIPT_DIR}/../../pipeline_locus_split.py" \
-  --summary "$(stage_root 05.igblastn_out)/chain_summary.csv" --manifest "$(stage_root 01.match)/sample_manifest.csv" \
-  --output "$(stage_root 06.locus_split)" "${split_args[@]}"
+rm -f "${STATE_DIR}/.pipeline_stage_locus_split.DONE"
 echo "[PIG] pipeline completed"

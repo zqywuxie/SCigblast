@@ -104,7 +104,7 @@ def worker_budget(config, resources=None):
     usable = max(0, available - headroom)
     effective_cpus = max(1, math.floor(resources['cpu_count']))
     effective_threads = min(threads, effective_cpus)
-    workers = min(requested, min(budget, effective_cpus) // effective_threads, usable // per_job)
+    workers = min(4, requested, min(budget, effective_cpus) // effective_threads, usable // per_job)
     if workers < 1:
         raise ValueError(f'reMapping 可用内存不足：保留运行余量后 {usable / GIB:.2f} GiB，'
                          f'每个比对进程预计需要 {per_job / GIB:.2f} GiB；请调整资源配置或稍后重试')

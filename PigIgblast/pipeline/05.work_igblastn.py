@@ -12,6 +12,7 @@ sys.path.insert(0, str(HERE.parents[1]))
 from pipeline_input_manifest import pig_output_relative
 from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
 from pipeline_parallel import FastaCountCache, bounded_completed
+from pipeline_locus_split import filter_mapping_airr
 
 def safe(value): return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
 
@@ -32,8 +33,9 @@ BIN = resolve_binary(BIN, DB_ROOT, "pig")
 DEPENDENCIES = {}
 FASTA_COUNTS = FastaCountCache()
 THREADS = int(cfg.get("SCIGBLAST_IGBLAST_THREADS", cfg.get("IGBLAST_THREADS", "16")))
-MAX_JOBS = max(1, int(cfg.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", cfg.get("MAX_JOBS", "1"))))
-BAD_V = {"", "*", "-", "NA", "N/A", "NONE", "NULL", "NO_HIT", "UNMAPPED", "NOT_FOUND"}
+MAX_JOBS = max(1, min(4, int(cfg.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", cfg.get("MAX_JOBS", "4"))),
+                      int(cfg.get('SCIGBLAST_PARALLEL_THREAD_BUDGET', '128')) // max(1, THREADS) or 1,
+                      int(cfg.get('SCIGBLAST_MEMORY_BUDGET_GB', '300')) // max(1, int(cfg.get('SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB', '32'))) or 1))
 TCR = {"TRA", "TRB", "TRD", "TRG"}
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,38 +58,16 @@ def db(chain, part): return DB_ROOT / "database_251117" / VERSION / chain / f"pi
 def db_ok(path): return any(path.parent.glob(path.name + ".*"))
 def count_fasta(path):
     return FASTA_COUNTS.count(path)
-def valid_v(value): return str(value or "").strip().upper() not in BAD_V
-
-def filter_tsv(source, target):
-    header = None; raw = mapped = productive = output = 0
-    temp = target.with_suffix(target.suffix + ".tmp")
-    with source.open(encoding="utf-8", errors="replace") as src, temp.open("w", encoding="utf-8") as dst:
-        for line in src:
-            text = line.rstrip("\r\n")
-            if not text or text.startswith("#"): continue
-            fields = text.split("\t")
-            if header is None:
-                if "sequence_id" not in fields or "v_call" not in fields: continue
-                header = fields; vi = header.index("v_call"); pi = header.index("productive") if "productive" in header else -1
-                dst.write("\t".join(header) + "\n"); continue
-            fields += [""] * max(0, len(header) - len(fields)); raw += 1
-            good_v = valid_v(fields[vi]); mapped += int(good_v)
-            good_p = pi >= 0 and fields[pi].strip().upper() in {"T", "TRUE"}; productive += int(good_p)
-            if good_v and good_p: dst.write("\t".join(fields[:len(header)]) + "\n"); output += 1
-    if header is None:
-        temp.unlink(missing_ok=True)
-        raise ValueError(f"malformed IgBLAST TSV: {source}")
-    os.replace(temp, target)
-    return raw, mapped, productive, output
-
 def task(job):
     sample, pair, chain, raw_r1 = job; parent = safe_parent(raw_r1)
     relative = pig_output_relative(sample,pair,raw_r1,RAW_INPUT_ROOT,os.environ.get('SCIGBLAST_INPUT_MANIFEST',''))
     base = INPUT / relative; fasta = base / (safe(pair) + "_merged.fasta")
     task_dir = OUTPUT / ".tasks" / relative; task_dir.mkdir(parents=True, exist_ok=True)
-    filtered = task_dir / f"{safe(chain)}.tsv"; raw = Path(str(filtered) + ".raw.tsv"); done = Path(str(filtered) + ".DONE")
+    filtered = OUTPUT / relative / f"{safe(chain)}.tsv"
+    raw = task_dir / f"{safe(chain)}.tsv.raw.tsv"; done = task_dir / f"{safe(chain)}.tsv.DONE"
     n = count_fasta(fasta)
     common = {"sample_id": sample, "pair_id": pair, "chain": chain, "input_sequences": n, "raw_rows": 0, "mapped_rows": 0, "productive_rows": 0, "output_rows": 0, "status": "ERROR", "error": "", "path": None, "parent": str(parent), "relative": str(relative)}
+    common.update(locus_input_rows=0, excluded_locus_rows=0, unknown_locus_rows=0, locus_filter_version=1)
     if not fasta.is_file(): common["error"] = "missing merged FASTA"; return common
     try:
         fingerprint = task_fingerprint(fasta, DEPENDENCIES["chains"][chain])
@@ -100,6 +80,8 @@ def task(job):
                 common.update(raw_rows=int(cached.get("raw_rows", 0)), mapped_rows=int(cached.get("mapped_rows", 0)),
                               productive_rows=int(cached.get("productive_rows", 0)), output_rows=int(cached.get("output_rows", 0)),
                               status="OK", path=filtered)
+                for key in ('locus_input_rows', 'excluded_locus_rows', 'unknown_locus_rows'):
+                    common[key] = int(cached.get(key, 0))
                 return common
     except (OSError, ValueError):
         pass
@@ -122,13 +104,13 @@ def task(job):
     if db_ok(c):
         args.extend(["-c_region_db", str(c), "-num_alignments_C", "1"])
     args.extend(["-auxiliary_data", str(aux), "-organism", "pig", "-ig_seqtype", seqtype, "-query", str(fasta), "-outfmt", "19", "-num_threads", str(THREADS)])
-    with Path(str(filtered) + ".log").open("w", encoding="utf-8") as log: rc = subprocess.run(args + ["-out", str(raw)], stdout=log, stderr=subprocess.STDOUT).returncode
+    with (task_dir / f"{safe(chain)}.tsv.log").open("w", encoding="utf-8") as log: rc = subprocess.run(args + ["-out", str(raw)], stdout=log, stderr=subprocess.STDOUT).returncode
     if rc or not raw.is_file(): common["error"] = "igblast_failed"; raw.unlink(missing_ok=True); return common
     try:
-        raw_n, mapped, productive, output = filter_tsv(raw, filtered); raw.unlink(missing_ok=True)
-        common.update(raw_rows=raw_n, mapped_rows=mapped, productive_rows=productive, output_rows=output, status="OK", path=filtered)
+        counts = filter_mapping_airr(raw, filtered, chain); raw.unlink(missing_ok=True)
+        common.update(counts, status="OK", path=filtered)
         atomic_write_text(done, "\n".join(("version=2", f"job_fingerprint={fingerprint}", f"dependency_fingerprint={DEPENDENCIES['chains'][chain]}",
-                                             f"raw_rows={raw_n}", f"mapped_rows={mapped}", f"productive_rows={productive}", f"output_rows={output}")) + "\n")
+                                             *(f"{key}={value}" for key, value in counts.items()))) + "\n")
     except Exception as exc:
         common.update(status="ERROR", error=str(exc), path=None)
         raw.unlink(missing_ok=True); filtered.unlink(missing_ok=True)
@@ -180,7 +162,7 @@ def main():
                         if first or line_no > 0: out.write(line)
                 first=False
         os.replace(temp,dest)
-    fields=["sample_id","pair_id","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","status","error","output_path"]
+    fields=["sample_id","pair_id","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","locus_input_rows","excluded_locus_rows","unknown_locus_rows","locus_filter_version","status","error","output_path"]
     summary_temp=SUMMARY.with_suffix(SUMMARY.suffix+".tmp")
     with summary_temp.open("w", encoding="utf-8", newline="") as fh:
         writer=csv.DictWriter(fh, fieldnames=fields, delimiter="\t"); writer.writeheader()

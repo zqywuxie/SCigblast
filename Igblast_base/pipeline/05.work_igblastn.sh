@@ -33,6 +33,7 @@ PIPELINE = Path(os.environ["SCIGBLAST_BASE_PIPELINE_DIR"])
 sys.path.insert(0, str(PIPELINE.parents[1]))
 from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
 from pipeline_parallel import FastaCountCache, bounded_completed
+from pipeline_locus_split import filter_mapping_airr
 ROOT = Path(os.environ["OUTPUT_ROOT"])
 RAW_ROOT = Path(os.environ["RAW_INPUT_DIR"]).resolve() if os.environ.get("RAW_INPUT_DIR") else None
 DATASET_LABEL = os.environ.get("SCIGBLAST_DATASET_LABEL", "").strip()
@@ -42,15 +43,14 @@ OUTPUT = Path(os.environ.get("SCIGBLAST_IGBLAST_OUTPUT_DIR", ROOT / "05.igblastn
 DB_ROOT = Path(os.environ.get("SCIGBLAST_IGBLAST_DB_DIR", "/data/scAnalyis/Scigblast/igblast"))
 SPECIES = os.environ.get("SCIGBLAST_IGBLAST_SPECIES", "human")
 THREADS = max(1, int(os.environ.get("SCIGBLAST_IGBLAST_THREADS", "8")))
-REQUESTED = max(1, int(os.environ.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", "2")))
+REQUESTED = max(1, int(os.environ.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", "4")))
 THREAD_BUDGET = max(1, int(os.environ.get("SCIGBLAST_PARALLEL_THREAD_BUDGET", "128")))
 MEMORY_BUDGET = max(1, int(os.environ.get("SCIGBLAST_MEMORY_BUDGET_GB", "300")))
 MEMORY_PER_JOB = max(1, int(os.environ.get("SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB", "48")))
-MAX_JOBS = max(1, min(REQUESTED, THREAD_BUDGET // THREADS or 1, MEMORY_BUDGET // MEMORY_PER_JOB or 1))
+MAX_JOBS = max(1, min(4, REQUESTED, THREAD_BUDGET // THREADS or 1, MEMORY_BUDGET // MEMORY_PER_JOB or 1))
 BIN = resolve_binary(os.environ.get("SCIGBLAST_IGBLAST_BIN", "igblastn"), DB_ROOT, "base")
 DEPENDENCIES = {}
 FASTA_COUNTS = FastaCountCache()
-BAD_V = {"", "*", "-", "NA", "N/A", "NONE", "NULL", "NO_HIT", "UNMAPPED", "NOT_FOUND"}
 TCR = {"TRA", "TRB", "TRD", "TRG"}
 SUPPORTED = TCR | {"IGH", "IGK", "IGL"}
 
@@ -84,30 +84,6 @@ def blastdb_exists(prefix: Path) -> bool:
 def count_fasta(source: Path) -> int:
     return FASTA_COUNTS.count(source)
 
-def valid_v(value: str) -> bool:
-    return value.strip().upper() not in BAD_V
-
-def filter_airr(source: Path, destination: Path) -> tuple[int, int, int, int]:
-    header = None; raw_rows = mapped = productive = output_rows = 0
-    temp = destination.with_suffix(destination.suffix + ".tmp")
-    with source.open(encoding="utf-8", errors="replace") as src, temp.open("w", encoding="utf-8") as dst:
-        for line in src:
-            text = line.rstrip("\r\n")
-            if not text or text.startswith("#"): continue
-            fields = text.split("\t")
-            if header is None:
-                if "sequence_id" not in fields or "v_call" not in fields: continue
-                header = fields; vi = header.index("v_call"); pi = header.index("productive") if "productive" in header else -1
-                dst.write("\t".join(header) + "\n"); continue
-            fields += [""] * max(0, len(header) - len(fields)); raw_rows += 1
-            has_v = valid_v(fields[vi]); mapped += int(has_v)
-            is_productive = pi >= 0 and fields[pi].strip().upper() in {"T", "TRUE"}; productive += int(is_productive)
-            if has_v and is_productive:
-                dst.write("\t".join(fields[:len(header)]) + "\n"); output_rows += 1
-    if header is None:
-        temp.unlink(missing_ok=True); raise ValueError(f"malformed IgBLAST AIRR TSV: {source}")
-    os.replace(temp, destination); return raw_rows, mapped, productive, output_rows
-
 def run_task(job: tuple[str, str, str, str, str]):
     sample, pair, chain, raw_r1, species = job
     # Manifest pair_id may include the raw relative parent (e.g.
@@ -118,10 +94,12 @@ def run_task(job: tuple[str, str, str, str, str]):
     relative_stage = stage_dir(parent, pp, ss)
     fasta = INPUT / relative_stage / f"{pp}_merged.fasta"
     task_dir = OUTPUT / ".tasks" / relative_stage; task_dir.mkdir(parents=True, exist_ok=True)
-    filtered = task_dir / f"{chain}.tsv"; raw = Path(str(filtered) + ".raw.tsv"); log = Path(str(filtered) + ".log"); marker = Path(str(filtered) + ".DONE")
+    filtered = OUTPUT / relative_stage / f"{chain}.tsv"
+    raw = task_dir / f"{chain}.tsv.raw.tsv"; log = task_dir / f"{chain}.tsv.log"; marker = task_dir / f"{chain}.tsv.DONE"
     result = {"sample_id":sample,"pair_id":pair,"species":species,"chain":chain,"input_sequences":count_fasta(fasta),
               "raw_rows":0,"mapped_rows":0,"productive_rows":0,"output_rows":0,"mapping_percent":"0.00","retained_percent":"0.00",
               "status":"ERROR","error":"","path":None,"parent":str(parent)}
+    result.update(locus_input_rows=0, excluded_locus_rows=0, unknown_locus_rows=0, locus_filter_version=1)
     if not fasta.is_file(): result["error"]="missing merged FASTA"; return result
     fingerprint=task_fingerprint(fasta, DEPENDENCIES["chains"][chain])
     try:
@@ -129,6 +107,8 @@ def run_task(job: tuple[str, str, str, str, str]):
             cached=dict(line.split("=",1) for line in marker.read_text(encoding="utf-8",errors="ignore").splitlines() if "=" in line)
             if cached.get("status")=="DONE" and cached.get("job_fingerprint")==fingerprint:
                 for name in ("raw_rows","mapped_rows","productive_rows","output_rows"): result[name]=int(cached.get(name,0))
+                for name in ('locus_input_rows', 'excluded_locus_rows', 'unknown_locus_rows'):
+                    result[name] = int(cached.get(name, 0))
                 result.update(status="OK",path=filtered); return result
     except (OSError, ValueError):
         pass
@@ -149,10 +129,10 @@ def run_task(job: tuple[str, str, str, str, str]):
     with log.open("w",encoding="utf-8") as handle: rc=subprocess.run(args,stdout=handle,stderr=subprocess.STDOUT).returncode
     if rc or not raw.is_file(): result["error"]=f"igblast_failed exit={rc}"; raw.unlink(missing_ok=True); return result
     try:
-        raw_n,mapped,productive,out_n=filter_airr(raw,filtered); raw.unlink(missing_ok=True)
-        result.update(raw_rows=raw_n,mapped_rows=mapped,productive_rows=productive,output_rows=out_n,status="OK",path=filtered)
+        counts=filter_mapping_airr(raw,filtered,chain); raw.unlink(missing_ok=True)
+        result.update(counts,status="OK",path=filtered)
         marker_temp=Path(str(marker)+".tmp")
-        marker_temp.write_text("\n".join(("status=DONE","manifest_schema_version=2",f"job_fingerprint={fingerprint}",f"dependency_fingerprint={DEPENDENCIES['chains'][chain]}",f"raw_rows={raw_n}",f"mapped_rows={mapped}",f"productive_rows={productive}",f"output_rows={out_n}"))+"\n",encoding="utf-8")
+        marker_temp.write_text("\n".join(("status=DONE","manifest_schema_version=2",f"job_fingerprint={fingerprint}",f"dependency_fingerprint={DEPENDENCIES['chains'][chain]}",*(f"{key}={value}" for key,value in counts.items())))+"\n",encoding="utf-8")
         os.replace(marker_temp,marker)
     except Exception as exc:
         result.update(status="ERROR",error=str(exc),path=None)
@@ -211,7 +191,7 @@ def main() -> int:
         key=(str(rel_stage),cell)
         grouped.setdefault(key,[]).append(result["path"])
     for (rel_stage,cell),paths in grouped.items(): merge_group(paths,OUTPUT/Path(rel_stage)/f"{cell}.tsv")
-    fields=["sample_id","pair_id","species","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","status","error","output_path"]
+    fields=["sample_id","pair_id","species","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","locus_input_rows","excluded_locus_rows","unknown_locus_rows","locus_filter_version","status","error","output_path"]
     for result in results:
         n=result["input_sequences"]; mapped=int(result["mapped_rows"]); productive=int(result["productive_rows"]); filtered=int(result["output_rows"])
         result["output_path"]=str(result.get("path") or "")

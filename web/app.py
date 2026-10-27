@@ -498,7 +498,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     runner_hash = sha256_file(runner)
     options = request.model_dump()
     if request.pipeline in {'igblast_base', 'pig_igblast'}:
-        options['locus_split_version'] = 1
+        options['inline_locus_filter_version'] = 1
     if mapping_inputs is not None:
         # UI completeness only: the runner's selection and output contract are unchanged.
         options['mapping_inputs'] = mapping_inputs
@@ -639,6 +639,7 @@ def require_match_pipeline(row):
 def pipeline_done(row: sqlite3.Row) -> bool:
     config = job_config(row)
     state = state_dir(row)
+    inline = json.loads(row['options_json']).get('inline_locus_filter_version')
     if config["completion"] == "pipeline_done" and (state / ".pipeline.DONE").is_file():
         return True
     if config["completion"] == "last_stage":
@@ -648,11 +649,13 @@ def pipeline_done(row: sqlite3.Row) -> bool:
         final = stage_names[-1]
         marker_name = final.split('.', 1)[1] if row['pipeline'] == 'pig_igblast' else final
         markers = (state / f".pipeline_stage_{marker_name}.DONE",)
-        if final != '06.locus_split':
+        if final != '06.locus_split' and not inline:
             markers += (state / '.pipeline.DONE',)
         for marker in markers:
-            if marker.is_file() and "status=DONE" in marker.read_text(encoding="utf-8", errors="replace"):
-                return True
+            if marker.is_file():
+                text = marker.read_text(encoding="utf-8", errors="replace")
+                if 'status=DONE' in text and (not inline or 'locus_filter_version=1' in text.splitlines()):
+                    return True
     return False
 
 
@@ -692,7 +695,8 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         marker_name = stage.split('.', 1)[1] if row['pipeline'] == 'pig_igblast' else stage
         marker = state / f".pipeline_stage_{marker_name}.DONE"
         if marker.is_file() and "status=DONE" in marker.read_text(encoding="utf-8", errors="replace"):
-            done.append(stage)
+            if stage != '05.igblast' or not json.loads(row['options_json']).get('inline_locus_filter_version') or pipeline_done(row):
+                done.append(stage)
     if '01.match' in config['stages'] and '01.match' not in done and summary_files(row) and (row['status'] in {'WAITING_REVIEW', 'SUCCEEDED'} or row['current_stage'] not in {'', None, '01.match'}):
         done.insert(0, '01.match')
     current = row["current_stage"] or (done[-1] if done else "")
@@ -765,8 +769,10 @@ def parse_progress(row: sqlite3.Row) -> tuple[str, int]:
             stage_end = match.end()
     if row['pipeline'] == 'pig_igblast':
         for match in re.finditer(r'\[PIG\]\s+(match|fastp|clean|pandaseq|igblast|locus_split)\b', text):
-            current = next(s for s in config['stages'] if s.endswith('.' + match.group(1)))
-            stage_end = match.end()
+            matched = next((s for s in config['stages'] if s.endswith('.' + match.group(1))), None)
+            if matched:
+                current = matched
+                stage_end = match.end()
     progress = int(row["progress"] or 0)
     percentages = re.findall(r"(?:percent=(\d{1,3})|\[\s*\d+/\d+\s+(\d{1,3})(?:\.\d+)?%)", text[stage_end:])
     if percentages:
@@ -834,8 +840,9 @@ def launch_job(job_id: str) -> bool:
         return False
     if row['pipeline'] in {'igblast_base', 'pig_igblast'}:
         options = json.loads(row['options_json'])
-        if not options.get('locus_split_version'):
-            options['locus_split_version'] = 1
+        if not options.get('inline_locus_filter_version'):
+            options['inline_locus_filter_version'] = 1
+            options.pop('locus_split_version', None)
             update_job(job_id, options_json=json.dumps(options, ensure_ascii=False))
             row = get_job_row(job_id)
     env = json.loads(row["env_json"])
@@ -1026,12 +1033,14 @@ def job_config(row):
     config = dict(REGISTRY[row["pipeline"]])
     config["stages"] = list(config["stages"])
     options = json.loads(row["options_json"])
-    # Completed pre-split jobs keep their historical five-stage display. A
-    # resumed invocation always executes the new runner and must finish stage 6.
-    if (row['pipeline'] in {'igblast_base', 'pig_igblast'} and not options.get('locus_split_version')
-            and row['status'] in {'SUCCEEDED', 'ARCHIVING', 'ARCHIVED'}
-            and not (Path(row['output_root']) / '06.locus_split' / row['dataset']).exists()):
-        config['stages'].remove('06.locus_split')
+    # Existing six-stage jobs retain their display until explicitly resumed.
+    # New invocations filter each completed chain inside stage 5.
+    if row['pipeline'] in {'igblast_base', 'pig_igblast'} and not options.get('inline_locus_filter_version'):
+        config['stage_labels'] = {**config.get('stage_labels', {}), '05.igblast': 'IgBLAST'}
+        if (options.get('locus_split_version')
+                or (Path(row['output_root']) / '06.locus_split' / row['dataset']).exists()):
+            config['stages'].append('06.locus_split')
+            config['stage_labels']['06.locus_split'] = '按 locus 拆分'
     if row["pipeline"] == "ir_split":
         if options.get("ir_variant") == "merged":
             config["stages"] = ["01.match", "02.fastp", "03.split", "04.clean", "05.pandaseq", "06.igblast"]
@@ -1063,6 +1072,7 @@ def file_version(path):
 
 def stage_reports(row):
     root, dataset = Path(row['output_root']), row['dataset']
+    options = json.loads(row['options_json'])
     if row['pipeline'] == 'mapping':
         definitions = [('conversion', 'CSV → FASTA', '各文件转换与跳过记录', '01.fasta', 'conversion_summary.csv'),
                        ('results', 'IgBLAST 比对与筛选', '按 FASTA 记录计数，不按 copy 加权', '02.igblastn_out', 'chain_summary.csv'),
@@ -1092,7 +1102,9 @@ def stage_reports(row):
     panda = '05.pandaseq' if row['pipeline'] in {'ir_split', '10x_split'} else '04.pandaseq'
     entries.append(('pandaseq', 'PANDAseq 序列合并', '输入、合并成功数及合并比例',
                     [root / panda / dataset / 'pandaseq_summary.csv']))
-    entries.append(('results', 'IgBLAST 比对与筛选', '匹配统计与 productive 筛选后统计', [result_file(row)]))
+    description = ('每条链比对后立即按 V 命中、productive 和目标 locus 筛选，包含其他链及未知 locus 的排除统计'
+                   if options.get('inline_locus_filter_version') else '匹配统计与 productive 筛选后统计')
+    entries.append(('results', 'IgBLAST 比对与筛选', description, [result_file(row)]))
     if row['pipeline'] in {'igblast_base', 'pig_igblast'} and '06.locus_split' in job_config(row)['stages']:
         entries.append(('locus_split', '按 locus 拆分', '按样本所选链保留记录，统计其他链及未知 locus 的排除数量',
                         [root / '06.locus_split' / dataset / 'locus_split_summary.csv']))
@@ -1881,6 +1893,7 @@ def get_job(job_id: str) -> dict[str, Any]:
     options.pop('approved_assignments', None)
     options.pop('mapping_inputs', None)
     options.pop('locus_split_version', None)
+    options.pop('inline_locus_filter_version', None)
     options.pop('directory_manifest_path', None)
     files = summary_files(row)
     detail = snapshot(row)

@@ -161,7 +161,7 @@
   },
   "igblast_base": {
     "label": "IgBLAST base",
-    "description": "常规 FASTQ：fastp → clean → PANDAseq → IgBLAST → 按 locus 拆分。",
+    "description": "常规 FASTQ：fastp → clean → PANDAseq → IgBLAST，每条链比对结束后立即筛选对应 locus。",
     "accent": "indigo",
     "runner": "Igblast_base/pipeline/run_igblast_base.sh",
     "stages": [
@@ -169,16 +169,14 @@
       "02.fastp",
       "03.clean",
       "04.pandaseq",
-      "05.igblast",
-      "06.locus_split"
+      "05.igblast"
     ],
     "stage_labels": {
       "01.match": "样本匹配",
       "02.fastp": "质量过滤",
       "03.clean": "Header 清理",
       "04.pandaseq": "序列合并",
-      "05.igblast": "IgBLAST",
-      "06.locus_split": "按 locus 拆分"
+      "05.igblast": "IgBLAST 与链筛选"
     },
     "form_fields": [
       "input_path",
@@ -212,7 +210,7 @@
   },
   "pig_igblast": {
     "label": "Pig IgBLAST",
-    "description": "猪物种 IgBLAST：使用 pig 数据库比对，再按 locus 拆分所选链。",
+    "description": "猪物种 IgBLAST：按所选链使用 pig 参考库，比对结束后立即筛选该链 locus。",
     "accent": "coral",
     "runner": "PigIgblast/pipeline/run_pig_pipeline.sh",
     "stages": [
@@ -220,16 +218,14 @@
       "02.fastp",
       "03.clean",
       "04.pandaseq",
-      "05.igblast",
-      "06.locus_split"
+      "05.igblast"
     ],
     "stage_labels": {
       "01.match": "样本匹配",
       "02.fastp": "质量过滤",
       "03.clean": "Header 清理",
       "04.pandaseq": "序列合并",
-      "05.igblast": "IgBLAST",
-      "06.locus_split": "按 locus 拆分"
+      "05.igblast": "IgBLAST 与链筛选"
     },
     "form_fields": [
       "input_path",

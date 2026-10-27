@@ -8,7 +8,7 @@ SCigblast 是免疫组库分析平台：Python/Bash 执行分析，`web/` 提供
 
 - `IR_split/pipeline/run_ir_pipeline.sh`：Match → fastp → Barcode/UMI 拆分 → header 清理 → PANDAseq → 代表序列 → IgBLAST → preprocessing。当前统一自动识别 raw/presplit；结果模型位于该分支 `models/`。
 - `10X_split/pipeline/run_10x_pipeline.sh`：Match → fastp → R1/R2 预筛选 → header 清理 → PANDAseq → Cell Barcode/UMI 拆分与代表序列 → IgBLAST → 链聚类。不要混用 IR 与 10X 的拆分规则。
-- `Igblast_base/pipeline/run_igblast_base.sh`、`PigIgblast/pipeline/run_pig_pipeline.sh`：Match → fastp → header 清理 → PANDAseq → IgBLAST → 按 locus 拆分；Pig 使用专属数据库逻辑。
+- `Igblast_base/pipeline/run_igblast_base.sh`、`PigIgblast/pipeline/run_pig_pipeline.sh`：Match → fastp → header 清理 → PANDAseq → IgBLAST 与链筛选，共五阶段；Pig 使用专属数据库逻辑。每个样本/链的比对一结束，就在同一 worker 内筛选并发布该链，不等待所有链结束。
 - 每个分支通过 `00.pipeline_config.env` 与 `tools/pipeline_config.py` 管理配置；Web 通过环境变量启动固定 Bash runner。容器工具路径由 `SCIGBLAST_RUNTIME_BIN_DIR` 覆盖，数据库需单独挂载。
 - `IR_split_merged/`、根目录 `pipeline/`、`preprocess/` 当前没有注册为 Web 流程；不要根据目录名推断它们是生产入口。
 
@@ -16,13 +16,15 @@ SCigblast 是免疫组库分析平台：Python/Bash 执行分析，`web/` 提供
 
 `web/app.py` 管理路径校验、队列、进程组、状态、审核和结果接口；`web/auth.py` 管理账户权限；`web/submission.py` 创建不可变 XLSX 工作副本。现有四条流程首次执行 Match 后进入 `WAITING_REVIEW`，全部记录完成标注且存在 OK 记录才能继续。
 
-新任务输出由服务器按用户、流程和北京时间分配。流程产物通常位于 `<output>/<stage>/<dataset>/`，日志为 `logs/<dataset>/pipeline.log`，状态为 `.pipeline_state/<dataset>/`；完成标记名称须与注册表和 `pipeline_done()` 对齐。仅运行单 Web 实例、单 Uvicorn worker；所有用户共用两个 pipeline 运行名额，第三条起按提交顺序排队；五条正式 runner 使用同一共享 `flock`，主分析使用共享门锁加两个独占槽位（锁路径后缀 .slot-1/.slot-2），Treemap 继续独占门锁并与所有主分析互斥；两种 FD 均由子进程继承并在退出时释放。不得删除正在使用的锁文件。Web 的 MAX_ACTIVE_JOBS 与 runner 槽位数同时固定为 2，不通过旧 SCIGBLAST_MAX_ACTIVE_JOBS 环境变量调整。阶段内部并行由各流程配置控制。保留已有任务归属、路径范围、停止进程组及归档行为。
+新任务输出由服务器按用户、流程和北京时间分配。流程产物通常位于 `<output>/<stage>/<dataset>/`，日志为 `logs/<dataset>/pipeline.log`，状态为 `.pipeline_state/<dataset>/`；完成标记名称须与注册表和 `pipeline_done()` 对齐。仅运行单 Web 实例、单 Uvicorn worker；所有用户共用两个 pipeline 运行名额，第三条起按提交顺序排队；五条正式 runner 使用同一共享 `flock`，主分析使用共享门锁加两个独占槽位（锁路径后缀 .slot-1/.slot-2），Treemap 继续独占门锁并与所有主分析互斥；两种 FD 均由子进程继承并在退出时释放。不得删除正在使用的锁文件。Web 的 MAX_ACTIVE_JOBS 与 runner 槽位数同时固定为 2，不通过旧 SCIGBLAST_MAX_ACTIVE_JOBS 环境变量调整。IgBLAST 在全部五条流程中最多并行 4 个链任务（不是每个进程 4 个线程）；配置默认 SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS=4，入口/worker 对更高值封顶，原 CPU/内存预算仍可降低实际并发。阶段内部并行由各流程配置控制。保留已有任务归属、路径范围、停止进程组及归档行为。
 
 Web 使用 `execution_json` 关联本次 attempt 的启动日志、运行日志边界和进程身份。续跑不能展示旧执行进度；恢复的进程组需核验后才能停止，不得仅凭旧 PID 发送信号。`web/preflight.py` 按匹配/分析阶段检查真实运行环境；`web/table_preview.py` 为普通结果提供有界游标读取，Match 仍保持完整 revision 审核统计。普通结果的 `total` 在扫描完成前可为 null，调用者使用 `has_more`、`next_cursor`、`scan_complete`，不能把尚未扫描完当成零结果。
 
 Base/Pig 使用根目录 `pipeline_igblast_cache.py` 生成一次 IgBLAST 依赖快照，供 stage 与 task 缓存共同使用。涉及工具、参考库、aux、过滤及参数变化时使相应缓存失效；若人工替换参考文件同时保留大小/修改时间，须更新各自配置的 `SCIGBLAST_IGBLAST_REFERENCE_VERSION`。每次重新进入 stage5 时使当前清单的旧聚合失效，成功聚合和摘要原子发布；`output_path` 必须指向实际 task TSV。
 
-Pig 的 05 IgBLAST 对存在的链专属 C 库传 `-c_region_db .../pig_gl_<CHAIN>_C -num_alignments_C 1`，没有 C 库时保留 V/D/J 分析；不能把 TCR 强制改成 Ig。依赖快照对 Base/Pig 均记录 V/D/J/C 的 sidecar，C 库新增或变化使对应链缓存失效。remote_nanhua 上 IgBLAST 1.22.0 已用 TRA/TRB 各 5 条真实序列对照验证：不传 C 库时 AIRR 无 c_call 列，加参数后均有对应 TRAC/TRBC 注释。2026-10-27 补库前 pig_chain 仅 TRA/TRB 有 C 库；当天已按下述记录新增 BCR C 库。缺少 C 参考的链仍不能推造 c_call。05 筛选与 06 locus 拆分须保留新增的 C 字段，旧结果需要重新执行 mapping 才能补齐，不能只新增空列。
+2026-10-27 将独立 06 链筛选并入 Base/Pig 的 05：`pipeline_locus_split.filter_mapping_airr()` 单次流式读取各链 raw AIRR，同时检查 V 命中、productive 与 `locus == 当前任务配置链`，保留全部 AIRR 列；未知及其他 locus 排除。逐链结果直接写到 05 的既有样本目录 `<CHAIN>.tsv`，raw/日志/逐链 DONE 仍位于 `.tasks`；筛选成功并原子发布后才写 DONE。所有链结束后仅汇总统计、合并兼容的 TCR.tsv/BCR.tsv，不再批量筛选或创建 06。摘要增加 locus_input_rows、excluded_locus_rows、unknown_locus_rows、locus_filter_version；排除统计仅针对已通过 V/productive 的记录，unknown 为排除的子集。缓存记录新的筛选版本和共享实现哈希，旧筛选缓存不得直接复用。Web 新任务记录 inline_locus_filter_version=1，阶段完成标记也须含 locus_filter_version=1；旧六阶段任务保留历史显示，明确续跑时转为新五阶段。Treemap 新任务直接读取 05 的已验证单链结果，明确用 locus 字段；新 05 摘要存在时目录扫描也忽略残留旧 06。历史六阶段结果与手工离线拆分 CLI 继续兼容，不自动改写旧结果。
+
+Pig 的 05 IgBLAST 对存在的链专属 C 库传 `-c_region_db .../pig_gl_<CHAIN>_C -num_alignments_C 1`，没有 C 库时保留 V/D/J 分析；不能把 TCR 强制改成 Ig。依赖快照对 Base/Pig 均记录 V/D/J/C 的 sidecar，C 库新增或变化使对应链缓存失效。remote_nanhua 上 IgBLAST 1.22.0 已用 TRA/TRB 各 5 条真实序列对照验证：不传 C 库时 AIRR 无 c_call 列，加参数后均有对应 TRAC/TRBC 注释。2026-10-27 补库前 pig_chain 仅 TRA/TRB 有 C 库；当天已按下述记录新增 BCR C 库。缺少 C 参考的链仍不能推造 c_call。05 内链筛选及兼容旧 06 拆分须保留新增的 C 字段，旧结果需要重新执行 mapping 才能补齐，不能只新增空列。
 
 2026-10-27 补库前通过 remote_nanhua 的 blastdbcmd 导出核验实际索引内容（不能只看 nhr/nin/nsq 是否存在）：pig_chain 的 TRA 为 V=103/J=98/C=1（C 270 nt）；TRB 为 V=30/D=3/J=18/C=3（C 均 387 nt）；IGH 为 V=17/D=5/J=6，IGK 为 V=25/J=9，IGL 为 V=23/J=4，当时后三者无 C。TRG 只有 11 条真实 V，缺 J/C。TRD 的 V/D/J 虽有索引，实际均为单条长度 1 的 N（placeholder_TRD_V/D/J），无真实参考及 C，不能作为已支持链。TRA/IGK/IGL/TRG 的 D 也为 1-N 兼容占位，不计作真实 D。真实库序列与同目录 FASTA 内容一致；上游 database_251117/pig 合并源也缺 TRD、TRG J/C 和 pig_IG_C，不是分库后丢失。数量为参考序列/等位记录数，V/J/C 组件具备不等于全长基因或全部等位基因覆盖，需来源注释另行核验。
 
@@ -74,7 +76,7 @@ Base/Pig 新增第六阶段 `06.locus_split`，共用根目录 `pipeline_locus_s
 
 独立入口 `/treemap` 可选有权限的成功任务或受控服务器目录，`/api/treemap/scan` 返回绑定用户和有效期的快照，提交 selected_ids；跨页/搜索只影响显示。纯目录表格必须有明确样本链身份，原始 FASTQ/FASTA/官方未注释 CSV 不适用。手填平台任务路径仍检查任务归属。关联运行归属于来源任务所有者，独立运行归属于提交者。产物按 run/attempt 独立保存，PNG/manifest 原子发布；下载用产物 ID 并核验所有权、版本、真实路径和符号链接。历史列表只读进度摘要，详情才载入产物，不在每次列表轮询扫描所有图。
 
-Web 入口包含新建任务开关、任务输出页共用预览组件及独立工作台（treemap-view.js/treemap.js/treemap.css）；适用于五流程最终 mapping 结果及兼容 AIRR 目录，不限制为 Pig。默认不加载图片；选择样本或链/合图类型后直接展示，两项可组合筛选，无需确认。共用组件按筛选结果分页，每页最多 7 张，仅为当前页创建 img，采用懒加载；“查看全部”清除筛选并仅展示第一页。轮询保留筛选、页码与未变化的图片节点，所选样本/链暂时缺图时保留条件，不能悄悄切回全部；切换生成记录重置视图。新输出与 ZIP 使用 `individual_treemaps/<安全样本标识>/`、`multi_chain_treemaps/<安全样本标识>/`；历史文件不迁移，ZIP 按 manifest 的 kind/sample_key 整理路径。支持全部结果/当前样本流式 ZIP，权限、版本及路径检查必须全部通过，不静默遗漏文件；全量含根目录统计 CSV，样本 ZIP 仅含该样本图片。旧任务未设置不会自动补生成。关联任务图随任务归档，纯目录绘图不自动进入旧归档脚本。Docker 白名单打包 analysis/treemap 与 postanalysis.py，环境显式依赖 Pillow。聚合/像素保真测试、五流程来源测试和 API/生命周期测试位于 analysis/treemap/tests/test_core.py、tests/test_sources.py、web/tests/test_treemap.py。
+Web 入口包含新建任务开关、任务输出页共用预览组件及独立工作台（treemap-view.js/treemap.js/treemap.css）；适用于五流程最终 mapping 结果及兼容 AIRR 目录，不限制为 Pig。默认不加载图片；选择样本或链/合图类型后直接展示，两项可组合筛选，无需确认。共用组件按筛选结果分页，每页最多 7 张，仅为当前页创建 img，采用懒加载；“查看全部”清除筛选并仅展示第一页。轮询保留筛选、页码与未变化的图片节点，所选样本/链暂时缺图时保留条件，不能悄悄切回全部；切换生成记录重置视图。新输出与 ZIP 使用 `individual_treemaps/<安全样本标识>/`、`multi_chain_treemaps/<安全样本标识>/`；历史文件不迁移，ZIP 按 manifest 的 kind/sample_key 整理路径。支持全部结果/当前样本流式 ZIP，权限、版本及路径检查必须全部通过，不静默遗漏文件；全量含根目录统计 CSV，样本 ZIP 仅含该样本图片。旧任务未设置不会自动补生成。关联任务图随任务归档，纯目录绘图不自动进入旧归档脚本。Docker 白名单打包 analysis/treemap 与 postanalysis.py，环境显式依赖 Pillow。额外验证使用临时合成数据与独立输出，完成后清理脚本与测试日志。
 
 任务详情的树图组件采用 `mount(..., {embedded:true, metaTarget, actionsTarget})`：共用筛选与分页图库，名称不在正文重复显示，状态/处理数量/创建时间与取消或重试按钮合并到任务树图标题栏。只有生成中显示进度条，完成后数量显示在状态旁；计数口径折叠为“计数说明”。当前已有生成记录时不再显示无效的“生成树图”按钮，失败/空结果等通过该记录的重试操作处理；多条记录才显示折叠的“其他生成记录”，入口链接到工作台。轮询保留折叠状态、筛选与图片节点。
 
@@ -94,33 +96,32 @@ PNG 命名统一由 `image_relative()` 负责：单链为 `样本名__CHAIN.png`
 
 ## 开发与验证
 
+按用户 2026-10-27 明确要求移除项目全部测试代码（测试目录与合成测试基准脚本），并清理临时测试日志、缓存；后续额外验证应放在独立临时目录，结束后清理。保留产品合成教学包/生成器、镜像构建必需的 check_runtime.py / check_bundle.py，以及正式任务与 IgBLAST 日志。
+
 2026-10-22 Web 优化：目录、reMapping 和独立 Treemap 重扫使用候选结果，失败保留已确认草稿，但禁止使用失败/旧来源提交。目录按稳定 ID、读端路径与 versions 恢复编辑；reMapping/Treemap 扫描返回不透明 source_version，仅为恢复选择使用，不作为提交授权。变化条目需重新选择；首次扫描默认全选、重新 Match 新增项默认不选保持不变。分页 GET 仅对网络错误与 502/503/504 最多重试两次，不重试扫描 POST 或权限/过期错误。任务列表按 job.id/单元格更新，保留链接、按钮及 summary 焦点；Treemap 详情最多一个请求在途、一个最新待处理目标，不使用递归定时器。
 
 `web/input_manifest.py` 的私有 LRU 上限为 8 个快照、20,000 行、估算 32 MiB，对外仅返回页/清单副本；每次命中仍核验文件身份及 owner/pipeline/path/expires。`web/mapping_results.py` 按完整 key 共用在途构建，CSV 解析在全局 LRU 锁外，失败释放等待者；文件可用性仍实时检查。任务分页以 created_at/id 双降序稳定排序，owner/created_at/id 组合索引不改变统计权限范围。
 
 Treemap 新运行使用 `web/derived_store.py` 的 storage_version=2：derived_runs 只存小元信息与进度，derived_items/artifacts/samples 分项存储。每波最多读取 32 个 queued 候选（实际 worker 上限不变），仅写变化项和新产物；合图按一个样本读取，详情/最终表才恢复全量清单。无版本/版本 1 沿用整份 JSON，不自动迁移或补算。创建/发现、批次使用/发布、合图图片和最终发布继续核验来源/版本；保存事务重新核验取消与 parent attempt，缺失/变更单链图在重试时重做。删除任务须同事务删除三个子表；不得把 `_partial`、source 或 clone_table 暴露给 API。新模块必须同步 Docker COPY、白名单和 check_bundle。已经写入 v2 的数据库不能只回退旧代码；停服备份后须做受控 v1 兼容导出或恢复对应旧数据库，优先向前修复。
 
-合成状态基准：`rtk proxy python web/tools/benchmark_web_state.py --archive-files 10000`，只使用临时目录和内存 SQLite，不运行分析。分别报告快照读取、整份 JSON 序列化投影、增量序列化实际采样、查询计划及归档 Python 分配峰值；不把这些数值当作真实生物分析耗时或进程 RSS。归档保留原压缩/完整性检查流程。
 
-Base/Pig 已支持 `sample_source=directory`，`pipeline_input_manifest.py` 扫描并验证明确配对，`web/input_manifest.py` 保存用户绑定快照和不可变清单；API 为 `/api/input/scan`、分页扫描视图、任务 `/input-assignments` 与 `/input-rematch`。目录模式绕过外部 XLSX，仍生成原 Match CSV、进入人工审核；严禁将 requires_submission=false 分支当通用模式，该分支仍为 reMapping 专用。runner 接收 `SCIGBLAST_RUN_INPUT_MANIFEST/HASH`，检查失败必须停止，不能复用旧成功 Match。Base/Pig 阶段指纹包含清单与共享模块。IR/10X 尚未开放目录模式；文件/样本身份不得通过目录名或 Chain 猜测 Barcode。UI 状态组件在 `web/static/directory-input.js`。验证用 `web/tests/test_directory_input.py`。
+Base/Pig 已支持 `sample_source=directory`，`pipeline_input_manifest.py` 扫描并验证明确配对，`web/input_manifest.py` 保存用户绑定快照和不可变清单；API 为 `/api/input/scan`、分页扫描视图、任务 `/input-assignments` 与 `/input-rematch`。目录模式绕过外部 XLSX，仍生成原 Match CSV、进入人工审核；严禁将 requires_submission=false 分支当通用模式，该分支仍为 reMapping 专用。runner 接收 `SCIGBLAST_RUN_INPUT_MANIFEST/HASH`，检查失败必须停止，不能复用旧成功 Match。Base/Pig 阶段指纹包含清单与共享模块。IR/10X 尚未开放目录模式；文件/样本身份不得通过目录名或 Chain 猜测 Barcode。UI 状态组件在 `web/static/directory-input.js`。
 
-新建 Pig 目录任务清单记录 `output_layout=sample-v1`，各阶段用 `pipeline_input_manifest.pig_output_relative()` 生成单层样本目录，最终为 `05.igblastn_out/<dataset>/<sample>/TCR.tsv` 或 BCR.tsv。旧清单无该字段、Submission 模式沿用原 `raw_relative_parent/pair/sample` 路径；目录重新 Match 保留任务原布局版本。不能只修改最终阶段，否则前序输入和缓存会失配。Shell 阶段在构建任务列表时解析路径一次，避免每个 worker 重读整份清单；Pig 阶段指纹始终包含共享模块。
+新建 Pig 目录任务清单记录 `output_layout=sample-v1`，各阶段用 `pipeline_input_manifest.pig_output_relative()` 生成单层样本目录，最终链结果为 `05.igblastn_out/<dataset>/<sample>/<CHAIN>.tsv`，兼容汇总 TCR.tsv/BCR.tsv 保留。旧清单无该字段、Submission 模式沿用原 `raw_relative_parent/pair/sample` 路径；目录重新 Match 保留任务原布局版本。不能只修改最终阶段，否则前序输入和缓存会失配。Shell 阶段在构建任务列表时解析路径一次，避免每个 worker 重读整份清单；Pig 阶段指纹始终包含共享模块。
 
-首页流程介绍同时提供 `web/static/demos/scigblast-teaching-v1.zip` 合成教学包与 README；由 `web/tools/build_teaching_demo.py` 生成，`web/tests/test_teaching_demo.py` 验证真实转换和四条 Match。教学数据仅练习格式、选择、提交与审核，随机序列不保证有效免疫注释，FASTQ 不模拟 IR/10X 建库。不要把真实用户数据打包进静态下载；更新包时同步教程、检查点和 Docker 白名单。
+首页流程介绍同时提供 `web/static/demos/scigblast-teaching-v1.zip` 合成教学包与 README；由 `web/tools/build_teaching_demo.py` 生成。教学数据仅练习格式、选择、提交与审核，随机序列不保证有效免疫注释，FASTQ 不模拟 IR/10X 建库。不要把真实用户数据打包进静态下载；更新包时同步教程、检查点和 Docker 白名单。
 
 Mapping 扫描还按 `sample_key=相对目录/样本名` 展示样本及链，默认全选，用户可多选样本。API 字段为 `mapping_samples`，runner 环境变量为 JSON 数组 `SCIGBLAST_MAPPING_SAMPLES`；任务保存具体选择，三个阶段仅处理“所选链 ∩ 所选样本”的源文件。未传样本选择的旧任务/CLI 默认全部样本，显式空列表拒绝执行。
 
 所有 shell 命令按项目要求加 `rtk`；无对应过滤器时使用 `rtk proxy <command>`。Git 历史采用 `Add/Fix/Improve/Unify ...` 英文祈使句提交说明，未发现统一 formatter/linter 配置。
 
 ```bash
-rtk proxy python -m pip install -r web/requirements.txt httpx
-rtk proxy python -m unittest discover -s web/tests -v
-rtk proxy python -m unittest discover -s web/tests -p test_workflow.py -v
+rtk proxy python -m pip install -r web/requirements.txt
 rtk proxy docker compose -f web/docker-compose.yml build
 rtk proxy docker compose -f web/docker-compose.yml up -d
 ```
 
-Web 测试使用临时数据及模拟进程，不代表真实 IgBLAST 已通过验证。分析工具链在 Linux/Docker 验收。镜像由 `web/Dockerfile` 和 `web/Dockerfile.dockerignore` 白名单打包，新增流程需同步 `web/check_bundle.py`；宿主机脚本修改需重建镜像才生效。`deploy.sh` 会先拉取代码并重建服务，不能作为普通本地检查执行。
+临时模拟检查不代表真实 IgBLAST 全量验收。分析工具链在 Linux/Docker 验收。镜像由 `web/Dockerfile` 和 `web/Dockerfile.dockerignore` 白名单打包，新增流程需同步 `web/check_bundle.py`；宿主机脚本修改需重建镜像才生效。`deploy.sh` 会先拉取代码并重建服务，不能作为普通本地检查执行。
 
 用户指定测试服务器通过 `ssh remote_nanhua` 访问；测试数据在 `/colddata/SCigblast/data/SCigblastWeb/web_test/20260909`。远端验证使用独立临时输出和受限资源容器，输入/参考库只读挂载；不要直接修改在线服务、生产结果或并发配置。
 

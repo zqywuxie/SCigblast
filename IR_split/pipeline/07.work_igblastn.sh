@@ -54,7 +54,7 @@ MONITOR_INTERVAL_SEC='5'                                                # 0 mean
 # audit/resume and this branch does not automatically delete intermediates.
 # Set to 0 only when explicit cleanup is requested.
 KEEP_INTERMEDIATE="${SCIGBLAST_IGBLAST_KEEP_INTERMEDIATE:-1}"
-MAX_PARALLEL_JOBS="${SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS:-2}"           # max concurrent igblastn / classify jobs
+MAX_PARALLEL_JOBS="${SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS:-4}"           # max concurrent igblastn / classify jobs
 BATCH_FASTA="${SCIGBLAST_IGBLAST_BATCH_FASTA:-500}"                     # barcode FASTAs per igblastn batch
 MONITOR_DIR=""
 SUMMARY_FILE=""
@@ -196,6 +196,10 @@ done
 
 positive_int "$NUM_THREADS" || fail "--threads must be a positive integer: $NUM_THREADS"
 positive_int "$MAX_PARALLEL_JOBS" || fail "--parallel must be a positive integer: $MAX_PARALLEL_JOBS"
+if (( MAX_PARALLEL_JOBS > 4 )); then
+    printf '[IR][igblast] Capping parallel jobs at 4 (requested %s)\n' "$MAX_PARALLEL_JOBS"
+    MAX_PARALLEL_JOBS=4
+fi
 positive_int "$BATCH_FASTA" || fail "--batch-fasta must be a positive integer: $BATCH_FASTA"
 nonnegative_int "$MEMORY_LIMIT_GB" || fail "--memory-limit-gb must be a non-negative integer: $MEMORY_LIMIT_GB"
 nonnegative_int "$MEMORY_BUDGET_GB" || fail "SCIGBLAST_MEMORY_BUDGET_GB must be a non-negative integer: $MEMORY_BUDGET_GB"

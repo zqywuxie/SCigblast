@@ -13,9 +13,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+from pipeline_locus_split import MAPPING_FILTER_VERSION
 
 
-FILTER_VERSION = "productive-and-valid-v-1"
+FILTER_VERSION = MAPPING_FILTER_VERSION
 SCHEMA_VERSION = 2
 SUPPORTED = {"TRA", "TRB", "TRD", "TRG", "IGH", "IGK", "IGL"}
 
@@ -59,6 +60,7 @@ def dependency_snapshot(*, mode: str, db_root: Path, binary: str, species: str,
         "reference_version": os.environ.get("SCIGBLAST_IGBLAST_REFERENCE_VERSION", ""),
         "implementation": hashlib.sha256(implementation.read_bytes()).hexdigest(),
         "helper": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "locus_filter": hashlib.sha256(Path(__file__).with_name('pipeline_locus_split.py').read_bytes()).hexdigest(),
         "igdata": str(Path(os.environ.get("IGDATA") or db_root).resolve()),
     }
     if inherited:
