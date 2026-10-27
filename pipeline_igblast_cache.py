@@ -75,7 +75,7 @@ def dependency_snapshot(*, mode: str, db_root: Path, binary: str, species: str,
     signatures = {}
     for chain in context["chains"]:
         parts = {}
-        for part in (("V", "D", "J") if mode == "pig" else ("V", "D", "J", "C")):
+        for part in ("V", "D", "J", "C"):
             prefix = db_root / "database_251117" / database_version / chain / f"{species}_gl_{chain}_{part}"
             parts[part] = [metadata(path) for path in sorted(prefix.parent.glob(prefix.name + ".*")) if path.is_file()]
         signatures[chain] = digest({"common": common, "chain": chain, "databases": parts})

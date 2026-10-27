@@ -83,6 +83,20 @@ def test_resume_reuses_valid_files_and_repairs_only_changed_or_missing(tmp_path)
     assert list(split.rows(target/split.SUMMARY))[0]['output_rows'] == '2'
 
 
+def test_locus_split_preserves_constant_region_calls(tmp_path):
+    summary, manifest, target, a, _ = fixture(tmp_path)
+    with a.open(encoding='utf-8',newline='') as handle:
+        records = list(csv.reader(handle,delimiter='\t'))
+    with a.open('w',encoding='utf-8',newline='') as handle:
+        writer = csv.writer(handle,delimiter='\t')
+        writer.writerow(records[0]+['c_call'])
+        writer.writerows(record+['2026pigTRAC*01'] for record in records[1:])
+    assert split.run(summary,target,manifest)
+    retained = list(split.rows(target/'A/TRA.tsv'))
+    assert len(retained)==1
+    assert retained[0]['c_call']=='2026pigTRAC*01'
+
+
 def test_missing_locus_fails_and_does_not_publish_a_false_success(tmp_path):
     summary, manifest, target, a, _ = fixture(tmp_path)
     assert split.run(summary, target, manifest)

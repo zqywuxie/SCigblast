@@ -118,6 +118,9 @@ def task(job):
     d = db(chain, "D")
     if not db_ok(d): common["error"] = f"missing {chain} D database"; return common
     args.extend(["-germline_db_D", str(d)])
+    c = db(chain, "C")
+    if db_ok(c):
+        args.extend(["-c_region_db", str(c), "-num_alignments_C", "1"])
     args.extend(["-auxiliary_data", str(aux), "-organism", "pig", "-ig_seqtype", seqtype, "-query", str(fasta), "-outfmt", "19", "-num_threads", str(THREADS)])
     with Path(str(filtered) + ".log").open("w", encoding="utf-8") as log: rc = subprocess.run(args + ["-out", str(raw)], stdout=log, stderr=subprocess.STDOUT).returncode
     if rc or not raw.is_file(): common["error"] = "igblast_failed"; raw.unlink(missing_ok=True); return common

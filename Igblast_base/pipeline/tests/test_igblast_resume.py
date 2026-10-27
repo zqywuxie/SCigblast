@@ -231,13 +231,23 @@ if stage_done "$STAGE"; then exit 21; fi
             with patch.object(cache, "metadata", side_effect=AssertionError("unexpected metadata scan")):
                 self.assertEqual(fixture.snapshot(inherited=json.dumps(snapshot)), snapshot)
 
-    def test_optional_database_addition_invalidates_base_chain(self):
-        with tempfile.TemporaryDirectory() as folder:
-            fixture = StageFixture(folder, "base")
-            self.assertEqual(fixture.run(), 0)
-            fixture.index("TRA", "C").write_bytes(b"C-index")
-            self.assertEqual(fixture.run(), 0)
-            self.assertEqual(fixture.calls, ["TRA", "TRA"])
+    def test_optional_c_database_addition_and_change_only_invalidate_affected_chain(self):
+        for mode in ('base', 'pig'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                fixture = StageFixture(folder, mode, ('TRA','TRB'))
+                self.assertEqual(fixture.run(), 0)
+                previous = fixture.snapshot()
+                fixture.index('TRA', 'C').write_bytes(b'C-index')
+                added = fixture.snapshot()
+                self.assertNotEqual(previous['chains']['TRA'],added['chains']['TRA'])
+                self.assertEqual(previous['chains']['TRB'],added['chains']['TRB'])
+                self.assertEqual(fixture.run(), 0)
+                self.assertEqual(fixture.calls.count('TRA'),2)
+                self.assertEqual(fixture.calls.count('TRB'),1)
+                fixture.index('TRA','C').write_bytes(b'updated-C-index')
+                self.assertEqual(fixture.run(),0)
+                self.assertEqual(fixture.calls.count('TRA'),3)
+                self.assertEqual(fixture.calls.count('TRB'),1)
 
     def test_failed_group_removes_previous_aggregate_and_can_recover(self):
         for mode in ("base", "pig"):

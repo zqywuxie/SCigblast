@@ -118,6 +118,10 @@ Web 启动的任务最多同时运行 2 条 pipeline，名额由所有用户和�
 
 Base/Pig 的 stage 与 task 缓存共同验证 IgBLAST 工具、参考库 sidecar、aux 和参数版本；参考文件保留大小/修改时间替换时，应更新各分支配置的 `SCIGBLAST_IGBLAST_REFERENCE_VERSION`。部署修改需重建镜像；新版本首次遇到旧缓存会重新验证/执行相应阶段。
 
+Pig 会在链专属 C 区数据库存在时传入 `-c_region_db`，让 IgBLAST 的 AIRR 结果输出 `c_call` 等 C 区字段；TCR 仍使用 TCR 模式。没有对应 C 库时继续 V/D/J 分析，不补造 C 注释。C 库新增或更新会使对应链缓存失效，05 筛选和 06 locus 拆分保留完整 AIRR 列。旧的无 C 注释结果需在部署后重新执行 mapping，单独重新拆分或绘制 Treemap 不能补算 C 区。
+
+2026-10-27，remote_nanhua 的 `database_251117/pig_chain` 已补入 IMGT 猪 BCR C 参考：IGH 29 条、IGK 2 条、IGL 2 条，版本为 `imgt-sus-scrofa-C-20261027`。每链保留原始字段来源及 SHA256 的 `pig_gl_<CHAIN>_C.provenance.json`；IGH 中 7 条为有明确标记的部分 C 区外显子参考，不宣称全长。原始导出与构建/验证记录保存在该库的 `.reference_sources/bcr_C_20261027_a8b8497e/`，原有 V/D/J 和 TCR 文件保持原样。来源为 [IMGT/GENE-DB 官方核苷酸导出](https://imgt.org/genedb/directlinks)，不使用整段基因组 BAC 作为单条 C 参考。使用这些新库需要部署含上述 C 区参数修复的 Pig 脚本。
+
 必须使用单 Web 实例、单 Uvicorn worker。第三条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，两条任务共用，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前获取共享门锁及两个槽位之一的独占 `flock`，Web 与终端直接启动的任务合计最多执行两条。Treemap 持有门锁的独占模式，保持与主分析互斥。默认门锁为 `/colddata/SCigblast/results/.scigblast-resource.lock`，槽位文件为同路径加 `.slot-1` / `.slot-2`；文件不能在任务运行时删除。锁和槽位必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。
 
 `.env.example` 中 `SCIGBLAST_ALLOWED_*_ROOTS` 是容器内路径，并且必须已被 Compose 挂载；Linux 多根用冒号分隔。设置允许根不会自动增加挂载。路径验证不等于数据库/工具真实运行成功；部署后仍需各类型小数据验收，特别是 cgroup 内存限制。`deploy.sh` 检测到运行/排队任务会拒绝重建；更新期间不要提交新任务。
