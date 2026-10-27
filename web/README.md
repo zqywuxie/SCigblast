@@ -122,6 +122,8 @@ Pig 会在链专属 C 区数据库存在时传入 `-c_region_db`，让 IgBLAST �
 
 2026-10-27，remote_nanhua 的 `database_251117/pig_chain` 已补入 IMGT 猪 BCR C 参考：IGH 29 条、IGK 2 条、IGL 2 条，版本为 `imgt-sus-scrofa-C-20261027`。每链保留原始字段来源及 SHA256 的 `pig_gl_<CHAIN>_C.provenance.json`；IGH 中 7 条为有明确标记的部分 C 区外显子参考，不宣称全长。原始导出与构建/验证记录保存在该库的 `.reference_sources/bcr_C_20261027_a8b8497e/`，原有 V/D/J 和 TCR 文件保持原样。来源为 [IMGT/GENE-DB 官方核苷酸导出](https://imgt.org/genedb/directlinks)，不使用整段基因组 BAC 作为单条 C 参考。使用这些新库需要部署含上述 C 区参数修复的 Pig 脚本。
 
+同日已将该猪库 V/J 的 344 条参考 ID 去掉开头 `2026pig`，例如 `2026pigIGHV1-10*01` → `IGHV1-10*01`，版本为 `pig-vj-canonical-20261027_115846`。核苷酸序列与 D/C 标识保留；现存 V/J 索引重建，`pig.aux` 添加规范 J ID 别名且兼容旧库，内部 V 注释保留并经对照验证。完整备份（包括刚补入的 C 库、内部注释及 aux）位于 remote_nanhua 的 `/colddata/zqy/igblast/backups/pig_chain_before_vj_rename_20261027_115658/`，`SHA256.json` 校验全部 316 个原文件。现用库路径不变，详情与验证记录在库内 `.reference_sources/pig-vj-canonical-20261027_115846/`；新 mapping 使用规范名称，已有结果不会自动改名。恢复数据库时须同时恢复配套 aux，并持有平台门锁的独占锁，避免与分析进程并行替换参考。
+
 必须使用单 Web 实例、单 Uvicorn worker。第三条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，两条任务共用，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前获取共享门锁及两个槽位之一的独占 `flock`，Web 与终端直接启动的任务合计最多执行两条。Treemap 持有门锁的独占模式，保持与主分析互斥。默认门锁为 `/colddata/SCigblast/results/.scigblast-resource.lock`，槽位文件为同路径加 `.slot-1` / `.slot-2`；文件不能在任务运行时删除。锁和槽位必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。
 
 `.env.example` 中 `SCIGBLAST_ALLOWED_*_ROOTS` 是容器内路径，并且必须已被 Compose 挂载；Linux 多根用冒号分隔。设置允许根不会自动增加挂载。路径验证不等于数据库/工具真实运行成功；部署后仍需各类型小数据验收，特别是 cgroup 内存限制。`deploy.sh` 检测到运行/排队任务会拒绝重建；更新期间不要提交新任务。
