@@ -169,6 +169,12 @@ QQ 参数可参考[腾讯官方 SMTP 配置表](https://intl.cloud.tencent.com/z
 
 绘图复用 `treemap_g.py` 的 QR 样式：只统计 `productive == T` 且 CDR3 非空的最终记录，按完整 V/J/CDR3 聚合，每条记录计 1，**不按 copy/umi_count/umi_counts 加权**。块面积表示链内记录占比；多链图的链区采用固定比例排版，面积不表示链间丰度。无有效记录、缺字段、来源文件缺失和绘图失败分别展示。首版不提供俄罗斯方块或 V/J 环形图。
 
+Base/Pig 的主流程新增 `06.locus_split`：读取 `05.igblastn_out` 摘要中的真实单链 task TSV，按每个样本在 Match 中选择的 Chain 核对行内 `locus`，只保留目标链，其他链及空/未知 locus 排除。原 05 文件保留，拆分文件位于 `06.locus_split/<数据集>/<样本>/<链>.tsv`（重名样本自动区分），全部 AIRR 列保持；零结果仅表头。`locus_split_summary.csv` 记录 input_rows、output_rows、excluded_locus_rows 和 unknown_locus_rows（未知为排除数量的子集）。缺少 locus 或输入缺失/变化会导致该阶段失败。逐行流式读取，按输入及输出版本逐文件续跑；仅缺失或变化的结果重新拆分。两条 runner 都必须完成拆分阶段才能完成主任务；任务详情和流程介绍显示第 6 阶段。
+
+Treemap 和 Clone Top 使用 06 拆分结果，并按 `locus` 再核对目标链，新任务缺少拆分结果时不回退到 05。目录扫描不会同时统计同一数据集的 05 与 06。旧五阶段任务没有 06 时仍可读取历史 05 结果，旧图不自动重算；续跑旧任务会新增第 6 阶段，再创建树图生成记录即可使用拆分数据。reMapping 仍使用 `03.umi_count`，IR 使用 `08.preprocessing/junction_peps`，10X 使用 `08.cluster`。普通独立来源在聚合前核对 `chain`，无此列时使用 `locus`；字段为空、未知或属于其他链的记录不计入目标链，两个字段都没有的明确单链文件才沿用文件身份。已有绘图运行保留原统计策略，避免续跑时混用新旧结果。
+
+已有 05 结果也可单独执行拆分，不重新比对：在项目根目录运行 `python pipeline_locus_split.py --summary <任务输出>/05.igblastn_out/<数据集>/chain_summary.csv --manifest <任务输出>/01.match/<数据集>/sample_manifest.csv --output <任务输出>/06.locus_split/<数据集>`。`--check` 只核验完成状态，`--force` 强制重新拆分。命令不会修改 Web 任务状态；拆分成功后可从树图工作台重新扫描生成。
+
 新生成的记录另输出一份 `clone_top.csv`，可点击“下载 Clone Top CSV”，全量 ZIP 也包含该表。默认保留所有克隆，按每个样本、每条链的有效记录数降序排列，可用 `rank` 筛选 Top 10/50/100；计数相同按 V、J、CDR3 原始文本排序。CSV 使用 UTF-8 BOM，字段为：
 
 | 字段 | 含义 |
@@ -183,6 +189,8 @@ QQ 参数可参考[腾讯官方 SMTP 配置表](https://intl.cloud.tencent.com/z
 表格与图片复用同一次聚合结果，不重新读取来源数据；失败链不写入克隆表，原因保留在 `treemap_summary.csv`，全部无有效克隆时仅输出表头。失败重试后重新合并总表，避免重复记录。历史生成记录不会自动补算，可从树图 Tab 或工作台重新生成以获得表格。
 
 关联任务的派生输出在 `<任务输出>/treemap/YYYYMMDD_HHMMSS/`；纯目录绘图由服务器分配到 `<默认输出根>/<用户>/treemap/YYYYMMDD_HHMMSS/`，不写回输入目录。目录时间采用北京时间，同秒多次生成依次加 `_02`、`_03`，并在数据库写事务内检查已登记路径和现存目录，避免覆盖。生成记录 ID 与执行次数保留在数据库；历史记录继续使用已登记的原路径，不迁移目录。单链图位于 `individual_treemaps/<安全样本标识>/`，合图位于 `multi_chain_treemaps/<安全样本标识>/`。各运行保留来源版本、选择、计数规则、PNG、`clone_top.csv` 和 `treemap_summary.csv`。ZIP 流式打包，不在结果目录创建压缩包；全量 ZIP 包含两份 CSV，当前样本 ZIP 仅含该样本图片。历史图片保持原路径，下载 ZIP 时也整理为上述两个目录。关联任务续跑后旧图标为过期；归档时 CSV/PNG 随完整压缩包保存，在线副本可以移除，归档后不能补生成。纯目录绘图首版不纳入 pipeline 的 14 天自动归档规则。
+
+PNG 文件名：单链为 `样本名__CHAIN.png`（如 `Demo_A__IGH.png`），多链合图直接为 `样本名.png`（如 `Demo_A.png`）。ZIP 使用相同命名；不同来源的同名样本由各自的安全样本子目录隔离。历史磁盘文件保留原名称和访问路径。
 
 绘图采用一个后台调度器和有界的多进程批次：默认最多 2 个独立单链 worker，实际数量取 CPU 配额/亲和性、当前可用内存和配置上限的较小值；单链完成后逐样本生成合图。不在进程间传输 DataFrame 或图片。每批次由一个轻量监督进程管理，同组子进程继承 pipeline 的共享资源锁，主分析排队后不再启动下一批。取消/关闭会停止并核验整组进程退出；单链失败独立记录，重试复用成功单链。
 

@@ -30,6 +30,47 @@ def write_summary(path: Path, fields: list[str], rows: list[dict[str, str]]) -> 
 
 
 class SourceDiscoveryTests(unittest.TestCase):
+    def test_base_and_pig_prefer_locus_split_without_duplicate_mapping_sources(self):
+        from analysis.treemap.aggregate import load_clones
+        for pipeline in ('igblast_base', 'pig_igblast'):
+            with self.subTest(pipeline=pipeline), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                previous = write_table(root/'05.igblastn_out/set/.tasks/S/TRA.tsv')
+                write_summary(root/'05.igblastn_out/set/chain_summary.csv',
+                              ['sample_id','pair_id','chain','status','output_path'],
+                              [dict(sample_id='S',pair_id='P',chain='TRA',status='OK',output_path=str(previous))])
+                stage = root/'06.locus_split/set'
+                actual = write_table(stage/'S/TRA.tsv', 'locus\tchain\tproductive\tv_call\tj_call\tjunction_aa\nTRA\tTRB\tT\tV1\tJ1\tCAR\n')
+                write_summary(stage/'locus_split_summary.csv',
+                              ['sample_id','sample_key','chain','status','output_path'],
+                              [dict(sample_id='S',sample_key='P/S',chain='TRA',status='OK',output_path=str(actual))])
+                entries = discover_job(dict(output_root=str(root),dataset='set',pipeline=pipeline,options_json={'locus_split_version':1}))
+                self.assertEqual(len(entries),1)
+                self.assertEqual(entries[0]['sources'],[dict(path=str(actual.resolve()),chain='TRA',chain_column='locus')])
+                self.assertEqual(load_clones(entries[0]['sources'],'TRA')[1],1)
+                for selected_root in (root,stage,stage.parent):
+                    entries = discover_directory(selected_root)
+                    self.assertEqual(len(entries),1,entries)
+                    self.assertEqual(entries[0]['sources'][0]['path'],str(actual.resolve()))
+                    self.assertEqual(entries[0]['sources'][0]['chain_column'],'locus')
+
+    def test_new_base_job_missing_or_failed_split_does_not_fall_back_to_mapping(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            actual = write_table(root/'05.igblastn_out/set/TRA.tsv')
+            write_summary(root/'05.igblastn_out/set/chain_summary.csv',['sample_id','chain','status','output_path'],
+                          [dict(sample_id='S',chain='TRA',status='OK',output_path=str(actual))])
+            row = dict(output_root=str(root),dataset='set',pipeline='igblast_base',options_json={'locus_split_version':1})
+            self.assertFalse(any(entry['valid'] for entry in discover_job(row)))
+            stage = root/'06.locus_split/set'
+            stage.mkdir(parents=True)
+            self.assertFalse(any(entry['valid'] for entry in discover_job(row)))
+            self.assertFalse(any(entry['valid'] for entry in discover_directory(root)))
+            write_summary(stage/'locus_split_summary.csv',['sample_id','chain','status','output_path','error'],
+                          [dict(sample_id='S',chain='TRA',status='ERROR',output_path='',error='missing locus')])
+            self.assertFalse(any(entry['valid'] for entry in discover_job(row)))
+            self.assertFalse(any(entry['valid'] for entry in discover_directory(root)))
+
     def test_mapping_uses_successful_selected_umi_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

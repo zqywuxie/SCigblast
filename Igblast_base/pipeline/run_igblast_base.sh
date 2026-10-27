@@ -226,7 +226,7 @@ hash_file() {
 }
 CONFIG_SHA256="$(hash_file "$CONFIG_FILE" 2>/dev/null || printf unknown)"
 MAPPING_SHA256="unknown"
-stage_script(){ case "$1" in 02.fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; 03.clean) printf '%s/03.clean_header.sh\n' "$SCRIPT_DIR";; 04.pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; 05.igblast) printf '%s/05.work_igblastn.sh\n' "$SCRIPT_DIR";; esac; }
+stage_script(){ case "$1" in 02.fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; 03.clean) printf '%s/03.clean_header.sh\n' "$SCRIPT_DIR";; 04.pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; 05.igblast) printf '%s/05.work_igblastn.sh\n' "$SCRIPT_DIR";; 06.locus_split) printf '%s/../../pipeline_locus_split.py\n' "$SCRIPT_DIR";; esac; }
 stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; hash_file "${SCRIPT_DIR}/../../pipeline_input_manifest.py"; fi; if [[ "$1" == 05.igblast ]]; then printf '%s\n' "${SCIGBLAST_IGBLAST_DEPENDENCIES:-missing}"; fi; } | sha256sum | awk '{print $1}'; }
 stage_summary_rows(){
   "${PYTHON_BIN}" - "$1" "$2" <<'PY'
@@ -328,6 +328,9 @@ stage_done() {
       rows="$(stage_summary_rows "$summary" "$delimiter")" || return 1
       task_count="$(find "$IGBLAST_DIR/.tasks" -type f -name '*.tsv' 2>/dev/null | wc -l)"
       (( task_count >= rows )) || return 1 ;;
+    06.locus_split)
+      "${PYTHON_BIN}" "${SCRIPT_DIR}/../../pipeline_locus_split.py" --check \
+        --summary "$IGBLAST_DIR/chain_summary.csv" --manifest "$SUMMARY" --output "$(stage_root 06.locus_split)" || return 1 ;;
     *) return 1 ;;
   esac
 }
@@ -345,7 +348,7 @@ mark_stage() {
   mv -f "$marker_tmp" "$marker"
 }
 
-echo "[BASE 1/5] match FASTQ pairs"
+echo "[BASE 1/6] match FASTQ pairs"
 MATCH_STATUS=0
 SCIGBLAST_BASE_RAW_INPUT="$RAW_INPUT_DIR" \
 SCIGBLAST_BASE_OUTPUT_ROOT="$OUTPUT_ROOT" \
@@ -370,7 +373,7 @@ if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "${SCIGBLAST_MATCH_ONLY_FIRST
 fi
 (( MATCH_STATUS == 0 || "${SCIGBLAST_ALLOW_MAPPING_ERRORS:-${ALLOW_MAPPING_ERRORS:-1}}" == "1" )) || exit "$MATCH_STATUS"
 
-echo "[BASE 2/5] fastp"
+echo "[BASE 2/6] fastp"
 FASTP_RERAN=0
 if ! stage_done 02.fastp; then
   run_monitored_stage "fastp" "$FASTP_REQUIRED_GB" bash "${SCRIPT_DIR}/02.run_fastp.sh"
@@ -381,10 +384,10 @@ else echo "[BASE] reusing fastp"; fi
 if (( FASTP_RERAN )); then
   rm -f "${STATE_DIR}/.pipeline_stage_03.clean.DONE" \
         "${STATE_DIR}/.pipeline_stage_04.pandaseq.DONE" \
-        "${STATE_DIR}/.pipeline_stage_05.igblast.DONE"
+        "${STATE_DIR}/.pipeline_stage_05.igblast.DONE" "${STATE_DIR}/.pipeline_stage_06.locus_split.DONE"
 fi
 
-echo "[BASE 3/5] clean header"
+echo "[BASE 3/6] clean header"
 CLEAN_RERAN=0
 if ! stage_done 03.clean; then
   run_monitored_stage "clean header" "$CLEAN_REQUIRED_GB" bash "${SCRIPT_DIR}/03.clean_header.sh"
@@ -394,10 +397,10 @@ else echo "[BASE] reusing clean"; fi
 
 if (( CLEAN_RERAN )); then
   rm -f "${STATE_DIR}/.pipeline_stage_04.pandaseq.DONE" \
-        "${STATE_DIR}/.pipeline_stage_05.igblast.DONE"
+        "${STATE_DIR}/.pipeline_stage_05.igblast.DONE" "${STATE_DIR}/.pipeline_stage_06.locus_split.DONE"
 fi
 
-echo "[BASE 4/5] PANDAseq"
+echo "[BASE 4/6] PANDAseq"
 PANDASEQ_RERAN=0
 if ! stage_done 04.pandaseq; then
   run_monitored_stage "PANDAseq" "$PANDASEQ_REQUIRED_GB" bash "${SCRIPT_DIR}/04.work_pandaseq.sh"
@@ -406,10 +409,10 @@ if ! stage_done 04.pandaseq; then
 else echo "[BASE] reusing PANDAseq"; fi
 
 if (( PANDASEQ_RERAN )); then
-  rm -f "${STATE_DIR}/.pipeline_stage_05.igblast.DONE"
+  rm -f "${STATE_DIR}/.pipeline_stage_05.igblast.DONE" "${STATE_DIR}/.pipeline_stage_06.locus_split.DONE"
 fi
 
-echo "[BASE 5/5] IgBLAST"
+echo "[BASE 5/6] IgBLAST"
 # Resolve the actual tool/reference dependencies once for both the stage DONE
 # check and its child tasks. Other stages keep their existing fingerprints.
 SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${BRANCH_ROOT}/../pipeline_igblast_cache.py" \
@@ -420,6 +423,7 @@ SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${BRANCH_ROOT}/../pipeline_ig
   --threads "${SCIGBLAST_IGBLAST_THREADS:-8}" --implementation "${SCRIPT_DIR}/05.work_igblastn.sh")"
 export SCIGBLAST_IGBLAST_DEPENDENCIES
 if ! stage_done 05.igblast; then
+  rm -f "${STATE_DIR}/.pipeline_stage_06.locus_split.DONE"
   run_monitored_stage "IgBLAST" "$IGBLAST_REQUIRED_GB" bash "${SCRIPT_DIR}/05.work_igblastn.sh" --data-dir "$PANDASEQ_DIR" --output-dir "$IGBLAST_DIR" \
     --input-mode pandaseq --db-dir "${SCIGBLAST_IGBLAST_DB_DIR:-/data/scAnalyis/Scigblast/igblast}" \
     --species "${SCIGBLAST_IGBLAST_SPECIES:-human}" \
@@ -427,4 +431,13 @@ if ! stage_done 05.igblast; then
     --parallel "${SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS:-2}"
   mark_stage 05.igblast
 else echo "[BASE] reusing IgBLAST"; fi
-echo "[BASE] completed: ${IGBLAST_DIR}"
+echo "[BASE 6/6] locus_split"
+if ! stage_done 06.locus_split; then
+  rm -f "${STATE_DIR}/.pipeline_stage_06.locus_split.DONE"
+  split_args=()
+  [[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 ]] || split_args+=(--force)
+  run_monitored_stage "locus_split" 1 "${PYTHON_BIN}" "${SCRIPT_DIR}/../../pipeline_locus_split.py" \
+    --summary "$IGBLAST_DIR/chain_summary.csv" --manifest "$SUMMARY" --output "$(stage_root 06.locus_split)" "${split_args[@]}"
+  mark_stage 06.locus_split
+else echo "[BASE] reusing locus_split"; fi
+echo "[BASE] completed: $(stage_root 06.locus_split)"

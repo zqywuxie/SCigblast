@@ -29,6 +29,7 @@ from process_identity import group_state, signal_group
 LOG = logging.getLogger(__name__)
 VERSION = 'qr-records-v1'
 COMPOSITION_VERSION = 'multi-chain-only-v1'
+CHAIN_PARTITION_VERSION = 'row-chain-locus-v1'
 ACTIVE_SQL = "(status IN ('queued','running','cancelling') OR pid IS NOT NULL)"
 CHAINS = ('TRA', 'TRB', 'TRD', 'TRG', 'IGH', 'IGK', 'IGL')
 
@@ -87,8 +88,8 @@ def image_relative(sample_key, sample_label, kind, chain=''):
     """Stable, collision-safe layout, also used to package historical manifests."""
     name = re.sub(r'[^\w.-]', '_', sample_label)[:60] or 'sample'
     directory = 'individual_treemaps' if kind == 'chain' else 'multi_chain_treemaps'
-    suffix = chain if kind == 'chain' else 'ALL_CHAINS'
-    return Path(directory) / (name + '_' + digest(sample_key)[:12]) / f'{name}_{suffix}.png'
+    filename = f'{name}__{chain}.png' if kind == 'chain' else f'{name}.png'
+    return Path(directory) / (name + '_' + digest(sample_key)[:12]) / filename
 
 
 def safe_path(raw, root, *, file=False):
@@ -163,7 +164,7 @@ def enqueue_auto(connection, job_id, now):
     run_id = uuid.uuid4().hex
     folder = allocate_output(connection, Path(row['output_root']) / 'treemap', now)
     data = dict(pending_discovery=True, items=[], files=[], input_root=row['output_root'], metric='records',
-                clone_table_version=clone_table_version())
+                clone_table_version=clone_table_version(), chain_partition_version=CHAIN_PARTITION_VERSION)
     inserted = connection.execute('INSERT OR IGNORE INTO derived_runs '
                        '(id,owner_id,parent_job_id,attempt_no,name,source_type,dedupe_key,output_root,data_json,created_at) '
                        'VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -329,6 +330,7 @@ class Service:
                 raise HTTPException(409, '来源任务已重新执行，请重新扫描')
         run_id = uuid.uuid4().hex
         key = digest(dict(version=VERSION, clone_table_version=clone_table_version(), composition_version=COMPOSITION_VERSION,
+                          chain_partition_version=CHAIN_PARTITION_VERSION,
                           parent=data['parent_job_id'], attempt=data['attempt_no'],
                           input_root=data['input_root'], items=items))
         output_base = Path(parent['output_root']) / 'treemap' if parent is not None else self.app.default_job_output(user, 'treemap').parent
@@ -336,7 +338,7 @@ class Service:
         name = body.name.strip() or (parent['dataset'] if parent is not None else Path(data['input_root']).name)
         owner_id = parent['owner_id'] if parent is not None else user['id']
         payload = dict(items=[dict(item, status='queued') for item in items], files=[], input_root=data['input_root'], metric='records',
-                       clone_table_version=clone_table_version())
+                       clone_table_version=clone_table_version(), chain_partition_version=CHAIN_PARTITION_VERSION)
         with self.app.PROCESS_LOCK, self.app.db() as connection:
             connection.execute('BEGIN IMMEDIATE')
             if parent is not None:
@@ -731,6 +733,7 @@ class Service:
                 budget = worker_budget()
                 selected = queued[:budget['workers']]
                 requests = [dict(kind='chain', sources=entry['sources'], chain=entry['chain'],
+                                 partition_by_chain=bool(data.get('chain_partition_version')),
                                  target=str(Path(row['output_root']) / image_relative(entry['sample_key'], entry['sample_label'], 'chain', entry['chain']))) for entry in selected]
                 if data.get('clone_table_version'):
                     for entry, request in zip(selected,requests):

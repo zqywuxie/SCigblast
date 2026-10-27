@@ -43,6 +43,7 @@
 !pipeline_resource_lock.sh
 !pipeline_igblast_cache.py
 !pipeline_parallel.py
+!pipeline_locus_split.py
 !pipeline_input_manifest.py
 !web/input_manifest.py
 !web/notifications.py

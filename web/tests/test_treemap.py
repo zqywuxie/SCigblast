@@ -86,14 +86,22 @@ class TreemapTests(unittest.TestCase):
             self.assertTrue(self.service.deliver_one(), data)
         self.fail('Treemap did not reach a terminal state within bounded work units')
 
-    def job(self, enabled=False):
+    def job(self, enabled=False, split_stage=False):
         response = self.client.post('/api/jobs', json={
             'pipeline': 'igblast_base', 'operator': 'fixture', 'input_path': str(self.raw),
             'submission_revision': self.view['revision'], 'dataset_label': 'treemap-fixture',
             'generate_treemap': enabled,
         })
         self.assertEqual(response.status_code, 200, response.text)
-        return response.json()['id']
+        job_id = response.json()['id']
+        if not split_stage:
+            # Most lifecycle cases deliberately exercise existing five-stage
+            # results; new six-stage outputs have their own end-to-end case.
+            row = web.get_job_row(job_id)
+            options = json.loads(row['options_json'])
+            options.pop('locus_split_version', None)
+            web.update_job(job_id, options_json=json.dumps(options))
+        return job_id
 
     def job_results(self, job_id):
         row = web.get_job_row(job_id)
@@ -138,6 +146,7 @@ class TreemapTests(unittest.TestCase):
             if artifact['kind'] in {'chain', 'combined'}:
                 expected = 'individual_treemaps' if artifact['kind'] == 'chain' else 'multi_chain_treemaps'
                 self.assertEqual(Path(artifact['relative_path']).parts[0], expected)
+                self.assertEqual(Path(artifact['relative_path']).name, 'A__IGH.png')
         for artifact in result['files']:
             response = self.client.get(artifact['url'])
             self.assertEqual(response.status_code, 200, response.text[:200] if artifact['kind'] == 'stats' else '')
@@ -167,6 +176,106 @@ class TreemapTests(unittest.TestCase):
         summary = history.json()['runs'][0]
         self.assertEqual(summary['progress'], {'done': 1, 'total': 1})
         self.assertEqual((summary['items'], summary['files']), ([], []))
+
+    def test_final_mapping_records_partition_for_manual_and_auto_generation(self):
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                job_id = self.job(enabled=automatic)
+                source = self.job_results(job_id)
+                other = self.airr(source.parent.parent / 'B', sample='B', chain='TRB')
+                with (source.parent.parent / 'chain_summary.csv').open('a', encoding='utf-8', newline='') as handle:
+                    csv.writer(handle).writerow(['B', 'TRB', 'OK', str(other)])
+                with source.open('a', encoding='utf-8', newline='') as handle:
+                    writer = csv.writer(handle, delimiter='\t')
+                    writer.writerow(['T', 'FOREIGN', 'FOREIGN', 'OTHERCHAIN', 'TRB', 9999, 9999])
+                    writer.writerow(['T', 'UNKNOWN', 'UNKNOWN', 'NOCHAIN', '', 9999, 9999])
+                with other.open('a', encoding='utf-8', newline='') as handle:
+                    csv.writer(handle, delimiter='\t').writerow(['T', 'FOREIGN', 'FOREIGN', 'OTHERCHAIN', 'IGH', 9999, 9999])
+                if not automatic:
+                    for path in (source, other):
+                        path.write_text(path.read_text(encoding='utf-8').replace('junction_aa\tlocus\t', 'junction_aa\tchain\t'), encoding='utf-8')
+                before = {path: path.read_bytes() for path in (source, other)}
+                web.update_job(job_id, status='SUCCEEDED')
+                if automatic:
+                    with web.db() as connection:
+                        run_id = connection.execute('SELECT id FROM derived_runs WHERE parent_job_id=?', (job_id,)).fetchone()[0]
+                else:
+                    run_id = self.create_run(self.scan(job_id=job_id))['id']
+                with patch.object(self.service, 'work_unit', wraps=self.service.work_unit) as worker:
+                    result = self.deliver(run_id)
+                self.assertEqual(result['status'], 'succeeded', result)
+                self.assertEqual({(item['sample_key'], item['chain']) for item in result['items']}, {('A', 'IGH'), ('B', 'TRB')})
+                self.assertTrue(all(item['productive_count']==3 and item['clone_count']==2 for item in result['items']))
+                requests = [call.args[1] for call in worker.call_args_list if call.args[1]['kind']=='chain']
+                self.assertEqual(len(requests), 2)
+                self.assertTrue(all(request['partition_by_chain'] for request in requests))
+                self.assertNotIn('combined', {file['kind'] for file in result['files']})
+                table = next(file for file in result['files'] if file['kind']=='clone_top')
+                rows = list(csv.DictReader(io.StringIO(self.client.get(table['url']).content.decode('utf-8-sig'))))
+                self.assertEqual([row['cdr3_aa'] for row in rows], ['CAR', 'CAT', 'CAR', 'CAT'])
+                self.assertEqual([row['record_count'] for row in rows], ['2', '1', '2', '1'])
+                self.assertEqual({(row['sample_key'], row['chain']) for row in rows}, {('A', 'IGH'), ('B', 'TRB')})
+                self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_new_base_job_requires_locus_split_and_renders_its_output(self):
+        import pipeline_locus_split
+        job_id = self.job(enabled=True, split_stage=True)
+        source = self.job_results(job_id)
+        # An incidental chain column must not override the actual AIRR locus
+        # used by the explicit pipeline split stage.
+        text = source.read_text(encoding='utf-8').replace('locus\tcopy', 'locus\tchain\tcopy')
+        lines = text.splitlines()
+        source.write_text(lines[0]+'\n'+'\n'.join(line.replace('\tIGH\t','\tIGH\tTRB\t') for line in lines[1:])+'\n',encoding='utf-8')
+        row = web.get_job_row(job_id)
+        stage = Path(row['output_root'])/'06.locus_split'/row['dataset']
+        web.update_job(job_id,status='SUCCEEDED')
+        scan = self.scan(job_id=job_id)
+        self.assertEqual(scan['valid_count'],0)
+        self.assertIn('locus split',scan['rows'][0]['error'])
+        self.assertTrue(pipeline_locus_split.run(source.parent.parent/'chain_summary.csv',stage))
+        with source.open('a',encoding='utf-8') as handle:
+            handle.write('T\tWRONG\tWRONG\tWRONG\tTRB\tTRB\t1\t1\n')
+        # Changing stage 5 after splitting must not make Treemap read stage 5.
+        scan = self.scan(job_id=job_id)
+        self.assertEqual(scan['valid_count'],1)
+        self.assertEqual(scan['rows'][0]['source_files'],['06.locus_split/'+row['dataset']+'/A/IGH.tsv'])
+        with web.db() as connection:
+            run_id = connection.execute('SELECT id FROM derived_runs WHERE parent_job_id=?',(job_id,)).fetchone()[0]
+        result = self.deliver(run_id)
+        self.assertEqual(result['status'],'succeeded',result)
+        self.assertEqual(result['items'][0]['productive_count'],3)
+        self.assertEqual(result['items'][0]['clone_count'],2)
+
+    def test_existing_run_retains_partition_policy_when_retried(self):
+        source = self.airr()
+        with source.open('a', encoding='utf-8', newline='') as handle:
+            csv.writer(handle, delimiter='\t').writerow(['T', 'V3', 'J3', 'LEGACY', 'TRB', 1, 1])
+        run = self.create_run()
+        with web.db() as connection:
+            row = connection.execute('SELECT * FROM derived_runs WHERE id=?', (run['id'],)).fetchone()
+            data = derived_store.load(connection, row)
+            data.pop('chain_partition_version')
+            derived_store.save(connection, row, data)
+        with patch.object(self.service, 'work_unit', wraps=self.service.work_unit) as worker:
+            result = self.deliver(run['id'])
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(result['items'][0]['productive_count'], 4)
+        self.assertFalse(next(call.args[1] for call in worker.call_args_list if call.args[1]['kind']=='chain')['partition_by_chain'])
+
+    def test_manual_generation_does_not_reuse_previous_partition_policy(self):
+        self.airr()
+        scan = self.scan()
+        previous = self.create_run(scan)
+        with web.db() as connection:
+            snapshot = json.loads(connection.execute('SELECT data_json FROM treemap_scans WHERE id=?', (scan['id'],)).fetchone()[0])
+            old_key = postanalysis.digest(dict(version=postanalysis.VERSION, clone_table_version=postanalysis.clone_table_version(),
+                                              composition_version=postanalysis.COMPOSITION_VERSION,
+                                              parent=snapshot['parent_job_id'], attempt=snapshot['attempt_no'],
+                                              input_root=snapshot['input_root'], items=snapshot['items']))
+            connection.execute("UPDATE derived_runs SET dedupe_key=?,status='succeeded' WHERE id=?", (old_key, previous['id']))
+        current = self.create_run(scan)
+        self.assertNotEqual(current['id'], previous['id'])
+        self.assertEqual(self.create_run(scan)['id'], current['id'])
 
     def test_single_chain_v1_run_finishes_without_composition(self):
         self.airr()
@@ -323,6 +432,8 @@ class TreemapTests(unittest.TestCase):
                              {'individual_treemaps', 'multi_chain_treemaps'})
             # Equal sample labels in separate input directories must never collide.
             self.assertEqual(len({p.split('/')[1] for p in archive.namelist() if p.endswith('.png')}), 2)
+            self.assertEqual({Path(p).name for p in archive.namelist() if p.endswith('.png')},
+                             {'Same__IGH.png', 'Same__IGK.png', 'Same__TRB.png', 'Same.png'})
             for artifact in data['files']:
                 if artifact['kind'] == 'stats':
                     name = 'treemap_summary.csv'
@@ -331,6 +442,8 @@ class TreemapTests(unittest.TestCase):
                 else:
                     label = next(i['sample_label'] for i in data['items'] if i['sample_key'] == artifact['sample_key'])
                     name = postanalysis.image_relative(artifact['sample_key'], label, artifact['kind'], artifact['chain']).as_posix()
+                    expected = f"{label}__{artifact['chain']}.png" if artifact['kind']=='chain' else f'{label}.png'
+                    self.assertEqual(Path(artifact['relative_path']).name,expected)
                 self.assertEqual(archive.read(name), (Path(row['output_root']) / artifact['relative_path']).read_bytes())
         sample = next(item['sample_key'] for item in result['items'] if item['chain'] == 'IGH')
         selected = self.client.get(endpoint, params={'sample_key': sample})
@@ -353,7 +466,8 @@ class TreemapTests(unittest.TestCase):
             if artifact['kind'] in {'stats','clone_top'}:
                 continue
             path = Path(row['output_root']) / artifact['relative_path']
-            legacy = Path(row['output_root']) / 'samples' / artifact['sample_key'] / path.name
+            suffix = artifact['chain'] if artifact['kind']=='chain' else 'ALL_CHAINS'
+            legacy = Path(row['output_root']) / 'samples' / artifact['sample_key'] / f'Same_{suffix}.png'
             legacy.parent.mkdir(parents=True, exist_ok=True)
             path.replace(legacy)
             artifact.update(relative_path=legacy.relative_to(row['output_root']).as_posix(), version=postanalysis.version(legacy))
@@ -365,6 +479,8 @@ class TreemapTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
             self.assertFalse(any(name.startswith('samples/') for name in archive.namelist()))
             self.assertEqual(len(archive.namelist()), 6)
+            self.assertEqual({Path(name).name for name in archive.namelist() if name.endswith('.png')},
+                             {'Same__IGH.png', 'Same__IGK.png', 'Same__TRB.png', 'Same.png'})
         for artifact in result['files']:
             self.assertEqual(self.client.get(artifact['url']).status_code, 200)
 

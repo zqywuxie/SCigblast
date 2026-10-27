@@ -41,6 +41,47 @@ def test_load_clones_filters_locus_and_exact_productive_and_counts_rows(tmp_path
     ]
 
 
+@pytest.mark.parametrize("column", ["chain", "locus"])
+@pytest.mark.parametrize("known", [False, True])
+@pytest.mark.parametrize("compressed", [False, True])
+def test_partition_records_before_aggregation_even_with_known_task_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, column: str, known: bool, compressed: bool,
+) -> None:
+    monkeypatch.setattr("analysis.treemap.aggregate.READ_CHUNK_SIZE", 2)
+    source = tmp_path / ("mixed.tsv.gz" if compressed else "mixed.tsv")
+    rows = pd.DataFrame([
+        {column: value, "productive": productive, "v_call": "V1", "j_call": "J1", "junction_aa": cdr3, "copy": 9000}
+        for value, productive, cdr3 in (
+            ("TRA", "T", "CAR"), ("TRB", "T", "FOREIGN"),
+            (" trav ", "T", "CAR"), ("TRA", "F", "BAD"),
+            ("TRA", "T", ""), ("", "T", "BLANK"), ("UNKNOWN", "T", "UNKNOWN"),
+        )
+    ])
+    if column == "chain":
+        rows["locus"] = "TRB"  # Explicit chain takes precedence over locus.
+    rows.to_csv(source, sep="\t", index=False)
+    before = source.read_bytes()
+    entry = {"path": str(source), **({"chain": "TRA"} if known else {})}
+    clones, count = load_clones([entry], "TRA")
+    assert count == 2
+    assert clones.to_dict("records") == [{"V": "V1", "J": "J1", "CDR3(pep)": "CAR", "copy": 2}]
+    other = {"path": str(source), **({"chain": "TRB"} if known else {})}
+    other_clones, other_count = load_clones([other], "TRB")
+    assert other_count == 1
+    assert other_clones.to_dict("records") == [{"V": "V1", "J": "J1", "CDR3(pep)": "FOREIGN", "copy": 1}]
+    assert source.read_bytes() == before
+
+
+def test_unknown_source_requires_row_chain_and_blank_chain_is_not_guessed(tmp_path: Path) -> None:
+    source = tmp_path / "unknown.tsv"
+    source.write_text("productive\tv_call\tj_call\tjunction_aa\nT\tV1\tJ1\tCAR\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="chain/locus"):
+        load_clones([source], "TRA")
+    source.write_text("chain\tlocus\tproductive\tv_call\tj_call\tjunction_aa\n\tTRA\tT\tV1\tJ1\tCAR\n", encoding="utf-8")
+    clones, count = load_clones([{"path": str(source), "chain": "TRA"}], "TRA")
+    assert clones.empty and count == 0
+
+
 @pytest.mark.skipif(not SOURCE_TREEMAP.is_file(), reason="reference source tree is unavailable")
 def test_aggregate_matches_original_across_chunks_and_preserves_raw_text(tmp_path: Path) -> None:
     spec = importlib.util.spec_from_file_location("reference_treemap_g", SOURCE_TREEMAP)
@@ -147,8 +188,11 @@ def test_combined_sources_check_locus_and_merge_known_chain_sources(tmp_path: Pa
     assert count == 2
     assert clones.iloc[0]["copy"] == 2
     known, count = load_clones([{"path": str(first), "chain": "TRA"}], "TRA")
+    assert count == 1
+    assert known["copy"].sum() == 1
+    legacy, count = load_clones([{"path": str(first), "chain": "TRA"}], "TRA", partition_by_chain=False)
     assert count == 2
-    assert known["copy"].sum() == 2
+    assert legacy["copy"].sum() == 2
 
 
 def test_save_treemap_writes_png_and_copy_weights_area(tmp_path: Path) -> None:

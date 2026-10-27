@@ -27,6 +27,7 @@ SUMMARY_NAMES = frozenset({
     "chain_summary.csv", "igblast_summary.tsv", "igblastn_run_summary.tsv",
     "processing_manifest.csv", "stage8_summary.csv", "conversion_summary.csv",
     "umi_count_summary.csv", "datapoint.csv",
+    "locus_split_summary.csv",
 })
 SKIP_DIRS = frozenset({
     ".pipeline_state", ".tasks", ".batches", ".tmp", ".analysis_state",
@@ -124,7 +125,7 @@ def _entry(sample_key: str, sample_label: str, chain: str | None,
            sources: list[dict[str, str]], *, error: str = "") -> dict[str, Any]:
     safe_chain = chain.upper() if chain and chain.upper() in CHAINS else None
     ordered_sources = sorted(sources, key=lambda item: (item.get("path", ""), item.get("chain", "")))
-    public_sources = [{key: value for key, value in item.items() if key in {"path", "chain"}} for item in ordered_sources]
+    public_sources = [{key: value for key, value in item.items() if key in {"path", "chain", "chain_column"}} for item in ordered_sources]
     source_files = [item.get("relative_path") or Path(item.get("path", "")).name for item in ordered_sources]
     return {
         "id": _entry_id(f"{sample_key}\0{safe_chain or ''}\0{error}", (item["path"] for item in public_sources)),
@@ -179,10 +180,12 @@ def _checked_source(root: Path, path_value: str | Path) -> tuple[str | None, str
         return None, str(exc)
 
 
-def _source(root: Path, path: str, chain: str | None = None) -> dict[str, str]:
+def _source(root: Path, path: str, chain: str | None = None, *, chain_column: str | None = None) -> dict[str, str]:
     result = {"path": path, "relative_path": Path(path).relative_to(root).as_posix()}
     if chain:
         result["chain"] = chain
+    if chain_column:
+        result["chain_column"] = chain_column
     return result
 
 
@@ -329,6 +332,34 @@ def _discover_mapping(root: Path, dataset: str, stage_path: Path | None = None,
     return entries
 
 
+def _discover_locus_split(root: Path, dataset: str, stage_path: Path | None = None) -> list[dict[str, Any]] | None:
+    stage = stage_path or (root / "06.locus_split" / dataset)
+    if not stage.exists():
+        return None
+    summary = stage / "locus_split_summary.csv"
+    try:
+        summary = _confined_file(root, summary)
+        entries = []
+        for row in _read_dict_rows(summary):
+            sample = row.get('sample_id') or 'unknown sample'
+            sample_key = _stable_sample_key(row.get('sample_key'), sample)
+            chain = _known_chain(row.get('chain'))
+            if row.get('status', '').upper() != 'OK' or not chain:
+                entries.append(_issue(sample_key, sample, chain, row.get('error') or 'locus split did not succeed'))
+                continue
+            checked, error = _checked_source(root, row.get('output_path', ''))
+            if checked:
+                if 'locus' not in _raw_header(Path(checked)):
+                    entries.append(_issue(sample_key, sample, chain, 'locus split table lacks locus column'))
+                else:
+                    entries.append(_entry(sample_key, sample, chain, [_source(root, checked, chain, chain_column='locus')]))
+            else:
+                entries.append(_issue(sample_key, sample, chain, error))
+        return entries or [_issue(dataset, dataset, None, 'locus split summary has no sample/chain rows')]
+    except (OSError, ValueError, csv.Error) as exc:
+        return [_issue(dataset, dataset, None, f'invalid locus split summary: {exc}')]
+
+
 def _discover_base_or_pig(root: Path, dataset: str, pipeline: str, stage_path: Path | None = None) -> list[dict[str, Any]] | None:
     stage = stage_path or (root / "05.igblastn_out" / dataset)
     summary = next((p for p in (stage / "chain_summary.csv", stage / "igblastn_run_summary.tsv", stage / "igblast_summary.tsv") if p.is_file() and not p.is_symlink()), None)
@@ -463,7 +494,13 @@ def discover_job(row: dict) -> list[dict[str, Any]]:
     elif pipeline == "10x_split":
         entries = _discover_10x(root, dataset)
     elif pipeline in {"igblast_base", "pig_igblast"}:
-        entries = _discover_base_or_pig(root, dataset, pipeline)
+        entries = _discover_locus_split(root, dataset)
+        if entries is None:
+            options = row.get('options_json') or {}
+            if isinstance(options, str):
+                options = json.loads(options)
+            entries = ([_issue(dataset, dataset, None, 'locus split final outputs are missing')]
+                       if options.get('locus_split_version') else _discover_base_or_pig(root, dataset, pipeline))
     else:
         entries = [_issue(dataset, dataset, None, f"unsupported pipeline: {pipeline or 'unknown'}")]
     if entries is None:
@@ -515,11 +552,12 @@ def discover_directory(root: Path) -> list[dict[str, Any]]:
     # selecting a dataset or stage directory directly.
     summaries: list[tuple[str, Path, Any]] = []
     stage_specs = (
+        ("06.locus_split", "locus_split_summary.csv", _discover_locus_split),
         ("03.umi_count", "umi_count_summary.csv", _discover_mapping),
         ("08.preprocessing", "processing_manifest.csv", _discover_ir),
         ("08.cluster", "stage8_summary.csv", _discover_10x),
     )
-    final_stage_present = directory.name in {"03.umi_count", "08.preprocessing", "08.cluster"}
+    final_stage_present = directory.name in {"03.umi_count", "06.locus_split", "08.preprocessing", "08.cluster"}
     for stage_name, summary_name, discover in stage_specs:
         candidates = [path for path in directory.rglob(summary_name)
                       if path.is_file() and not any(part.is_symlink() for part in _path_chain(directory, path))]
@@ -547,20 +585,26 @@ def discover_directory(root: Path) -> list[dict[str, Any]]:
     base_names = ("chain_summary.csv", "igblastn_run_summary.tsv", "igblast_summary.tsv")
     base_summaries = [path for name in base_names for path in directory.rglob(name)
                       if path.is_file() and not any(part.is_symlink() for part in _path_chain(directory, path))]
-    summaries.extend(("05.igblastn_out", summary, _discover_base_or_pig) for summary in sorted(set(base_summaries)))
+    for summary in sorted(set(base_summaries)):
+        parts = list(summary.parent.relative_to(directory).parts)
+        if '05.igblastn_out' in parts:
+            parts[parts.index('05.igblastn_out')] = '06.locus_split'
+            if (directory / Path(*parts)).exists():
+                continue  # Never count mapping intermediates alongside stage 6.
+        summaries.append(("05.igblastn_out", summary, _discover_base_or_pig))
 
     # Stage folders without their authoritative final summaries are diagnostic
     # entries. In particular, an IR/10X folder must not fall back to earlier
     # IgBLAST intermediates.
     final_stage_present = final_stage_present or any(
-        current.name in {"03.umi_count", "08.preprocessing", "08.cluster"}
+        current.name in {"03.umi_count", "06.locus_split", "08.preprocessing", "08.cluster"}
         for current in directory.rglob("*") if current.is_dir() and not current.is_symlink()
     )
     discovered: list[dict[str, Any]] = []
     represented_stages: set[str] = set()
     for stage_name, summary, discover in summaries:
         stage_path = summary.parent
-        if stage_path.name == stage_name:
+        if stage_path.name == stage_name and discover is not _discover_locus_split:
             # A user can select a stage folder directly, with summary files
             # directly inside it.
             stage_path = stage_path / directory.name
@@ -583,7 +627,7 @@ def discover_directory(root: Path) -> list[dict[str, Any]]:
         for item in found:
             new_key = f"{namespace}/{item['sample_key']}" if item["sample_key"] else namespace
             discovered.append(_entry(new_key, item["sample_label"], item["chain"],
-                                     [{"path": source["path"], **({"chain": source["chain"]} if source.get("chain") else {}),
+                                     [{"path": source["path"], **{key:source[key] for key in ('chain','chain_column') if source.get(key)},
                                        "relative_path": item["source_files"][index]}
                                       for index, source in enumerate(item["sources"])], error=item["error"]))
 

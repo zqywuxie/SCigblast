@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 import pipeline_igblast_cache as cache
 from pipeline_parallel import FastaCountCache, bounded_completed
+from pipeline_input_manifest import pig_output_relative
 
 
 class StageFixture:
@@ -37,6 +38,7 @@ class StageFixture:
         self.ns = dict(Path=Path, os=os, csv=csv, re=re, shutil=shutil, subprocess=subprocess,
                        sys=sys, tempfile=tempfile, hashlib=hashlib, ThreadPoolExecutor=ThreadPoolExecutor,
                        bounded_completed=bounded_completed, FastaCountCache=FastaCountCache,
+                       pig_output_relative=pig_output_relative,
                        FASTA_COUNTS=FastaCountCache(), dependency_snapshot=cache.dependency_snapshot,
                        task_fingerprint=cache.task_fingerprint, PIPELINE=self.source.parent,
                        HERE=self.source.parent, INPUT=self.root/"input", OUTPUT=self.root/"output",

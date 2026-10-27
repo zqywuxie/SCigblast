@@ -230,8 +230,8 @@
     const details = {
       ir_split: '用于 Bulk IR 数据，barcode 用于定位样本。支持原始数据和带 UMI 标签的已拆分数据；先进行 fastp 质量过滤，已拆分数据保留原有 barcode 信息。代表序列流程在样本内按 UMI 选择代表序列，再完成 IgBLAST 比对。',
       '10x_split': '用于单细胞数据，barcode 标识细胞。R1 检查 TSO、R2 检查 barcode 后进行序列合并，再按样本内的 barcode + UMI 选择代表序列，完成 IgBLAST 比对。',
-      igblast_base: '不进行 barcode 拆分或 UMI 代表序列提取。支持扫描目录指定样本与 Chain，或按 Submission 的 Note 匹配样本；按 Chain 选择数据库。',
-      pig_igblast: '支持扫描目录指定样本与 Chain，或使用 Species=Pig 的 Submission。使用猪专用链数据库比对，不进行 IR/10X 拆分。'
+      igblast_base: '不进行 barcode 拆分或 UMI 代表序列提取。支持扫描目录指定样本与 Chain，或按 Submission 的 Note 匹配样本；按 Chain 选择数据库，比对后按 locus 保留该样本所选链的记录。',
+      pig_igblast: '支持扫描目录指定样本与 Chain，或使用 Species=Pig 的 Submission。使用猪专用链数据库比对，再按 locus 拆分所选链，不进行 IR/10X 拆分。'
     };
     const finalStages = {
       ir_split: {
@@ -248,6 +248,13 @@
         output: '按原样本目录保存的链结果表，包含 barcode、AIRR 注释与 umi_counts；另输出筛选明细和 stage8_summary.csv 汇总表。',
         note: '“最多两个”针对每个细胞的每种链类型；该步骤整理已有代表序列，不重新构建共识序列。'
       }
+    };
+    for(const pipeline of ['igblast_base','pig_igblast']) finalStages[pipeline]={
+      title:'按 locus 拆分 · Locus split',
+      input:'05.igblastn_out 中已完成筛选的 AIRR 注释，以及每个样本选择的 Chain。',
+      processing:'逐条核对 locus，仅保留该样本对应目标链的记录；其他链、空白或未知 locus 计入排除统计。',
+      output:'06.locus_split 下的样本/链 TSV，以及 locus_split_summary.csv 保留与排除数量。',
+      note:'克隆树图和 Clone Top 使用这里的拆分结果；原 IgBLAST 输出保留。'
     };
     const finalStage = finalStages[key];
     const finalSection = finalStage ? `<section class="pipeline-final-stage" aria-labelledby="pipeline-final-title"><span class="pipeline-final-label">最后一步</span><h3 id="pipeline-final-title">${esc(finalStage.title)}</h3><dl><dt>输入</dt><dd>${esc(finalStage.input)}</dd><dt>处理</dt><dd>${esc(finalStage.processing)}</dd><dt>输出</dt><dd>${esc(finalStage.output)}</dd></dl><p class="pipeline-final-note">${esc(finalStage.note)}</p></section>` : '';

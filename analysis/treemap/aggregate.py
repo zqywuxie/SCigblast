@@ -53,7 +53,8 @@ def _aggregate_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     )
 
 
-def _read_source(path: Path, chain: str, known_chain: str | None) -> tuple[pd.DataFrame, int]:
+def _read_source(path: Path, chain: str, known_chain: str | None, *,
+                 partition_by_chain: bool = True, chain_column: str | None = None) -> tuple[pd.DataFrame, int]:
     if known_chain is not None and known_chain != chain:
         return pd.DataFrame(columns=CLONE_COLUMNS), 0
     if not path.is_file():
@@ -69,12 +70,24 @@ def _read_source(path: Path, chain: str, known_chain: str | None) -> tuple[pd.Da
     cdr3_col = "junction_aa" if "junction_aa" in columns else "cdr3_aa"
     if cdr3_col not in columns:
         raise ValueError(f"{path} has neither junction_aa nor cdr3_aa")
-    if known_chain is None and "locus" not in columns:
-        raise ValueError(f"{path} needs a source chain or a locus column")
+    # A filename/summary identifies the requested mapping task, but does not
+    # prove every record was annotated as that chain. Partition records before
+    # counting, even for sources whose task chain is already known.
+    if partition_by_chain:
+        if chain_column is not None:
+            if chain_column not in {'chain', 'locus'} or chain_column not in columns:
+                raise ValueError(f'{path} lacks the required chain column: {chain_column}')
+        else:
+            chain_column = "chain" if "chain" in columns else "locus" if "locus" in columns else None
+    else:
+        # Existing Web runs retain their recorded policy when resumed/retried.
+        chain_column = "locus" if known_chain is None and "locus" in columns else None
+    if known_chain is None and chain_column is None:
+        raise ValueError(f"{path} needs a source chain or a chain/locus column")
 
     usecols = ["productive", "v_call", "j_call", cdr3_col]
-    if known_chain is None and "locus" in columns:
-        usecols.append("locus")
+    if chain_column:
+        usecols.append(chain_column)
     reader = pd.read_csv(
         path,
         sep=sep,
@@ -88,8 +101,8 @@ def _read_source(path: Path, chain: str, known_chain: str | None) -> tuple[pd.Da
     compacted = pd.DataFrame(columns=CLONE_COLUMNS)
     productive_count = 0
     for chunk_index, chunk in enumerate(reader, 1):
-        if "locus" in chunk.columns:
-            chunk = chunk.loc[_chain_mask(chunk["locus"], chain)]
+        if chain_column:
+            chunk = chunk.loc[_chain_mask(chunk[chain_column], chain)]
         chunk = chunk.loc[chunk["productive"] == "T"]
         if chunk.empty:
             continue
@@ -119,14 +132,16 @@ def _read_source(path: Path, chain: str, known_chain: str | None) -> tuple[pd.Da
 
 
 def load_clones(
-    sources: list[dict[str, Any] | str | Path], chain: str
+    sources: list[dict[str, Any] | str | Path], chain: str, *,
+    partition_by_chain: bool = True,
 ) -> tuple[pd.DataFrame, int]:
     """Read chain-matched sources and count each productive record as one copy.
 
     A source may be a path or ``{"path": ..., "chain": ...}``. Sources with
-    a known chain are skipped when it differs from ``chain``. Known single-chain
-    sources retain the original script's row contract; combined sources require
-    a locus column and are partitioned before aggregation.
+    a known task chain are skipped when it differs from ``chain``. Records are
+    partitioned by ``chain``, or ``locus`` if no chain column exists, before
+    aggregation. Only files without either column use a known source chain.
+    ``partition_by_chain=False`` preserves the policy of existing Web runs.
     """
     chain = str(chain).strip().upper()
     if not chain:
@@ -134,7 +149,9 @@ def load_clones(
     compacted = pd.DataFrame(columns=CLONE_COLUMNS)
     productive_count = 0
     for source in sources:
-        clones, count = _read_source(_source_path(source), chain, _source_chain(source))
+        clones, count = _read_source(_source_path(source), chain, _source_chain(source),
+                                     partition_by_chain=partition_by_chain,
+                                     chain_column=source.get('chain_column') if isinstance(source, dict) else None)
         productive_count += count
         if not clones.empty:
             compacted = _aggregate_frames([compacted, clones])

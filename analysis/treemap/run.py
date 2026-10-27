@@ -46,7 +46,8 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
         from analysis.treemap.aggregate import load_clones
         from analysis.treemap.render import save_treemap
         chain = str(request["chain"]).strip().upper()
-        clones, productive_count = load_clones(request.get("sources", []), chain)
+        clones, productive_count = load_clones(request.get("sources", []), chain,
+                                               partition_by_chain=request.get("partition_by_chain", True))
         if not clones.empty:
             save_treemap(clones, target)
         if request.get('clone_table_target'):

@@ -8,7 +8,7 @@ SCigblast 是免疫组库分析平台：Python/Bash 执行分析，`web/` 提供
 
 - `IR_split/pipeline/run_ir_pipeline.sh`：Match → fastp → Barcode/UMI 拆分 → header 清理 → PANDAseq → 代表序列 → IgBLAST → preprocessing。当前统一自动识别 raw/presplit；结果模型位于该分支 `models/`。
 - `10X_split/pipeline/run_10x_pipeline.sh`：Match → fastp → R1/R2 预筛选 → header 清理 → PANDAseq → Cell Barcode/UMI 拆分与代表序列 → IgBLAST → 链聚类。不要混用 IR 与 10X 的拆分规则。
-- `Igblast_base/pipeline/run_igblast_base.sh`、`PigIgblast/pipeline/run_pig_pipeline.sh`：Match → fastp → header 清理 → PANDAseq → IgBLAST；Pig 使用专属数据库逻辑。
+- `Igblast_base/pipeline/run_igblast_base.sh`、`PigIgblast/pipeline/run_pig_pipeline.sh`：Match → fastp → header 清理 → PANDAseq → IgBLAST → 按 locus 拆分；Pig 使用专属数据库逻辑。
 - 每个分支通过 `00.pipeline_config.env` 与 `tools/pipeline_config.py` 管理配置；Web 通过环境变量启动固定 Bash runner。容器工具路径由 `SCIGBLAST_RUNTIME_BIN_DIR` 覆盖，数据库需单独挂载。
 - `IR_split_merged/`、根目录 `pipeline/`、`preprocess/` 当前没有注册为 Web 流程；不要根据目录名推断它们是生产入口。
 
@@ -52,6 +52,10 @@ IR/10X stage7 后处理仅在本次进程内复用同一 FASTA 的计数，按�
 
 用户提供的 `treemap_g.py` QR 核心移植到 `analysis/treemap/`，仅按 `productive == T` 且 CDR3 非空的最终记录数聚合完整 V/J/CDR3，不读取 copy/UMI 权重。CDR3 优先 junction_aa，否则 cdr3_aa；保留原始字符串、配色、排序、3000×3000/300 DPI 和固定比例合图。合图链区面积不代表链间丰度。`sources.py` 用各流程最终摘要与真实 output_path 识别来源，不重复统计聚合文件；10X 合并文件以 locus 拆链，IR 使用 preprocessing 的 junction_peps。
 
+新 Treemap 运行聚合时核对行内链字段。普通来源优先 `chain`，没有此列才用 `locus`，不对空/未知 chain 猜链；两个列都没有时才沿用已知单链身份。Base/Pig 的 06 拆分来源显式指定 `chain_column=locus`，不能被附带的 chain 列覆盖。`CHAIN_PARTITION_VERSION` 写入新手动/自动运行元信息及手动去重键；请求显式传 `partition_by_chain`，无版本的历史 Web 运行在续跑/重试时保留旧策略，不能混用新旧统计或自动重算已完成图。工作台新建生成记录可使用新策略。
+
+Base/Pig 新增第六阶段 `06.locus_split`，共用根目录 `pipeline_locus_split.py`，接在 05 IgBLAST 后且成功后才允许主任务完成。以 01 Match 的每样本/配对 igblast_chains 为允许集合，读取 05 摘要真实 task TSV，按 locus 精确匹配目标链，排除其他/空/未知 locus，保留全部 AIRR 列与原始字段值。输出 `06.locus_split/<dataset>/<sample>/<chain>.tsv`，重名样本/规范化冲突时加稳定标识；汇总为 `locus_split_summary.csv`（输入、保留、排除、未知数量）。标准库逐行流式处理，不改写 05，不读 TCR/BCR 合并副本；无保留行输出表头。原子发布与 `.checkpoints` 按实现/输入文件版本/样本链/输出版本复用，强制重跑支持 --force；缺字段、输入变化、文件缺失须失败，不能伪造 DONE。Shell 与 Web 进度/完成标记、Docker COPY/白名单/check_bundle 同步。新建及续跑任务保存 locus_split_version=1；已完成旧五阶段任务不自动改状态或补算。Treemap 优先且对新任务必须读取 06 摘要，06 缺失/失败不能回退到 05；旧任务无 06 时保留 05 兼容入口。目录扫描同一数据集有 06 时忽略 05，不能重复计数。
+
 新增 `clone_top.csv`（kind=clone_top）：按样本链内 record_count 降序排名，V/J/CDR3 文本打破并列，保留全部克隆。frequency_percent/cumulative_frequency_percent 以本样本本链有效记录数为分母，不能改成跨链或 UMI 口径。`clone_table.py` 写 UTF-8 BOM CSV，复用绘图聚合结果，先原子发布每链 `.clone_tables/<entry_id>.csv`，由 item.clone_table 保存内部版本；该字段不能回传详情 API。合图完成后独立 clone_merge 子进程流式汇总，不在 Web 的 PROCESS_LOCK 内读取大表。CSV 总表进入 manifest、单文件下载与全量 ZIP，样本 ZIP 仍仅含该样本图片；空数据仅表头，失败链排除且原因保留在摘要。重试重新合并总表，成功中间表正常复用，缺失/变更时仅重处理对应链。新手动运行的去重键包含 clone_table_version；自动意图键及 PNG 版本保持不变，重启不能为已完成旧任务自动补算；旧记录无该格式标识时保持原行为，可手动重新生成以获得表格。Docker 打包检查须包含 clone_table.py。
 
 新建任务 `generate_treemap` 默认 false，只写 options_json，不传给主 runner；成功状态事务只保存绘图意图。`web/postanalysis.py` 用单调度线程启动有界绘图批次；默认最多 2 个单链 worker，按 cgroup/CPU/可用内存限制，合图仍逐样本执行。`SCIGBLAST_TREEMAP_MAX_WORKERS=1` 恢复串行；worker 总预算为 `SCIGBLAST_TREEMAP_MEMORY_BUDGET_MB`，单进程预算为 `SCIGBLAST_TREEMAP_MAX_RSS_MB`。每批一个轻量监督进程，数据库 PID/token 指向监督进程；所有 worker 同组且继承共享 flock FD，禁止单独释放锁。取消、超总预算、关闭或监督进程异常时核验并停止整个组，确认全部退出后才清除 PID；身份不明则保留 interrupted 记录。进程间只传文件路径和少量 JSON，不复制 DataFrame/图片。主分析排队后不启动下一批；单链失败不影响其他 worker，重试保留成功图。主分析状态、DONE、耗时、输出和邮件不受绘图失败影响。状态和进度独立，重复提交去重；修改来源/attempt、取消、续跑、删除与归档均核验生命周期，旧 PID 必须通过 process_identity 验证。归档认领须在 SQLite 事务中检查无活跃 derived_runs，不能只靠 PROCESS_LOCK。
@@ -63,6 +67,8 @@ Web 入口包含新建任务开关、任务输出页共用预览组件及独立�
 任务详情的树图组件采用 `mount(..., {embedded:true, metaTarget, actionsTarget})`：共用筛选与分页图库，名称不在正文重复显示，状态/处理数量/创建时间与取消或重试按钮合并到任务树图标题栏。只有生成中显示进度条，完成后数量显示在状态旁；计数口径折叠为“计数说明”。当前已有生成记录时不再显示无效的“生成树图”按钮，失败/空结果等通过该记录的重试操作处理；多条记录才显示折叠的“其他生成记录”，入口链接到工作台。轮询保留折叠状态、筛选与图片节点。
 
 Treemap 新输出统一为关联任务的 `<任务输出>/treemap/YYYYMMDD_HHMMSS/` 或纯目录模式的 `<默认输出根>/<用户>/treemap/YYYYMMDD_HHMMSS/`。自动与手动生成共用 `allocate_output()`，在 SQLite 写事务内检查 indexed output_root 与磁盘占用，同秒冲突增加 `_02`、`_03`；时间采用北京时间。记录 ID/attempt 仍在数据库，不能以新约定推算历史记录路径，也不能自动迁移旧目录。下载与重试继续使用记录中的 output_root。
+
+PNG 命名统一由 `image_relative()` 负责：单链为 `样本名__CHAIN.png`，多链合图为 `样本名.png`；安全样本子目录继续隔离不同来源的同名样本，文件名不附加链合并后缀。新生成文件和 ZIP 内文件名使用同一规则，历史磁盘文件不迁移，仍按 manifest 原路径读取；历史 ZIP 也按新规则命名。
 
 ## Mapping 当前状态
 

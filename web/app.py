@@ -497,6 +497,8 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     runner_hash = sha256_file(runner)
     options = request.model_dump()
+    if request.pipeline in {'igblast_base', 'pig_igblast'}:
+        options['locus_split_version'] = 1
     if mapping_inputs is not None:
         # UI completeness only: the runner's selection and output contract are unchanged.
         options['mapping_inputs'] = mapping_inputs
@@ -645,7 +647,10 @@ def pipeline_done(row: sqlite3.Row) -> bool:
             return False
         final = stage_names[-1]
         marker_name = final.split('.', 1)[1] if row['pipeline'] == 'pig_igblast' else final
-        for marker in (state / f".pipeline_stage_{marker_name}.DONE", state / ".pipeline.DONE"):
+        markers = (state / f".pipeline_stage_{marker_name}.DONE",)
+        if final != '06.locus_split':
+            markers += (state / '.pipeline.DONE',)
+        for marker in markers:
             if marker.is_file() and "status=DONE" in marker.read_text(encoding="utf-8", errors="replace"):
                 return True
     return False
@@ -759,7 +764,7 @@ def parse_progress(row: sqlite3.Row) -> tuple[str, int]:
             current = config["stages"][min(number - 1, len(config["stages"]) - 1)]
             stage_end = match.end()
     if row['pipeline'] == 'pig_igblast':
-        for match in re.finditer(r'\[PIG\]\s+(match|fastp|clean|pandaseq|igblast)\b', text):
+        for match in re.finditer(r'\[PIG\]\s+(match|fastp|clean|pandaseq|igblast|locus_split)\b', text):
             current = next(s for s in config['stages'] if s.endswith('.' + match.group(1)))
             stage_end = match.end()
     progress = int(row["progress"] or 0)
@@ -827,6 +832,12 @@ def launch_job(job_id: str) -> bool:
     if group_state(row['pgid'], execution_metadata(row).get('process_token')) != 'gone':
         update_job(job_id, status='INTERRUPTED', last_error='上次执行尚未确认退出，不能重复启动')
         return False
+    if row['pipeline'] in {'igblast_base', 'pig_igblast'}:
+        options = json.loads(row['options_json'])
+        if not options.get('locus_split_version'):
+            options['locus_split_version'] = 1
+            update_job(job_id, options_json=json.dumps(options, ensure_ascii=False))
+            row = get_job_row(job_id)
     env = json.loads(row["env_json"])
     env = {str(key): str(value) for key, value in env.items()}
     env.update({key: value for key, value in os.environ.items() if key not in env})
@@ -1015,6 +1026,12 @@ def job_config(row):
     config = dict(REGISTRY[row["pipeline"]])
     config["stages"] = list(config["stages"])
     options = json.loads(row["options_json"])
+    # Completed pre-split jobs keep their historical five-stage display. A
+    # resumed invocation always executes the new runner and must finish stage 6.
+    if (row['pipeline'] in {'igblast_base', 'pig_igblast'} and not options.get('locus_split_version')
+            and row['status'] in {'SUCCEEDED', 'ARCHIVING', 'ARCHIVED'}
+            and not (Path(row['output_root']) / '06.locus_split' / row['dataset']).exists()):
+        config['stages'].remove('06.locus_split')
     if row["pipeline"] == "ir_split":
         if options.get("ir_variant") == "merged":
             config["stages"] = ["01.match", "02.fastp", "03.split", "04.clean", "05.pandaseq", "06.igblast"]
@@ -1076,6 +1093,9 @@ def stage_reports(row):
     entries.append(('pandaseq', 'PANDAseq 序列合并', '输入、合并成功数及合并比例',
                     [root / panda / dataset / 'pandaseq_summary.csv']))
     entries.append(('results', 'IgBLAST 比对与筛选', '匹配统计与 productive 筛选后统计', [result_file(row)]))
+    if row['pipeline'] in {'igblast_base', 'pig_igblast'} and '06.locus_split' in job_config(row)['stages']:
+        entries.append(('locus_split', '按 locus 拆分', '按样本所选链保留记录，统计其他链及未知 locus 的排除数量',
+                        [root / '06.locus_split' / dataset / 'locus_split_summary.csv']))
     if row['pipeline'] == 'ir_split':
         entries.append(('datapoint', 'IR Datapoint', 'Preprocessing 后的样本指标，支持按 sample / batch 检索',
                         [root / '08.preprocessing' / dataset / 'Datapoint.csv']))
@@ -1860,6 +1880,7 @@ def get_job(job_id: str) -> dict[str, Any]:
     options = json.loads(row['options_json'])
     options.pop('approved_assignments', None)
     options.pop('mapping_inputs', None)
+    options.pop('locus_split_version', None)
     options.pop('directory_manifest_path', None)
     files = summary_files(row)
     detail = snapshot(row)

@@ -41,6 +41,7 @@ COPY PigIgblast/pipeline/ /opt/scigblast/PigIgblast/pipeline/
 COPY pipeline_resource_lock.sh /opt/scigblast/pipeline_resource_lock.sh
 COPY pipeline_igblast_cache.py /opt/scigblast/pipeline_igblast_cache.py
 COPY pipeline_parallel.py /opt/scigblast/pipeline_parallel.py
+COPY pipeline_locus_split.py /opt/scigblast/pipeline_locus_split.py
 COPY pipeline_input_manifest.py /opt/scigblast/pipeline_input_manifest.py
 COPY mapping/fasta.py /opt/scigblast/mapping/fasta.py
 COPY mapping/pipeline/ /opt/scigblast/mapping/pipeline/

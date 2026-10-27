@@ -180,11 +180,37 @@ class WorkflowTests(unittest.TestCase):
         (folder/'chain_summary.csv').write_text('sample,chain,input_sequences,mapped_seqs,mapping_percent,filtered_seqs\nA,TRA,100,80,80,40\n',encoding='utf-8')
         result=self.client.get(f'/api/jobs/{jid}/results').json();self.assertEqual(result['rows'][0]['mapped_seqs'],'80')
         state=web.state_dir(row);state.mkdir(parents=True);(state/'.pipeline_stage_igblast.DONE').write_text('status=DONE\n')
-        self.assertTrue(web.pipeline_done(row));self.assertIn('05.igblast',web.snapshot(row)['completed_stages'])
+        self.assertFalse(web.pipeline_done(row));self.assertIn('05.igblast',web.snapshot(row)['completed_stages'])
+        (state/'.pipeline_stage_locus_split.DONE').write_text('status=DONE\n')
+        self.assertTrue(web.pipeline_done(row));self.assertIn('06.locus_split',web.snapshot(row)['completed_stages'])
         log=web.log_path(row);log.parent.mkdir(parents=True);log.write_text('[PIG] fastp (sample-level resume enabled)\nprogress=2/10 percent=20\n[PIG] clean (sample-level resume enabled)\n')
         self.assertEqual(web.parse_progress(row),('03.clean',0))
+        with log.open('a',encoding='utf-8') as handle: handle.write('[PIG] locus_split (sample-level resume enabled)\nprogress=1/2 percent=50\n')
+        self.assertEqual(web.parse_progress(row),('06.locus_split',50))
         old=self.client.get(f'/api/jobs/{jid}/log').json();web.update_job(jid,attempt_no=2)
         new=self.client.get(f'/api/jobs/{jid}/log',params={'source':old['source'],'offset':old['next_offset']}).json();self.assertTrue(new['reset'])
+
+    def test_old_completed_base_pig_jobs_stay_complete_but_resumes_require_split(self):
+        for pipeline, marker in [('igblast_base','05.igblast'),('pig_igblast','igblast')]:
+            with self.subTest(pipeline=pipeline):
+                jid = self.create(pipeline=pipeline)
+                row = web.get_job_row(jid)
+                self.assertEqual(json.loads(row['options_json'])['locus_split_version'],1)
+                self.assertNotIn('locus_split_version',self.client.get(f'/api/jobs/{jid}').json()['options'])
+                options = json.loads(row['options_json'])
+                options.pop('locus_split_version')
+                web.update_job(jid,options_json=json.dumps(options),status='SUCCEEDED')
+                row = web.get_job_row(jid)
+                state = web.state_dir(row)
+                state.mkdir(parents=True,exist_ok=True)
+                (state/f'.pipeline_stage_{marker}.DONE').write_text('status=DONE\n')
+                self.assertTrue(web.pipeline_done(row))
+                self.assertNotIn('06.locus_split',web.job_config(row)['stages'])
+                web.update_job(jid,status='QUEUED')
+                row = web.get_job_row(jid)
+                (state/'.pipeline.DONE').write_text('status=DONE\n')
+                self.assertIn('06.locus_split',web.job_config(row)['stages'])
+                self.assertFalse(web.pipeline_done(row))
 
     def test_scheduler_atomic_limit(self):
         ids=[self.create(f'b{i}') for i in range(4)]
