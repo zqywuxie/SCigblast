@@ -9,6 +9,7 @@ import tarfile
 
 ARCHIVE = 'results.tar.gz'
 MANIFEST = '.results-archive.json'
+PENDING = '.results-archive.pending.json'
 
 
 class NoSavings(Exception):
@@ -18,6 +19,10 @@ class NoSavings(Exception):
 def inventory(root):
     entries = []
     for path in sorted(root.rglob('*')):
+        if path.parent == root and path.name in {'.results.tar.gz.tmp', '.results-archive.pending.tmp'}:
+            if path.is_symlink() or not path.is_file():
+                raise ValueError('Invalid archive staging file')
+            continue
         if path.is_symlink() or (not path.is_dir() and not path.is_file()):
             raise ValueError('Output contains links or special files')
         if path.is_file():
@@ -55,27 +60,56 @@ def verify(archive, entries, source=None):
         raise ValueError('Incomplete archive')
 
 
+def validate_entries(root, entries):
+    names = set()
+    for entry in entries:
+        name = entry['name']
+        rel = Path(name)
+        if not name or rel.is_absolute() or '..' in rel.parts or name in names:
+            raise ValueError('Invalid archive manifest entry')
+        names.add(name)
+        path = root / rel
+        if not path.resolve().is_relative_to(root) or any(part.is_symlink() for part in (path, *path.parents) if part != root and part.is_relative_to(root)):
+            raise ValueError('Archive manifest path contains a link')
+
+
 def package(root, job_id):
-    archive, marker = root / ARCHIVE, root / MANIFEST
-    if archive.is_symlink() or marker.is_symlink():
+    archive, marker, pending = root / ARCHIVE, root / MANIFEST, root / PENDING
+    temporary = root / '.results.tar.gz.tmp'
+    pending_temp = root / '.results-archive.pending.tmp'
+    if any(path.is_symlink() for path in (archive, marker, pending, temporary, pending_temp)):
         raise ValueError('Archive path contains a link')
     if marker.exists():
         manifest = json.loads(marker.read_text())
         if manifest['job_id'] != job_id:
             raise ValueError('Archive belongs to another job')
         entries = manifest['entries']
+        validate_entries(root, entries)
         verify(archive, entries)
+    elif pending.exists():
+        manifest = json.loads(pending.read_text(encoding='utf-8'))
+        if manifest['job_id'] != job_id:
+            raise ValueError('Pending archive belongs to another job')
+        entries = manifest['entries']
+        validate_entries(root, entries)
+        candidate = archive if archive.exists() else temporary
+        verify(candidate, entries, root)
+        for entry in entries:
+            stat = (root / entry['name']).stat()
+            if (stat.st_size, stat.st_mtime_ns) != (entry['size'], entry['mtime']):
+                raise ValueError('Source changed during archive recovery')
+        if not archive.exists():
+            os.replace(temporary, archive)
+        os.replace(pending, marker)
     else:
         if archive.exists():
             raise ValueError('Unmanaged archive already exists')
         entries = inventory(root)
-        temporary = root / '.results.tar.gz.tmp'
-        if temporary.exists():
-            raise ValueError('Incomplete archive exists; inspect before retrying')
         try:
-            with tarfile.open(temporary, 'w:gz', compresslevel=6) as tar:
-                for entry in entries:
-                    tar.add(root / entry['name'], arcname=entry['name'], recursive=False)
+            if not temporary.exists():
+                with tarfile.open(temporary, 'w:gz', compresslevel=6) as tar:
+                    for entry in entries:
+                        tar.add(root / entry['name'], arcname=entry['name'], recursive=False)
             verify(temporary, entries, root)
             for entry in entries:
                 stat = (root / entry['name']).stat()
@@ -83,10 +117,18 @@ def package(root, job_id):
                     raise ValueError('Source changed during compression')
             if temporary.stat().st_size >= sum(e['size'] for e in entries if not e['keep']):
                 raise NoSavings('Compression would not reduce storage; original files retained')
+            # Publish a durable journal before renaming the verified archive.
+            # On restart the pending record proves ownership and supports recovery.
+            with pending_temp.open('w', encoding='utf-8') as handle:
+                json.dump({'job_id': job_id, 'entries': entries}, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(pending_temp, pending)
             os.replace(temporary, archive)
-            marker.write_text(json.dumps({'job_id': job_id, 'entries': entries}), encoding='utf-8')
+            os.replace(pending, marker)
         except Exception:
-            temporary.unlink(missing_ok=True)
+            if not pending.exists():
+                temporary.unlink(missing_ok=True)
             raise
     # Never remove a file that has changed since the verified archive was made.
     for entry in entries:

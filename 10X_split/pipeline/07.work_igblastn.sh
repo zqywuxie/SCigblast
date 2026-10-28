@@ -618,7 +618,7 @@ for DB_CELL_TYPE in "${CELL_TYPES[@]}"; do
 
             DONE_TASKS=$((DONE_TASKS + 1))
             TASK_PERCENT=$((DONE_TASKS * 100 / TOTAL_TASKS))
-            TASK_LABEL="[${DONE_TASKS}/${TOTAL_TASKS} ${TASK_PERCENT}%] [${DB_CELL_TYPE}${LABEL_CHAIN}] ${SAMPLE}/batch_${bi}"
+            TASK_LABEL="[task ${DONE_TASKS}/${TOTAL_TASKS}] [${DB_CELL_TYPE}${LABEL_CHAIN}] ${SAMPLE}/batch_${bi}"
 
             # Throttle concurrency
             while [ "$active_jobs" -ge "$MAX_PARALLEL_JOBS" ]; do
@@ -768,6 +768,7 @@ fi
 log "Filtering productive records and merging chains within each sample..."
 "${PYTHON_BIN}" - "${BATCH_TEMP_DIR}" "${OUTPUT_DIR}" "${INPUT_MODE}" "${OUTPUT_DIR}/postprocess_summary.tsv" <<'PY'
 import csv, os, shutil, sys, tempfile
+from collections import OrderedDict
 from pathlib import Path
 root=Path(sys.argv[1]); out=Path(sys.argv[2]); mode=sys.argv[3]; summary=Path(sys.argv[4])
 bad={"","*","-","NA","N/A","NONE","NULL","NO_HIT","UNMAPPED","NOT_FOUND"}; tcr={"TRA","TRB","TRD","TRG"}; bcr={"IGH","IGK","IGL"}
@@ -785,20 +786,22 @@ def load_map(path):
         raise ValueError(f"representative map missing: {path}")
     d={}
     for candidate in candidates:
-        for line in candidate.read_text(encoding='utf-8',errors='replace').splitlines():
-            k,sep,v=line.partition('\t')
-            if sep:
-                if k in d and d[k]!=v: raise ValueError(f"conflicting representative map entry: {k}")
-                d[k]=v
+        with candidate.open(encoding='utf-8',errors='replace') as handle:
+            for line in handle:
+                k,sep,v=line.rstrip('\r\n').partition('\t')
+                if sep:
+                    if k in d and d[k]!=v: raise ValueError(f"conflicting representative map entry: {k}")
+                    d[k]=v
     # A stale/empty result-side map should not hide valid source maps.
     if not d and candidates == [path]:
         candidates=sorted(path.parent.parent.glob('batch_*.map'))
         for candidate in candidates:
-            for line in candidate.read_text(encoding='utf-8',errors='replace').splitlines():
-                k,sep,v=line.partition('\t')
-                if sep:
-                    if k in d and d[k]!=v: raise ValueError(f"conflicting representative map entry: {k}")
-                    d[k]=v
+            with candidate.open(encoding='utf-8',errors='replace') as handle:
+                for line in handle:
+                    k,sep,v=line.rstrip('\r\n').partition('\t')
+                    if sep:
+                        if k in d and d[k]!=v: raise ValueError(f"conflicting representative map entry: {k}")
+                        d[k]=v
     if not d:
         raise ValueError(f"representative map empty: {path}")
     return d
@@ -834,9 +837,9 @@ def count_batch_input(batch):
         count=count_fasta(candidate)
         if count: return count
     return 0
-files=sorted(root.rglob('batch_*.tsv')); tmp=Path(tempfile.mkdtemp(prefix='.postprocess.',dir=out)); handles={}; stats=[]; failed=False
+files=sorted(root.rglob('batch_*.tsv')); tmp=Path(tempfile.mkdtemp(prefix='.postprocess.',dir=out)); handles=OrderedDict(); initialized=set(); stats=[]; failed=False
 for batch in files:
-    rel=batch.relative_to(root); chain=rel.parent.name.upper(); sample=rel.parent.parent.as_posix(); mp=None; raw=valid=prod=kept=0; errors=[]; header=None; saw_noncomment=False; empty_result=False
+    rel=batch.relative_to(root); chain=rel.parent.name.upper(); sample=rel.parent.parent.as_posix(); mp=None; raw=valid=prod=kept=0; missing_map=0; errors=[]; header=None; saw_noncomment=False; empty_result=False
     try:
         inp=count_batch_input(batch)
         with batch.open(encoding='utf-8',errors='replace') as fh:
@@ -860,11 +863,19 @@ for batch in files:
                 if mode=='representative':
                     if mp is None: mp=load_map(batch.with_suffix('.map'))
                     barcode=mp.get(fields[si],'')
-                    if not barcode: errors.append(f'missing representative map entry: {fields[si]}'); continue
+                    if not barcode:
+                        missing_map+=1
+                        if missing_map<=20: errors.append(f'missing representative map entry: {fields[si]}')
+                        continue
                     fields[si]=barcode
                 group='TCR' if chain in tcr else 'BCR' if chain in bcr else 'OTHER'; key=(sample,group)
                 if key not in handles:
-                    target=tmp/Path(*sample.split('/'))/(group+'.tsv'); target.parent.mkdir(parents=True,exist_ok=True); h=target.open('w',encoding='utf-8',newline=''); h.write('\t'.join(header)+'\n'); handles[key]=(h,target)
+                    if len(handles)>=32:
+                        _,(old,_) = handles.popitem(last=False); old.close()
+                    target=tmp/Path(*sample.split('/'))/(group+'.tsv'); target.parent.mkdir(parents=True,exist_ok=True); first=key not in initialized; h=target.open('w' if first else 'a',encoding='utf-8',newline='');
+                    if first: h.write('\t'.join(header)+'\n'); initialized.add(key)
+                    handles[key]=(h,target)
+                handles.move_to_end(key)
                 handles[key][0].write('\t'.join(fields[:len(header)])+'\n'); kept+=1
         if header is None or raw == 0:
             # Empty/comment-only output is expected when a scheduled chain
@@ -880,6 +891,7 @@ for batch in files:
             elif not empty_result:
                 raise ValueError(f"input FASTA missing or empty: {batch.with_suffix('.fasta')}")
     except Exception as exc: errors.append(str(exc))
+    if missing_map>20: errors.append(f'{missing_map-20} additional representative map entries missing')
     status='ERROR' if errors else ('EMPTY' if empty_result else 'OK')
     stats.append({'sample':sample,'chain':chain,'input_sequences':inp,'raw_rows':raw,'mapped_rows':valid,'productive_rows':prod,'output_rows':kept,'status':status,'error':'; '.join(errors)}); failed |= bool(errors)
 for h,_ in handles.values(): h.close()

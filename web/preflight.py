@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from functools import lru_cache
 
 FOLDERS = {'mapping': 'mapping', 'ir_split': 'IR_split', '10x_split': '10X_split',
            'igblast_base': 'Igblast_base', 'pig_igblast': 'PigIgblast'}
@@ -15,6 +16,36 @@ SUPPORTED = {'IGH', 'IGK', 'IGL', 'TRA', 'TRB', 'TRD', 'TRG'}
 CONFIG_KEYS = {'PYTHON_BIN', 'SCIGBLAST_FASTP_BIN', 'SCIGBLAST_PANDASEQ_BIN',
                'SCIGBLAST_IGBLAST_BIN', 'FASTP_BIN', 'PANDASEQ_BIN', 'IGBLAST_BIN',
                'SCIGBLAST_IGBLAST_DB_DIR', 'SCIGBLAST_IGBLAST_SPECIES', 'DB_ROOT', 'PIG_DB_VERSION'}
+
+
+def database_version(prefix):
+    """Version every index companion so replacement invalidates the cache."""
+    files = []
+    for path in sorted(prefix.parent.glob(prefix.name + '.*')):
+        try:
+            stat = path.stat()
+            if path.is_file():
+                files.append((path.name, stat.st_size, stat.st_mtime_ns, stat.st_ino))
+        except OSError:
+            continue
+    return tuple(files)
+
+
+@lru_cache(maxsize=256)
+def inspect_database(command, prefix, version):
+    if not version:
+        return 'missing', ''
+    try:
+        result = subprocess.run([command, '-db', prefix, '-info'], capture_output=True,
+                                text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return 'unreadable', ''
+    if result.returncode:
+        return 'unreadable', ''
+    match = re.search(r'([\d,]+)\s+sequences?;\s*([\d,]+)\s+total bases', result.stdout, re.I)
+    if match and tuple(int(value.replace(',', '')) for value in match.groups()) == (1, 1):
+        return 'placeholder', ''
+    return 'ok', ''
 
 
 def effective_config(pipeline, env, pipeline_root):
@@ -126,13 +157,43 @@ def check_dependencies(pipeline, env, chains=None, *, pipeline_root=None, stage=
     if not aux.is_file():
         missing_db.append(f'辅助文件不可用：{aux}')
     # Match the arguments actually passed by each branch (including VJ placeholders).
-    parts = ('V', 'D', 'J', 'C') if pipeline in {'ir_split', '10x_split'} else (
-        ('V', 'D', 'J') if pig else ('V', 'J'))
+    required_parts = {'V', 'D', 'J', 'C'} if pipeline in {'ir_split', '10x_split'} else (
+        {'V', 'D', 'J'} if pig else {'V', 'J'})
+    blastdbcmd = shutil.which('blastdbcmd', path=config.get('PATH'))
+    if not blastdbcmd and result['commands'].get('igblastn'):
+        candidate = Path(result['commands']['igblastn']).parent / 'blastdbcmd'
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            blastdbcmd = str(candidate)
+    if not blastdbcmd:
+        error('missing_command', '运行环境缺少 blastdbcmd，无法验证参考库')
+        return result
+    fallback_d = None
     for chain in sorted(selected):
-        for part in parts:
+        for part in ('V', 'D', 'J', 'C'):
             prefix = database_root / 'database_251117' / version / chain / f'{species}_gl_{chain}_{part}'
-            if not any(p.is_file() for p in prefix.parent.glob(prefix.name + '.*')):
+            state, _ = inspect_database(blastdbcmd, str(prefix), database_version(prefix))
+            if state == 'missing' and part not in required_parts and part == 'C':
+                result['warnings'].append(dict(code='missing_optional_c', field='environment', blocking=False,
+                                               message=f'{chain} 未配置 C 区参考，无法注释 c_call。', stage=stage))
+            elif state == 'missing' and part not in required_parts:
+                # IgBLAST may load the organism's default D database when
+                # -germline_db_D is omitted, even for a VJ chain.
+                if part == 'D':
+                    if fallback_d is None:
+                        try:
+                            fallback_d = subprocess.run([blastdbcmd, '-db', f'{species}_gl_D', '-info'],
+                                capture_output=True, text=True, timeout=15, env=config, cwd=folder).returncode == 0
+                        except (OSError, subprocess.TimeoutExpired):
+                            fallback_d = False
+                    if not fallback_d:
+                        missing_db.append(f'所选 {chain} 缺少 D 参考，IgBLAST 默认 {species}_gl_D 也不可用')
+                continue
+            elif state == 'missing':
                 missing_db.append(f'所选 {chain} {part} 参考库不可用：{prefix}')
+            elif state == 'unreadable':
+                missing_db.append(f'所选 {chain} {part} 参考库不完整或无法读取：{prefix}')
+            elif state == 'placeholder' and part in {'V', 'J'}:
+                missing_db.append(f'所选 {chain} {part} 参考库仅含占位序列：{prefix}')
     result['missing_databases'] = missing_db
     for message in missing_db:
         error('missing_database', message)

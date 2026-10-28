@@ -1,8 +1,8 @@
 /* Immutable workbook editor, shared by job creation and rematching. */
 window.Submission = (() => {
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  async function api(url, body) {
-    const r = await fetch(url, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-SCIGBLAST-Request':'1'}, body:JSON.stringify(body)});
+  async function api(url, body, options={}) {
+    const r = await fetch(url, body === undefined ? options : {...options,method:'POST', headers:{'Content-Type':'application/json','X-SCIGBLAST-Request':'1'}, body:JSON.stringify(body)});
     if (r.status===401) location.href='/login';
     let data;
     try { data=await r.json(); }
@@ -19,8 +19,8 @@ window.Submission = (() => {
     document.body.append(modal); modal.showModal();
     modal.querySelector('[data-new]').insertAdjacentHTML('afterend','<button class="button button-ghost" data-browse>浏览目标目录</button>');
     const tree=document.createElement('div');tree.className='file-tree hidden';modal.querySelector('[data-grid]').before(tree);
-    async function browse(path='') {
-      try {const result=await api(`/api/browse?${new URLSearchParams({kind:'input',path})}`);tree.classList.remove('hidden');tree.innerHTML=`<p>${esc(result.path||'选择允许的根目录')}</p>${result.path?'<button class="button button-primary" data-choose>使用此路径</button>':''}${result.parent?`<button class="button button-ghost" data-path="${esc(result.parent)}">上一级</button>`:''}<button class="button button-ghost" data-cancel>关闭</button>`+(result.entries||[]).filter(e=>e.type==='directory').map(e=>`<button class="file-tree-entry" data-path="${esc(e.path)}">${esc(e.name)} →</button>`).join('');tree.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.hasAttribute('data-choose')){modal.querySelector('[data-new]').value=result.path;tree.classList.add('hidden');}else if(b.hasAttribute('data-cancel'))tree.classList.add('hidden');else browse(b.dataset.path);};}catch(e){modal.querySelector('[data-message]').textContent=e.message;}
+    async function browse(path='', cursor='', page=0, cursors=['']) {
+      try {const params=new URLSearchParams({kind:'input',path});if(cursor)params.set('cursor',cursor);const result=await api(`/api/browse?${params}`);tree.classList.remove('hidden');tree.innerHTML=`<p>${esc(result.path||'选择允许的根目录')}</p>${result.path?'<button class="button button-primary" data-choose>使用此路径</button>':''}${result.parent?`<button class="button button-ghost" data-path="${esc(result.parent)}">上一级</button>`:''}<button class="button button-ghost" data-cancel>关闭</button>`+(result.entries||[]).filter(e=>e.type==='directory').map(e=>`<button class="file-tree-entry" data-path="${esc(e.path)}">${esc(e.name)} →</button>`).join('')+`<div class="file-picker-pager"><button class="button button-ghost button-small" data-prev-page ${page===0?'disabled':''}>上一页</button><span>第 ${page+1} 页</span><button class="button button-ghost button-small" data-next-page ${result.next_cursor?'':'disabled'}>下一页</button></div>`;tree.onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.hasAttribute('data-choose')){modal.querySelector('[data-new]').value=result.path;tree.classList.add('hidden');}else if(b.hasAttribute('data-cancel'))tree.classList.add('hidden');else if(b.hasAttribute('data-prev-page'))browse(path,cursors[page-1],page-1,cursors);else if(b.hasAttribute('data-next-page'))browse(path,result.next_cursor,page+1,[...cursors.slice(0,page+1),result.next_cursor]);else browse(b.dataset.path);};}catch(e){modal.querySelector('[data-message]').textContent=e.message;}
     }
     modal.querySelector('[data-browse]').onclick=()=>browse();
     const replacement=document.createElement('label');replacement.textContent='用补齐后的 XLSX 替换工作副本：';

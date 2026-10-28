@@ -199,12 +199,14 @@ stop_process_tree(){
 run_monitored_stage(){
   local label="$1" requested_gb="$2" event_file stage_pid watchdog_pid stage_status available_gb
   shift 2
-  memory_guard "$label" "$requested_gb" || return 75
+  scigblast_acquire_stage_budget "$requested_gb" "$label" || return $?
+  memory_guard "$label" "$requested_gb" || { scigblast_release_stage_budget; return 75; }
   event_file="${OUTPUT_ROOT}/memory_stop.$$.log"
   rm -f "$event_file"
   "$@" &
   stage_pid=$!
   (
+    scigblast_release_stage_budget
     while kill -0 "$stage_pid" 2>/dev/null; do
       available_gb="$(available_memory_gb 2>/dev/null || true)"
       if ! [[ "$available_gb" =~ ^[0-9]+$ ]]; then
@@ -228,9 +230,11 @@ run_monitored_stage(){
   wait "$watchdog_pid" 2>/dev/null || true
   if [[ -s "$event_file" ]]; then
     echo "[PIG][memory] ${label} stopped by memory watchdog; details: ${event_file}" >&2
+    scigblast_release_stage_budget
     return 75
   fi
   rm -f "$event_file"
+  scigblast_release_stage_budget
   return "$stage_status"
 }
 preflight_db(){
@@ -398,11 +402,13 @@ run_stage(){ local label="$1" required_gb="$2"; shift 2; if stage_done "$label";
 # sample-level outputs, never an entire stage based on a stale marker.
 MATCH_STATUS=0
 echo "[PIG] match (sample-level resume enabled)"
+scigblast_acquire_stage_budget 0 match || exit $?
 SCIGBLAST_MATCH_INPUT="${RAW_INPUT_DIR}" \
 SCIGBLAST_MATCH_SUBMISSION="${SUBMISSION_XLSX:-}" \
 SCIGBLAST_SUBMISSION_PATHS="${SCIGBLAST_SUBMISSION_PATHS:-}" \
 SCIGBLAST_MATCH_OUTPUT="${OUTPUT_ROOT}/01.match/${DATASET_LABEL}/sample_manifest.csv" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/01.match_sample.py" || MATCH_STATUS=$?
+scigblast_release_stage_budget
 if [[ -n "$DIRECTORY_MANIFEST" && "$MATCH_STATUS" != 0 ]]; then echo "Directory input verification failed" >&2; exit "$MATCH_STATUS"; fi
 MAPPING_SHA256="$(hash_file "${OUTPUT_ROOT}/01.match/${DATASET_LABEL}/sample_manifest.csv" 2>/dev/null || printf unknown)"
 if [[ "${SCIGBLAST_WEB_MATCH_ONLY:-0}" == "1" || ( "$MATCH_ONLY_FIRST_RUN" == "1" && ! -f "$MATCH_REVIEW_MARKER" ) ]]; then
@@ -446,7 +452,12 @@ SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${SCRIPT_DIR}/../../pipeline_
   --species pig --database-version "$PIG_DB_VERSION" \
   --threads "${SCIGBLAST_IGBLAST_THREADS:-${IGBLAST_THREADS:-16}}" --implementation "${SCRIPT_DIR}/05.work_igblastn.py")"
 export SCIGBLAST_IGBLAST_DEPENDENCIES
-if ! stage_done igblast; then rm -f "${STATE_DIR}/.pipeline_stage_igblast.DONE" "${STATE_DIR}/.pipeline_stage_locus_split.DONE"; fi
+if ! stage_done igblast; then
+  rm -f "${STATE_DIR}/.pipeline_stage_igblast.DONE" "${STATE_DIR}/.pipeline_stage_locus_split.DONE"
+  scigblast_igblast_workers "$SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS" "${SCIGBLAST_IGBLAST_THREADS:-${IGBLAST_THREADS:-16}}" "$PARALLEL_THREAD_BUDGET" "$TOTAL_MEMORY_GB" "${SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB:-${IGBLAST_MEMORY_GB:-48}}" || exit $?
+  export SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS="$SCIGBLAST_EFFECTIVE_IGBLAST_JOBS"
+  IGBLAST_REQUIRED_GB="$(( SCIGBLAST_EFFECTIVE_IGBLAST_JOBS * ${SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB:-${IGBLAST_MEMORY_GB:-48}} ))"
+fi
 run_stage igblast "$IGBLAST_REQUIRED_GB" "${PYTHON_BIN}" "${SCRIPT_DIR}/05.work_igblastn.py"
 rm -f "${STATE_DIR}/.pipeline_stage_locus_split.DONE"
 echo "[PIG] pipeline completed"

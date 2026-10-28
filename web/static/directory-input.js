@@ -26,6 +26,7 @@ window.DirectoryInput = (() => {
     $('#directory-rows').querySelectorAll('input').forEach(input=>{if(scanning)input.disabled=true;});
   }
   function render(notify=true){
+    $('#directory-fields').querySelectorAll('.directory-batch,.directory-tools,#directory-scope,#directory-rows,.directory-pager').forEach(node=>node.classList.toggle('hidden',!scanId));
     const focused=document.activeElement?.matches('[data-select]')?document.activeElement.closest('[data-id]')?.dataset.id:null;
     const query=$('#directory-search').value.trim().toLowerCase();const filtered=rows.filter(r=>`${r.pair_id} ${(selected.get(r.id)||drafts.get(r.id))?.sample_id||r.sample_id}`.toLowerCase().includes(query));page=Math.min(page,Math.max(0,Math.ceil(filtered.length/size)-1));
     $('#directory-rows').innerHTML=filtered.slice(page*size,(page+1)*size).map(r=>{

@@ -32,7 +32,7 @@
       <div id="jobs-action-message" class="action-notice hidden" role="status" aria-live="polite"><span></span><button id="jobs-action-retry" class="button button-ghost button-small">重试操作</button><button id="jobs-action-dismiss" class="close-button" aria-label="关闭操作提示">×</button></div>
       <div class="panel-heading tasks-heading"><div><h2>任务列表</h2><small id="jobs-updated" class="muted" aria-live="polite">尚未更新</small></div><button id="refresh-jobs" class="button button-ghost">↻ 刷新</button></div>
       <div class="list-toolbar">
-        <div class="filter-tabs" role="tablist" aria-label="任务状态筛选"><button class="filter-tab active" role="tab" aria-selected="true" data-filter="all">全部 <span id="count-all">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="active">进行中 <span id="count-active">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="review">待审核 <span id="count-review">0</span></button><button class="filter-tab" role="tab" aria-selected="false" data-filter="done">已结束 <span id="count-done">0</span></button></div>
+        <div class="filter-tabs" role="group" aria-label="任务状态筛选"><button class="filter-tab active" aria-pressed="true" data-filter="all">全部 <span id="count-all">0</span></button><button class="filter-tab" aria-pressed="false" data-filter="active">进行中 <span id="count-active">0</span></button><button class="filter-tab" aria-pressed="false" data-filter="review">待审核 <span id="count-review">0</span></button><button class="filter-tab" aria-pressed="false" data-filter="done">已结束 <span id="count-done">0</span></button></div>
         <div class="toolbar-tools"><select id="pipeline-filter" aria-label="按 Pipeline 筛选"><option value="">全部流程</option></select><select id="operator-filter" aria-label="按操作者筛选"><option value="">全部操作者</option></select><label class="search-box"><span>⌕</span><input id="job-search" placeholder="搜索 Job 或 Dataset" aria-label="搜索任务"></label></div>
       </div>
       <div id="job-filter-summary" class="job-filter-summary hidden" aria-label="当前筛选条件"><div id="job-filter-chips"></div><button id="job-filter-reset" type="button" class="button button-ghost button-small">重置筛选</button></div>
@@ -102,7 +102,9 @@
       <header class="file-picker-header"><div><h2 id="file-picker-title">选择路径</h2></div><button id="close-file-picker" class="close-button" aria-label="关闭文件选择器">×</button></header>
       <div class="file-picker-path"><button id="file-picker-up" class="button button-ghost button-small" type="button" disabled>↑ 上一级</button><code id="file-picker-current">选择允许的根目录</code></div>
       <p id="file-picker-message" class="file-picker-message" role="status" aria-live="polite"></p>
+      <input id="file-picker-search" type="search" aria-label="搜索当前目录" placeholder="搜索当前目录">
       <div id="file-picker-entries" class="file-tree" role="tree"><div class="file-tree-empty">加载中…</div></div>
+      <div class="file-picker-pager"><button id="file-picker-prev" type="button" class="button button-ghost button-small" disabled>上一页</button><span id="file-picker-page" class="muted">第 1 页</span><button id="file-picker-next" type="button" class="button button-ghost button-small" disabled>下一页</button><button id="file-picker-reload" type="button" class="button button-ghost button-small hidden">重新读取</button></div>
       <footer class="file-picker-footer"><button id="file-picker-cancel" type="button" class="button button-ghost">取消</button><button id="file-picker-select" type="button" class="button button-primary" disabled>选择当前目录</button></footer>
     </section>
   </div>

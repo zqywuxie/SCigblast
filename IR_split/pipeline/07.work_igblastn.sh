@@ -742,7 +742,7 @@ for DB_CELL_TYPE in "${CELL_TYPES[@]}"; do
 
             DONE_TASKS=$((DONE_TASKS + 1))
             TASK_PERCENT=$((DONE_TASKS * 100 / TOTAL_TASKS))
-            TASK_LABEL="[${DONE_TASKS}/${TOTAL_TASKS} ${TASK_PERCENT}%] [${DB_CELL_TYPE}${LABEL_CHAIN}] ${SAMPLE}/batch_${bi}"
+            TASK_LABEL="[task ${DONE_TASKS}/${TOTAL_TASKS}] [${DB_CELL_TYPE}${LABEL_CHAIN}] ${SAMPLE}/batch_${bi}"
 
             # Throttle concurrency
             while [ "$active_jobs" -ge "$MAX_PARALLEL_JOBS" ]; do
@@ -936,6 +936,7 @@ fi
 log "Filtering productive records and merging chains within each sample..."
 "${PYTHON_BIN}" - "${BATCH_TEMP_DIR}" "${OUTPUT_DIR}" "${INPUT_MODE}" "${OUTPUT_DIR}/postprocess_summary.tsv" <<'PY'
 import csv, os, shutil, sys, tempfile
+from collections import OrderedDict
 from pathlib import Path
 root=Path(sys.argv[1]); out=Path(sys.argv[2]); mode=sys.argv[3]; summary=Path(sys.argv[4])
 bad={"","*","-","NA","N/A","NONE","NULL","NO_HIT","UNMAPPED","NOT_FOUND"}; tcr={"TRA","TRB","TRD","TRG"}; bcr={"IGH","IGK","IGL"}
@@ -971,7 +972,7 @@ def count_batch_input(batch):
         count=count_fasta(candidate)
         if count: return count
     return 0
-files=sorted(root.rglob('batch_*.tsv')); tmp=Path(tempfile.mkdtemp(prefix='.postprocess.',dir=out)); handles={}; stats=[]; failed=False
+files=sorted(root.rglob('batch_*.tsv')); tmp=Path(tempfile.mkdtemp(prefix='.postprocess.',dir=out)); handles=OrderedDict(); initialized=set(); stats=[]; failed=False
 for batch in files:
     rel=batch.relative_to(root); chain=rel.parent.name.upper(); sample=rel.parent.parent.as_posix(); raw=valid=prod=kept=0; errors=[]; header=None; saw_noncomment=False; empty_result=False
     try:
@@ -993,7 +994,12 @@ for batch in files:
                 # sample/cell identity and must not overwrite read identity.
                 group='TCR' if chain in tcr else 'BCR' if chain in bcr else 'OTHER'; key=(sample,group)
                 if key not in handles:
-                    target=tmp/Path(*sample.split('/'))/(group+'.tsv'); target.parent.mkdir(parents=True,exist_ok=True); h=target.open('w',encoding='utf-8',newline=''); h.write('\t'.join(header)+'\n'); handles[key]=(h,target)
+                    if len(handles)>=32:
+                        _,(old,_) = handles.popitem(last=False); old.close()
+                    target=tmp/Path(*sample.split('/'))/(group+'.tsv'); target.parent.mkdir(parents=True,exist_ok=True); first=key not in initialized; h=target.open('w' if first else 'a',encoding='utf-8',newline='');
+                    if first: h.write('\t'.join(header)+'\n'); initialized.add(key)
+                    handles[key]=(h,target)
+                handles.move_to_end(key)
                 handles[key][0].write('\t'.join(fields[:len(header)])+'\n'); kept+=1
         if header is None or raw == 0:
             # IgBLAST emits an empty/comment-only file when a scheduled chain

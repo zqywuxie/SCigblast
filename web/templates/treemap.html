@@ -14,7 +14,7 @@
         <div class="field" id="tm-path-field" hidden><label class="field-label" for="tm-path">结果目录</label><input id="tm-path" placeholder="/colddata/.../results" spellcheck="false" disabled><button id="tm-browse" class="button button-ghost button-small tm-browse-button" type="button" aria-haspopup="dialog" aria-controls="tm-directory-dialog" disabled>浏览目录</button><small class="field-hint">填写服务器允许范围内的现有结果目录。</small></div>
         <button id="tm-scan" class="button button-primary tm-wide" type="submit">扫描样本与链 <span aria-hidden="true">→</span></button>
       </form>
-      <div class="tm-source-note"><strong>支持各流程的 mapping 结果</strong><p>可使用 IgBLAST base、Pig IgBLAST、IR、10X、reMapping 的最终结果，或目录中兼容的 AIRR 注释表。</p><p>仅统计 productive 为 T 且 CDR3 非空的记录，不按 copy 或 UMI count 加权。</p></div>
+      <details class="tm-source-note"><summary>支持的数据与计数规则</summary><p>可使用 IgBLAST base、Pig IgBLAST、IR、10X、reMapping 的最终结果，或目录中兼容的 AIRR 注释表。</p><p>仅统计 productive 为 T 且 CDR3 非空的记录，不按 copy 或 UMI count 加权。</p></details>
     </section>
     <section class="panel tm-selection" aria-labelledby="tm-selection-title"><div class="tm-section-heading"><span class="tm-step">02</span><div><h2 id="tm-selection-title">确认绘制范围</h2><p id="tm-selection-note">先扫描一个结果来源。</p></div></div>
       <div class="tm-selection-tools"><label class="search-box"><span aria-hidden="true">⌕</span><input id="tm-search" type="search" aria-label="搜索样本或链" placeholder="搜索样本或链" disabled></label><div><button id="tm-all" class="button button-ghost button-small" disabled>全部有效项</button><button id="tm-none" class="button button-ghost button-small" disabled>清空选择</button></div></div>
@@ -31,6 +31,7 @@
   <div class="file-picker-path tm-directory-navigation"><button id="tm-directory-roots" type="button" class="button button-ghost button-small">根目录</button><button id="tm-directory-up" type="button" class="button button-ghost button-small" disabled>↑ 上一级</button><code id="tm-directory-current">允许的根目录</code></div>
   <p id="tm-directory-message" class="file-picker-message" role="status" aria-live="polite">选择允许的根目录，再进入结果目录。</p>
   <div id="tm-directory-entries" class="file-tree" aria-label="可浏览目录"></div>
+  <div class="file-picker-pager"><button id="tm-directory-prev" type="button" class="button button-ghost button-small" disabled>上一页</button><span id="tm-directory-page" class="muted">第 1 页</span><button id="tm-directory-next" type="button" class="button button-ghost button-small" disabled>下一页</button></div>
   <footer class="file-picker-footer"><button id="tm-directory-cancel" type="button" class="button button-ghost">取消</button><button id="tm-directory-select" type="button" class="button button-primary" disabled>选用当前目录</button></footer>
 </dialog>
 <script src="/static/ui.js?v={{ asset_version }}"></script><script src="/static/submission.js?v={{ asset_version }}"></script><script src="/static/treemap-view.js?v={{ asset_version }}"></script><script src="/static/treemap.js?v={{ asset_version }}"></script></body></html>

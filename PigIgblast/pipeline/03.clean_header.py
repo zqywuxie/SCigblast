@@ -9,6 +9,7 @@ sys.path.insert(0, str(PIPELINE_DIR))
 from tools.pipeline_config import load_config
 sys.path.insert(0,str(PIPELINE_DIR.parents[1]))
 from pipeline_input_manifest import pig_output_relative
+from pipeline_progress import inherited_resource_fds
 
 HERE=PIPELINE_DIR
 CFG=load_config(); OUTPUT_ROOT=Path(CFG.get('SCIGBLAST_OUTPUT_ROOT') or CFG.get('OUTPUT_ROOT') or str(PIPELINE_DIR.parent/'output'))
@@ -104,7 +105,7 @@ def process_fast(src: Path, dst: Path, suffix: int) -> int:
     source_handle=None; decoder=None
     try:
         if is_gzip(src):
-            decoder=subprocess.Popen([PIGZ,'-dc','-p',str(CLEAN_THREADS),str(src)], stdout=subprocess.PIPE)
+            decoder=subprocess.Popen([PIGZ,'-dc','-p',str(CLEAN_THREADS),str(src)], stdout=subprocess.PIPE, pass_fds=inherited_resource_fds())
             source=decoder.stdout
         else:
             source_handle=open(src,'rb'); source=source_handle
@@ -112,9 +113,9 @@ def process_fast(src: Path, dst: Path, suffix: int) -> int:
 (NR-1) % 4 == 0 { n++; split($0,f,/[[:space:]]+/); h=f[1]; sub(/^@/,"",h); sub(/#.*/,"",h); sub(/\/[12]$/, "", h); m=split(h,a,":"); limit=(m>=8?7:m); for(i=4;i<=limit;i++){gsub(/[A-Za-z]/,"",a[i]); sub(/^0+/,"",a[i]); if(a[i]=="")a[i]="0"}; out=a[1]; for(i=2;i<=limit;i++)out=out ":" a[i]; print "@" out "/" suffix; next }
 { print }
 END { print n > count_file }'''
-        awk=subprocess.Popen(['awk','-v',f'count_file={count_file}','-v',f'suffix={suffix}',awk_script], stdin=source, stdout=subprocess.PIPE)
+        awk=subprocess.Popen(['awk','-v',f'count_file={count_file}','-v',f'suffix={suffix}',awk_script], stdin=source, stdout=subprocess.PIPE, pass_fds=inherited_resource_fds())
         with open(tmp,'wb') as out_handle:
-            compressor=subprocess.Popen([PIGZ,'-p',str(CLEAN_THREADS)], stdin=awk.stdout, stdout=out_handle)
+            compressor=subprocess.Popen([PIGZ,'-p',str(CLEAN_THREADS)], stdin=awk.stdout, stdout=out_handle, pass_fds=inherited_resource_fds())
             awk.stdout.close(); rc_compressor=compressor.wait(); rc_awk=awk.wait()
         rc_decoder=decoder.wait() if decoder is not None else 0
         if rc_compressor or rc_awk or rc_decoder: raise RuntimeError(f'pigz/awk failed ({rc_decoder},{rc_awk},{rc_compressor})')

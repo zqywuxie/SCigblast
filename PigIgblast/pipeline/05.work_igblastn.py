@@ -12,6 +12,7 @@ sys.path.insert(0, str(HERE.parents[1]))
 from pipeline_input_manifest import pig_output_relative
 from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
 from pipeline_parallel import FastaCountCache, bounded_completed
+from pipeline_progress import Progress, run_igblast, verified_estimate
 from pipeline_locus_split import atomic_text, filter_mapping_airr
 
 def safe(value): return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
@@ -32,10 +33,13 @@ DB_ROOT = Path(cfg.get("DB_ROOT", "")); VERSION = cfg.get("PIG_DB_VERSION", "pig
 BIN = resolve_binary(BIN, DB_ROOT, "pig")
 DEPENDENCIES = {}
 FASTA_COUNTS = FastaCountCache()
+PROGRESS = None
 THREADS = int(cfg.get("SCIGBLAST_IGBLAST_THREADS", cfg.get("IGBLAST_THREADS", "16")))
-MAX_JOBS = max(1, min(4, int(cfg.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", cfg.get("MAX_JOBS", "4"))),
-                      int(cfg.get('SCIGBLAST_PARALLEL_THREAD_BUDGET', '128')) // max(1, THREADS) or 1,
-                      int(cfg.get('SCIGBLAST_MEMORY_BUDGET_GB', '300')) // max(1, int(cfg.get('SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB', '32'))) or 1))
+MAX_JOBS = min(4, int(cfg.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", cfg.get("MAX_JOBS", "4"))),
+               int(cfg.get('SCIGBLAST_PARALLEL_THREAD_BUDGET', '128')) // max(1, THREADS),
+               int(cfg.get('SCIGBLAST_MEMORY_BUDGET_GB', '300')) // max(1, int(cfg.get('SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB', '32'))))
+if MAX_JOBS < 1:
+    raise SystemExit('IgBLAST thread or memory budget cannot accommodate one worker')
 TCR = {"TRA", "TRB", "TRD", "TRG"}
 def atomic_write_text(path: Path, text: str) -> None:
     atomic_text(path, lambda handle: handle.write(text))
@@ -74,6 +78,7 @@ def task(job):
                               status="OK", path=filtered)
                 for key in ('locus_input_rows', 'excluded_locus_rows', 'unknown_locus_rows'):
                     common[key] = int(cached.get(key, 0))
+                common['_progress_cached'] = True
                 return common
     except (OSError, ValueError):
         pass
@@ -96,11 +101,14 @@ def task(job):
     if db_ok(c):
         args.extend(["-c_region_db", str(c), "-num_alignments_C", "1"])
     args.extend(["-auxiliary_data", str(aux), "-organism", "pig", "-ig_seqtype", seqtype, "-query", str(fasta), "-outfmt", "19", "-num_threads", str(THREADS)])
-    with (task_dir / f"{safe(chain)}.tsv.log").open("w", encoding="utf-8") as log: rc = subprocess.run(args + ["-out", str(raw)], stdout=log, stderr=subprocess.STDOUT).returncode
+    PROGRESS.update(job, 'aligning', input_count=n)
+    with (task_dir / f"{safe(chain)}.tsv.log").open("w", encoding="utf-8") as log: rc = run_igblast(args + ["-out", str(raw)], log, raw, PROGRESS, job, n, PROGRESS.enabled and verified_estimate(BIN, 'pig', chain))
     if rc or not raw.is_file(): common["error"] = "igblast_failed"; raw.unlink(missing_ok=True); return common
     try:
+        PROGRESS.update(job, 'filtering')
         counts = filter_mapping_airr(raw, filtered, chain); raw.unlink(missing_ok=True)
         common.update(counts, status="OK", path=filtered)
+        PROGRESS.update(job, 'publishing')
         atomic_write_text(done, "\n".join(("version=2", f"job_fingerprint={fingerprint}", f"dependency_fingerprint={DEPENDENCIES['chains'][chain]}",
                                              *(f"{key}={value}" for key, value in counts.items()))) + "\n")
     except Exception as exc:
@@ -110,7 +118,7 @@ def task(job):
     return common
 
 def main():
-    global DEPENDENCIES, FASTA_COUNTS
+    global DEPENDENCIES, FASTA_COUNTS, PROGRESS
     FASTA_COUNTS = FastaCountCache()
     if not MANIFEST.is_file(): raise SystemExit("missing sample_manifest.csv")
     jobs=[]; seen=set()
@@ -131,13 +139,23 @@ def main():
     DEPENDENCIES=dependency_snapshot(mode="pig",db_root=DB_ROOT,binary=BIN,species="pig",
         database_version=VERSION,threads=THREADS,chains=[job[2] for job in jobs],
         implementation=HERE/"05.work_igblastn.py",inherited=os.environ.get("SCIGBLAST_IGBLAST_DEPENDENCIES",""))
+    PROGRESS = Progress('05.igblast', [(job, job[0], job[1], job[2]) for job in jobs], MAX_JOBS)
+    def tracked_task(job):
+        PROGRESS.update(job, 'preparing')
+        try:
+            result = task(job)
+        except Exception as exc:
+            PROGRESS.update(job, 'failed', error=str(exc))
+            raise
+        PROGRESS.update(job, 'cached' if result.get('_progress_cached') else 'succeeded' if result['status'] == 'OK' else 'failed', input_count=result.get('input_sequences'), error=result.get('error', ''))
+        return result
     # Remove legacy raw/aggregate products from earlier versions. This stage
     # publishes only sample-local filtered <CHAIN>.tsv files.
     shutil.rmtree(OUTPUT / "raw", ignore_errors=True)
     for legacy in OUTPUT.glob("all_samples_*.tsv"): legacy.unlink(missing_ok=True)
     with ThreadPoolExecutor(max_workers=MAX_JOBS) as executor:
-        for idx, (_, result) in enumerate(bounded_completed(executor, task, jobs, MAX_JOBS*2), 1):
-            results.append(result); print(f"[PIG][igblast] {result['status'].lower()} {idx}/{len(jobs)} {result['sample_id']}/{result['pair_id']}/{result['chain']}", flush=True)
+        for idx, (_, result) in enumerate(bounded_completed(executor, tracked_task, jobs, MAX_JOBS*2), 1):
+            results.append(result); print(f"[PIG][igblast] {result['status'].lower()} {idx}/{len(jobs)} percent={idx*100//len(jobs)} {result['sample_id']}/{result['pair_id']}/{result['chain']}", flush=True)
     fields=["sample_id","pair_id","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","locus_input_rows","excluded_locus_rows","unknown_locus_rows","locus_filter_version","status","error","output_path"]
     summary_temp=SUMMARY.with_suffix(SUMMARY.suffix+".tmp")
     with summary_temp.open("w", encoding="utf-8", newline="") as fh:

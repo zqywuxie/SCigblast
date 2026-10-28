@@ -7,6 +7,9 @@ if [[ -z "${SCIGBLAST_RESOURCE_LOCK_FILE:-}" && -f "${SCRIPT_DIR}/00.pipeline_co
 fi
 source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
 scigblast_acquire_resource_lock || exit $?
+# The CSV/IgBLAST phases have independent budgets; until their separate
+# reservations are measured, reserve the gate exclusively for the invocation.
+scigblast_acquire_stage_budget 0 reMapping || exit $?
 PYTHON="${PYTHON_BIN:-python3}"
 if [[ -n "${SCIGBLAST_RUNTIME_BIN_DIR:-}" ]]; then
   PYTHON="${SCIGBLAST_RUNTIME_BIN_DIR}/python3"

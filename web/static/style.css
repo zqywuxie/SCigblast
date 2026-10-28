@@ -81,6 +81,17 @@ input,select,textarea { font-size:var(--text-control); line-height:1.5; }
 .button,.button-small,.button-large { font:600 var(--text-control)/1.45 var(--font); min-height:40px; }
 .button-large { font-size:var(--text-body); }
 .filter-tab,.detail-tab { font-size:var(--text-control); line-height:1.5; }
+.igblast-progress{padding:18px 22px;margin:0 0 16px}
+.igblast-progress-heading{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.igblast-progress-heading h2{font-size:16px;margin:0}.igblast-progress-heading p{margin:4px 0 12px}
+.igblast-progress-timing{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.igblast-progress-row{display:grid;grid-template-columns:minmax(150px,1fr) 65px 90px 150px 90px;gap:12px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.igblast-progress-row strong,.igblast-progress-row small{display:block;overflow-wrap:anywhere}.igblast-progress-row small{color:var(--muted)}
+.igblast-chain{font-weight:700;color:var(--primary)}.igblast-progress-empty{margin:5px 0}.igblast-progress>p{margin:10px 0 0;font-size:12px}
+.igblast-task-controls,.igblast-task-pager{display:flex;align-items:center;gap:8px;margin-top:12px}.igblast-task-controls input{max-width:300px}.igblast-task-pager span{margin-right:auto}
+.igblast-task-item{display:grid;grid-template-columns:minmax(0,1fr) 65px 100px;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}.igblast-task-item small{display:block;color:var(--muted);overflow-wrap:anywhere}.igblast-task-error{grid-column:1 / -1}
+.file-picker-pager{display:flex;align-items:center;gap:8px;padding:8px 0}.file-picker-pager span{font-size:12px}#file-picker-search{width:100%;margin:0 0 8px}
+@media(max-width:700px){.igblast-progress{padding:14px}.igblast-progress-row{grid-template-columns:minmax(0,1fr) auto;gap:5px 12px}.igblast-progress-row>div{grid-column:1}.igblast-progress-row>span:last-child{text-align:right}}
 .filter-tab span,.topbar-caption { font-size:var(--text-caption); }
 .topbar-right,.stat-label { font-size:var(--text-small); }
 .stat-card strong { font:600 28px/1.3 var(--font); font-variant-numeric:tabular-nums; }

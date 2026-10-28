@@ -4,6 +4,7 @@
   let job,tab='overview',revision='',attempt=-1,matchSummarySignature='',matchPage=0,offset=0,source='',paused=false,busy=false,logBusy=false;
   let refreshGeneration=0,refreshPendingCount=0,lastUpdate='',artifactsRequest=0;
   let runtimeAnchor=0;
+  let progressPage=0,progressRequest=0,progressTimer,progressAttempt=-1;
   function runtimeText(){
     if(job?.status==='QUEUED')return '等待启动';
     if(job?.runtime_seconds==null)return job?.started_at?'—':'尚未运行';
@@ -12,6 +13,39 @@
     return `${days?days+' 天 ':''}${[hours,minutes,rest].map(v=>String(v).padStart(2,'0')).join(':')}`;
   }
   function updateRuntime(){const node=$('[data-runtime-value]');if(node&&job){const text=runtimeText();if(node.textContent!==text)node.textContent=text;}}
+  function duration(seconds){seconds=Math.max(0,Math.floor(seconds));return [Math.floor(seconds/3600),Math.floor(seconds%3600/60),seconds%60].map(v=>String(v).padStart(2,'0')).join(':');}
+  function estimateRange(low,high){if(high<60)return '小于 1 分钟';const lo=Math.max(1,Math.floor(low/60)),hi=Math.max(lo,Math.ceil(high/60));return lo===hi?`约 ${lo} 分钟`:`约 ${lo}–${hi} 分钟`;}
+  function renderIgblastProgress(){
+    const p=job.igblast_progress,node=$('#igblast-progress');
+    const visible=Boolean(p&&job.current_stage===p.stage&&!['QUEUED','WAITING_REVIEW'].includes(job.status));
+    node.classList.toggle('hidden',!visible);if(!visible)return;
+    const counts=p.counts||{},done=(counts.succeeded||0)+(counts.cached||0)+(counts.aligned||0),running=(counts.preparing||0)+(counts.aligning||0)+(counts.filtering||0)+(counts.publishing||0);
+    textValue('#igblast-progress-summary',`${p.unit==='batch'?'比对结束':'已完成'} ${done} / ${p.total} ${p.unit==='batch'?'批次':'项'} · 运行 ${running} / 上限 ${p.workers} · 等待 ${counts.queued||0}${counts.failed?` · 失败 ${counts.failed}`:''}${counts.cached?` · 复用 ${counts.cached}`:''}`);
+    const now=Date.now()/1000,live=['RUNNING','MATCHING','STOPPING'].includes(job.status);
+    const end=live?now:(p.updated||p.started);
+    const estimates=(p.active||[]).filter(a=>a.phase==='aligning'&&a.eta_low!=null&&a.eta_high!=null&&now-a.updated<15);
+    const stageEstimate=live&&!counts.queued&&estimates.length===running&&running>0?estimateRange(Math.max(...estimates.map(a=>a.eta_low)),Math.max(...estimates.map(a=>a.eta_high))):'暂无法估计';
+    textValue('#igblast-progress-timing',`${p.unit==='batch'?'批次处理':'链任务'}已用 ${duration(end-p.started)} · 当前比对预计剩余：${stageEstimate}`);
+    const labels={preparing:'准备输入',aligning:'比对中',filtering:'筛选中',publishing:'发布结果'};
+    region('#igblast-progress-active',(p.active||[]).map(a=>`<div class="igblast-progress-row"><div><strong>${esc(a.sample||'未命名样本')}</strong><small>${esc(a.pair||'')}</small></div><span class="igblast-chain">${esc(a.chain)}</span><span>${esc(live?(labels[a.phase]||a.phase):'执行已结束')}</span><span class="muted">${a.phase==='aligning'&&a.observed!=null?`已输出 ${Number(a.observed).toLocaleString('zh-CN')} 条${a.observation==='catching_up'?'（读取中）':''}${a.verified&&a.input_count>0?`（${(a.observed*100/a.input_count).toFixed(1)}%）`:''} · `:''}${a.input_count==null?'序列数待确认':`${Number(a.input_count).toLocaleString('zh-CN')} 条输入`}${live&&a.phase==='aligning'&&a.eta_low!=null&&a.eta_high!=null&&now-a.updated<15?`<small>比对预计剩余 ${estimateRange(a.eta_low,a.eta_high)}</small>`:''}</span><span class="muted">${a.started?duration((live?now:a.updated)-a.started):'—'}</span></div>`).join('')||'<p class="muted igblast-progress-empty">暂无正在处理的链任务</p>');
+    const failed=(p.failed||[]).map(a=>`${a.sample} / ${a.chain}: ${a.error||'处理失败'}`).join('；');
+    textValue('#igblast-progress-note',failed||(p.unit==='batch'?'批次比对结束后仍需合并筛选；列表仅包含已启动的批次。':'已输出记录来自未筛选结果，可能滞后；预计时间仅供参考，不含筛选与发布。'));
+    $('#igblast-task-details summary').textContent=p.unit==='batch'?'查看已启动的批次':'查看全部链任务';
+    if(progressAttempt!==job.attempt_no){progressAttempt=job.attempt_no;progressPage=0;progressRequest++;}
+    if($('#igblast-task-details').open)loadIgblastTasks();
+  }
+  async function loadIgblastTasks(){
+    const token=++progressRequest,currentAttempt=job.attempt_no;
+    const params=new URLSearchParams({offset:progressPage*20,query:$('#igblast-task-query').value.trim(),state:$('#igblast-task-state').value});
+    try{
+      const data=await api(`/api/jobs/${id}/igblast-progress?${params}`);
+      if(token!==progressRequest||data.attempt_no!==currentAttempt||job.attempt_no!==currentAttempt)return;
+      const labels={queued:'等待中',preparing:'准备输入',aligning:'比对中',filtering:'筛选中',publishing:'发布中',succeeded:'已完成',cached:'复用结果',aligned:'比对结束',failed:'失败'};
+      region('#igblast-task-list',data.rows.map(row=>`<div class="igblast-task-item"><span><strong>${esc(row.sample||'未命名样本')}</strong><small>${esc(row.pair||'')}</small></span><b>${esc(row.chain)}</b><span>${esc(labels[row.phase]||row.phase)}</span>${row.error?`<small class="igblast-task-error">${esc(row.error)}</small>`:''}</div>`).join('')||'<p class="muted">没有符合条件的链任务</p>');
+      textValue('#igblast-task-page',`${data.total} 项 · 第 ${progressPage+1} 页`);
+      $('#igblast-task-prev').disabled=progressPage===0;$('#igblast-task-next').disabled=(progressPage+1)*20>=data.total;
+    }catch(error){if(token===progressRequest)textValue('#igblast-task-list',`读取链任务失败：${errorText(error)}`);}
+  }
   const regionMarkup=new Map();
   function textValue(selector,value){const node=$(selector),text=String(value??'—');if(node&&node.textContent!==text)node.textContent=text;}
   function definitionRows(rows){return rows.map(([label,value])=>{const text=String(value??'—');return `<dt>${esc(label)}</dt><dd>${text.length>180?`<details class="long-value"><summary>查看完整${esc(label)}</summary><p>${esc(text)}</p></details>`:esc(text)}</dd>`;}).join('');}
@@ -31,8 +65,14 @@
   function errorText(error){let data;try{data=JSON.parse(error.message);}catch{}return data?.errors?.map(i=>i.message||i.code).join('；')||data?.message||error.message||String(error);}
   const fail=e=>{const node=$('#page-error');node.textContent=errorText(e);node.classList.remove('hidden');};
   function connectionError(error){$('#job-connection span').textContent=`连接暂时中断，${lastUpdate?`当前显示为 ${lastUpdate} 更新的数据`:'尚未获取任务信息'}。${errorText(error)}`;$('#job-connection').classList.remove('hidden');}
-  function nextStep(){return job.status_detail||({QUEUED:'任务已排队，轮到后自动启动。',WAITING_REVIEW:'核对样本并完成全部标注，然后点击“审核并继续”。',SUCCEEDED:'分析已完成，可按样本查看和下载结果。',ARCHIVING:'分析已完成，正在压缩并校验结果；归档结束后可下载完整压缩包。',ARCHIVED:'结果已归档，可下载完整压缩包。',FAILED:'查看失败原因和日志，修正后可断点续跑。',STOPPED:'中间结果已保留，可断点续跑。',INTERRUPTED:'执行已中断，请查看当前执行状态后续跑。'})[job.status]||'分析中，已完成的阶段会保留。';}
-  const statusLabels={QUEUED:'排队中',RUNNING:'运行中',MATCHING:'匹配中',WAITING_REVIEW:'待审核',SUCCEEDED:'已完成',ARCHIVING:'归档中',ARCHIVED:'已归档',FAILED:'失败',STOPPED:'已停止',STOPPING:'停止中',INTERRUPTED:'已中断',COMPLETED_WITHOUT_MARKER:'需检查'};
+  function nextStep(){return job.status_detail||({QUEUED:'任务已排队，轮到后自动启动。',WAITING_REVIEW:'核对样本并完成全部标注，然后点击“审核并继续”。',SUCCEEDED:'分析已完成，可按样本查看和下载结果。',ARCHIVING:'分析已完成，正在压缩并校验结果；归档结束后可下载完整压缩包。',ARCHIVED:'结果已归档，可下载完整压缩包。',DELETING:job.delete_in_progress?'正在删除任务及输出文件。':'删除未完成，可检查问题后重试删除。',FAILED:'查看失败原因和日志，修正后可断点续跑。',STOPPED:'中间结果已保留，可断点续跑。',INTERRUPTED:'执行已中断，请查看当前执行状态后续跑。'})[job.status]||'分析中，已完成的阶段会保留。';}
+  function failureDetail(){
+    if(!job.last_error)return '';
+    const failed=job.igblast_progress?.failed||[];
+    if(failed.length){const first=failed[0],name=[first.sample,first.pair,first.chain].filter(Boolean).join(' / '),other=Math.max(0,(job.igblast_progress?.counts?.failed||failed.length)-1);return `${name}：${first.error||'比对失败'}${other?`（另有 ${other} 项，查看链任务列表）`:''}。${job.last_error}`;}
+    return /^runner exit=/.test(job.last_error)?`当前阶段执行失败（${job.last_error}），请查看运行日志。`:job.last_error;
+  }
+  const statusLabels={QUEUED:'排队中',RUNNING:'运行中',MATCHING:'匹配中',WAITING_REVIEW:'待审核',SUCCEEDED:'已完成',ARCHIVING:'归档中',ARCHIVED:'已归档',DELETING:'删除中',FAILED:'失败',STOPPED:'已停止',STOPPING:'停止中',INTERRUPTED:'已中断',COMPLETED_WITHOUT_MARKER:'需检查'};
   const actionLabels = {create:'创建任务', 'confirm-match':'确认 Match 并继续', review:'审核标注', rematch:'更新资料并重新匹配', resume:'断点续跑', stop:'停止任务'};
   function actionDetail(a) {
     if(a.action==='create' && job?.pipeline==='mapping') return '按所选链执行 FASTA、IgBLAST 和 UMI count 整理。';
@@ -66,14 +106,14 @@
     textValue('#job-id',id);textValue('#dataset-title',job.dataset);
     textValue('#job-subtitle',`${job.pipeline_label} · ${job.operator_display_name||job.operator} · ${fmt(job.created_at)}`);
     $('[data-tab="match"]').classList.toggle('hidden',job.requires_match_review===false);
-    const stateLabel=job.execution_phase==='waiting_resource'?'等待运行资源':job.execution_phase==='starting'?'正在启动':statusLabels[job.status]||job.status;
+    const stateLabel=['waiting_resource','waiting_stage_resources'].includes(job.execution_phase)?'等待运行资源':job.execution_phase==='starting'?'正在启动':statusLabels[job.status]||job.status;
     region('#hero-status',`<span class="status-badge ${job.status.toLowerCase()}">${esc(stateLabel)}</span>`);
     const actions=[];
     if(job.status==='WAITING_REVIEW')actions.push(['confirm-match','审核并继续']);
     if(['QUEUED','RUNNING','MATCHING'].includes(job.status))actions.push(['stop','停止任务']);
     if(['FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER'].includes(job.status))actions.push(['resume','断点续跑']);
-    if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING','ARCHIVED'].includes(job.status)&&(job.submission_revision||job.sample_source==='directory'))actions.push(['edit','编辑资料 / 重新 Match']);
-    if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING'].includes(job.status))actions.push(['delete','删除任务']);
+    if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING','ARCHIVED','DELETING'].includes(job.status)&&(job.submission_revision||job.sample_source==='directory'))actions.push(['edit','编辑资料 / 重新 Match']);
+    if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING'].includes(job.status)&&!job.delete_in_progress)actions.push(['delete',job.status==='DELETING'?'重试删除':'删除任务']);
     if(job.can_stop_recovered&&!actions.some(([action])=>action==='stop'))actions.unshift(['stop','停止仍在执行的任务']);
     region('#head-actions',actions.map(([action,label])=>`<button class="button ${action==='stop'||action==='delete'?'button-danger-ghost':action==='edit'?'button-ghost':'button-primary'}" data-action="${action}" ${action==='resume'&&job.resume_blocked?'disabled':''}>${label}</button>`).join(''));
     updateRuntime();
@@ -81,7 +121,7 @@
     textValue('#current-stage-value',job.current_stage?(job.stage_labels[job.current_stage]||job.current_stage):job.status==='QUEUED'?'等待启动':job.completed_stages.length===job.stages.length?'全部阶段已完成':'暂无阶段信息');
     textValue('#attempt-value',job.attempt_no?`第 ${job.attempt_no} 次`:'尚未执行');
     textValue('#job-next-step',nextStep());
-    textValue('#job-failure',job.last_error||'');$('#job-failure').classList.toggle('hidden',!job.last_error);
+    textValue('#job-failure',failureDetail());$('#job-failure').classList.toggle('hidden',!job.last_error);
     textValue('#progress-total',`${job.completed_stages.length} / ${job.stages.length} 已完成`);
     textValue('#stage-percent',`${job.progress}%`);$('#stage-progress-bar').style.width=`${Math.max(0,Math.min(100,Number(job.progress)||0))}%`;
     region('#stages',job.stages.map(stage=>{const done=job.completed_stages.includes(stage),current=stage===job.current_stage;return `<div class="stage-row ${done?'done':''} ${current?'current':''}"><span class="stage-check">${done?'✓':current?'●':'○'}</span><span><strong>${esc(job.stage_labels[stage]||stage)}</strong><small>${esc(stage)}</small></span><span class="stage-state">${done?'已完成':current?esc(stateLabel):'未开始'}</span></div>`;}).join(''));
@@ -90,7 +130,8 @@
     const rows=[['输入目录',job.input_path],['输出目录',job.output_root],...scopeRows];
     const advanced=[...(mapping?[['样本列表',job.mapping_samples?.join(', ')||'全部样本']]:directory?[['清单版本',job.directory_manifest_hash],['样本与链',job.input_assignments?.map(row=>`${row.sample_id}: ${row.chains.join(', ')}`).join('；')]]:[['Submission 副本',job.submission_path],['Barcode',job.barcode_csv||'不需要']]),['开始',fmt(job.started_at)],['结束',fmt(job.ended_at)],['时长口径','本次执行启动至结束；不计排队和审核等待，续跑或重试重新计时'],['退出码',job.exit_code??'—']];
     region('#overview-content',`<section class="overview-section"><h3>输入与处理范围</h3><dl>${rows.map(([label,value])=>`<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join('')}</dl></section><details id="runtime-details" class="advanced-details"><summary>路径、样本与执行详情</summary><dl>${advanced.map(([label,value])=>`<dt>${esc(label)}</dt><dd class="mono">${esc(value)}</dd>`).join('')}<dt>阶段内进度</dt><dd id="stage-progress-detail"></dd></dl></details>`);
-    textValue('#stage-progress-detail',`${job.stage_progress??0}%（日志报告）`);
+    textValue('#stage-progress-detail',['ir_split','10x_split'].includes(job.pipeline)&&job.current_stage?.endsWith('.igblast')?'暂无可靠百分比':`${job.stage_progress??0}%（日志报告）`);
+    renderIgblastProgress();
     region('#options-list',definitionRows(visibleOptions(data.options||{})));
     region('#audit-timeline',(data.actions||[]).map(action=>`<div class="audit-item"><div><strong>${esc(actionLabels[action.action]||'操作记录')}</strong><small>${esc(action.operator.replace(/ \([A-Za-z0-9_.-]+\)$/, ''))} · ${fmt(action.created_at)}</small><p>${esc(actionDetail(action))}</p></div></div>`).join('')||'<p class="muted">暂无操作记录</p>');
     syncSelection();
@@ -156,7 +197,7 @@
     finally{batchBusy=false;syncSelection();}
   };
   async function loadLog(){if(document.hidden||paused||logBusy)return;logBusy=true;const requestedAttempt=attempt;try{const data=await api(`/api/jobs/${id}/log?${new URLSearchParams({offset,source})}`);if(requestedAttempt!==attempt||(data.attempt_no!==undefined&&data.attempt_no!==attempt))return;if(data.reset)$('#log-view').textContent='';source=data.source||'';offset=data.next_offset;$('#log-view').textContent=($('#log-view').textContent+data.content).slice(-500000);$('#log-source').textContent=`第 ${attempt} 次执行 · ${data.source_label||'本次执行日志'}`;$('#log-error').classList.add('hidden');if($('#auto-scroll').checked)$('#log-view').scrollTop=$('#log-view').scrollHeight;}catch(error){$('#log-error').textContent=`日志刷新失败，保留已读取内容。${errorText(error)}`;$('#log-error').classList.remove('hidden');}finally{logBusy=false;}}
-  let summaryKind='', summaryPage=0, summaryRequest=0, summaryLimit=5, summaryData=null, summaryCursors=[''], summaryShown=[0], summaryQuery='', summarySearchTimer;
+  let summaryKind='', summaryPage=0, summaryRequest=0, summaryLimit=5, summaryData=null, summaryCursors=[''], summaryShown=[0], summaryQuery='', summarySearchTimer, summaryAbort=null;
   let artifactsData=null, artifactsSignature='', resultQuery='', resultChain='', resultState='', resultPage=0, downloadBusy=false, resultScroll=0;
   let mappingData=null, mappingLoading=false, mappingError='', mappingRequest=0, resultSearchTimer;
   const resultPageSize=50, resultStateLabels={success:'处理完成',empty:'结果为空',failed:'处理失败',pending:'尚未完成',archived:'已归档'};
@@ -344,7 +385,7 @@
     if(token!==artifactsRequest)return;
     const signature=JSON.stringify([data.archive_available,data.reports,data.mapping_files]);
     if(artifactsData&&signature===artifactsSignature&&!force){if(job.pipeline==='mapping')await loadMappingResults();if(token!==artifactsRequest)return;if(summaryKind&&!summaryData&&resultEntry(summaryKind)?.availability!=='missing')chooseSummary(summaryKind);else restoreSummaryScroll(summaryStates.get(summaryKind));return;}
-    saveSummaryState();summaryRequest++;
+    saveSummaryState();summaryRequest++;summaryAbort?.abort();summaryAbort=null;
     const previousKind=summaryKind;artifactsData=data;artifactsSignature=signature;
     for(const [kind,state] of summaryStates){const entry=resultEntry(kind);if(entry?.file_version&&state.version&&entry.file_version!==state.version){state.page=0;state.cursors=[''];state.shown=[0];state.data=null;state.left=0;state.top=0;state.windowTop=undefined;state.version=entry.file_version;state.notice='结果文件已更新，已从第一页重新读取；搜索条件和字段选择已保留。';}}
     const reports=data.reports||[],mapping=job.pipeline==='mapping';
@@ -356,6 +397,8 @@
     $('#summary-query').onkeydown=event=>{if(event.key==='Enter'){clearTimeout(summarySearchTimer);applySearch();}};
     $('#summary-limit').onchange=()=>{clearTimeout(summarySearchTimer);summaryQuery=$('#summary-query').value;summaryLimit=Number($('#summary-limit').value);resetSummaryPage();loadStageSummary().catch(fail);};
     $('#summary-refresh').onclick=()=>loadArtifacts(true).catch(fail);
+    $('#summary-refresh').insertAdjacentHTML('afterend','<button id="summary-cancel" class="button button-ghost button-small hidden" type="button">取消读取</button>');
+    $('#summary-cancel').onclick=()=>{summaryRequest++;summaryAbort?.abort();summaryAbort=null;summaryData=null;$('#summary-cancel').classList.add('hidden');$('.summary-table').setAttribute('aria-busy','false');$('#summary-prev').disabled=$('#summary-next').disabled=true;$('#stage-summary-info').textContent='已取消读取，点击“刷新”继续。';};
     $('#column-search').oninput=()=>{const query=$('#column-search').value.toLocaleLowerCase();document.querySelectorAll('#column-options label').forEach(label=>label.hidden=!label.textContent.toLocaleLowerCase().includes(query));};
     document.querySelectorAll('[data-columns]').forEach(button=>button.onclick=()=>{if(!summaryData)return;const chosen=selectedColumns.get(summaryKind)||new Set(summaryData.columns),mode=button.dataset.columns;selectedColumns.set(summaryKind,new Set(summaryData.columns.filter(column=>mode==='all'||(mode==='invert'&&!chosen.has(column)))));renderSummary();});
     $('#column-options').onchange=event=>{if(!event.target.matches('input[type=checkbox]'))return;const chosen=selectedColumns.get(summaryKind);if(event.target.checked)chosen.add(event.target.value);else chosen.delete(event.target.value);renderSummary();};
@@ -375,7 +418,7 @@
     const file=resultEntry(kind);
     if(!file||file.availability&&file.availability!=='available')return;
     if(summaryKind&&summaryData)saveSummaryState();
-    summaryRequest++;summaryKind=kind;pendingPreview=null;
+    summaryRequest++;summaryAbort?.abort();summaryAbort=null;$('#summary-cancel')?.classList.add('hidden');summaryKind=kind;pendingPreview=null;
     const state=summaryStates.get(kind);
     summaryQuery=state?.query||'';summaryPage=state?.page||0;summaryLimit=state?.limit||5;summaryCursors=state?.cursors||[''];summaryShown=state?.shown||[0];summaryData=force?null:state?.data||null;
     $('#summary-query').value=summaryQuery;$('#summary-limit').value=String(summaryLimit);$('#stage-summary-title').textContent=file.label||'阶段统计';
@@ -390,12 +433,14 @@
   async function loadStageSummary({restore=null,retryChanged=true}={}){
     if(document.hidden)return;
     const token=++summaryRequest,kind=summaryKind;
+    summaryAbort?.abort();const controller=new AbortController();summaryAbort=controller;
     $('#stage-summary-info').textContent='正在读取结果…';$('.summary-table').setAttribute('aria-busy','true');
+    $('#summary-cancel').classList.remove('hidden');
     $('#summary-prev').disabled=true;$('#summary-next').disabled=true;
     try{
       const params=new URLSearchParams({kind,limit:summaryLimit,query:summaryQuery});
       if(summaryCursors[summaryPage])params.set('cursor',summaryCursors[summaryPage]);else if(summaryPage)params.set('offset',summaryPage*summaryLimit);
-      const data=await api(`/api/jobs/${id}/stage-summary?${params}`);
+      const data=await api(`/api/jobs/${id}/stage-summary?${params}`,undefined,{signal:controller.signal});
       if(token!==summaryRequest||kind!==summaryKind)return;
       summaryData=data;renderSummary();saveSummaryState();restoreSummaryScroll(restore);
     }catch(error){
@@ -403,7 +448,7 @@
       if(error.status===409&&retryChanged){resetSummaryPage();resultNotice('结果文件或筛选已变化，已从第一页重新读取；搜索条件和字段选择已保留。');await loadStageSummary({retryChanged:false});return;}
       $('#stage-summary-info').textContent=`读取失败：${errorText(error)}。当前浏览条件已保留，请点击“刷新当前结果”重试。`;
       $('#summary-prev').disabled=summaryPage===0;
-    }finally{if(token===summaryRequest)$('.summary-table').setAttribute('aria-busy','false');}
+    }finally{if(token===summaryRequest){summaryAbort=null;$('#summary-cancel').classList.add('hidden');$('.summary-table').setAttribute('aria-busy','false');}}
   }
   function renderSummary(){
     if(!summaryData)return;
@@ -463,7 +508,12 @@
   $('#pause-log').onclick=()=>{paused=!paused;$('#pause-log').textContent=paused?'继续刷新':'暂停刷新';};$('#copy-log').onclick=()=>navigator.clipboard.writeText($('#log-view').textContent).catch(fail);
   document.addEventListener('click',event=>{const trigger=event.target.closest('[data-open-tab],[data-open-log]');if(trigger)jumpToTab(trigger.dataset.openTab||'log');});
   $('#job-retry').onclick=()=>refresh(true);
-  const activeStatuses=new Set(['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING']);
+  $('#igblast-task-details').addEventListener('toggle',()=>{if($('#igblast-task-details').open&&job?.igblast_progress)loadIgblastTasks();});
+  $('#igblast-task-query').addEventListener('input',()=>{progressPage=0;clearTimeout(progressTimer);progressTimer=setTimeout(loadIgblastTasks,300);});
+  $('#igblast-task-state').addEventListener('change',()=>{progressPage=0;loadIgblastTasks();});
+  $('#igblast-task-prev').onclick=()=>{if(progressPage>0){progressPage--;loadIgblastTasks();}};
+  $('#igblast-task-next').onclick=()=>{progressPage++;loadIgblastTasks();};
+  const activeStatuses=new Set(['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING','DELETING']);
   let nextDetailPoll=0,nextLogPoll=0;
   const detailPollDelay=()=>activeStatuses.has(job?.status)?5000:30000;
   document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(summarySearchTimer);saveSummaryState();return;}nextDetailPoll=Date.now()+detailPollDelay();refresh(true).catch(connectionError);if(tab==='log')loadLog().catch(fail);if(tab==='artifacts')loadArtifacts().catch(fail);if(tab==='treemap')treemapPanel?.load(true);});

@@ -13,7 +13,7 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
     with zipfile.ZipFile(demo_dir / 'scigblast-teaching-v1.zip') as archive:
         if archive.testzip() is not None or 'scigblast-teaching-v1/README.txt' not in archive.namelist():
             raise RuntimeError('Teaching demo archive is incomplete or corrupt')
-    for filename in ('pipeline_igblast_cache.py', 'pipeline_parallel.py', 'pipeline_locus_split.py', 'pipeline_input_manifest.py', 'pipeline_resource_lock.sh'):
+    for filename in ('pipeline_igblast_cache.py', 'pipeline_parallel.py', 'pipeline_progress.py', 'pipeline_locus_split.py', 'pipeline_input_manifest.py', 'pipeline_resource_lock.sh'):
         path = root / filename
         if not path.is_file():
             raise RuntimeError(f'Missing shared runner dependency: {path}')

@@ -1,7 +1,7 @@
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const statusLabel = { QUEUED: '排队中', RUNNING: '运行中', MATCHING: '匹配中', WAITING_REVIEW: '待审核', SUCCEEDED: '已完成', ARCHIVING: '归档中', ARCHIVED: '已归档', FAILED: '失败', STOPPED: '已停止', STOPPING: '停止中', INTERRUPTED: '已中断', COMPLETED_WITHOUT_MARKER: '需检查' };
-  const activeStates = new Set(['QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING']);
+  const statusLabel = { QUEUED: '排队中', RUNNING: '运行中', MATCHING: '匹配中', WAITING_REVIEW: '待审核', SUCCEEDED: '已完成', ARCHIVING: '归档中', ARCHIVED: '已归档', DELETING:'删除中', FAILED: '失败', STOPPED: '已停止', STOPPING: '停止中', INTERRUPTED: '已中断', COMPLETED_WITHOUT_MARKER: '需检查' };
+  const activeStates = new Set(['QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING', 'DELETING']);
   const stoppableStates = new Set(['QUEUED', 'RUNNING', 'MATCHING']);
   const doneStates = new Set(['SUCCEEDED', 'ARCHIVED', 'FAILED', 'STOPPED', 'INTERRUPTED', 'COMPLETED_WITHOUT_MARKER']);
   let pipelineInfo = {}, allJobs = [], filter = 'all', page = 0, limit = 50, busy = false, refreshPending = false;
@@ -131,9 +131,10 @@
   }
   const browseLabels = { input: '原始数据目录', submission: 'Submission 文件或目录', barcode: 'Barcode CSV', output: '输出根目录' };
   let pickerKind = '', pickerTarget = '', pickerPath = '', pickerBusy = false;
+  let pickerCursors=[''],pickerPage=0,pickerNext='',pickerSearchTimer,pickerGeneration=0,pickerPending=null;
 
   let pickerReturnFocus=null;
-  function closePicker() { $('#drawer-shell').inert = false; $('#drawer-shell').setAttribute('aria-hidden', String(!$('#drawer-shell').classList.contains('open'))); pickerReturnFocus?.focus(); $('#file-picker-shell').classList.remove('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'true'); pickerKind = ''; pickerTarget = ''; pickerPath = ''; }
+  function closePicker() { pickerGeneration++;pickerPending=null;clearTimeout(pickerSearchTimer);$('#drawer-shell').inert = false; $('#drawer-shell').setAttribute('aria-hidden', String(!$('#drawer-shell').classList.contains('open'))); pickerReturnFocus?.focus(); $('#file-picker-shell').classList.remove('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'true'); pickerKind = ''; pickerTarget = ''; pickerPath = ''; }
   function pickerEntry(entry) {
     const icon = entry.type === 'directory' ? '▱' : '▤';
     const size = entry.size == null ? '' : ` · ${(entry.size / 1024).toFixed(1)} KB`;
@@ -148,23 +149,32 @@
     $('#file-picker-select').classList.toggle('hidden', pickerKind === 'barcode');
     const entries = data.entries || [];
     $('#file-picker-entries').innerHTML = entries.length ? entries.map(pickerEntry).join('') : '<div class="file-tree-empty">当前目录没有可选择的文件</div>';
+    pickerNext=data.next_cursor||'';$('#file-picker-prev').disabled=pickerPage===0;$('#file-picker-next').disabled=!pickerNext;
+    $('#file-picker-page').textContent=`第 ${pickerPage+1} 页`;$('#file-picker-reload').classList.add('hidden');
   }
-  async function loadPicker(path = '') {
-    if (pickerBusy) return;
+  async function loadPicker(path = '', cursor = '', keepPage = false) {
+    if (pickerBusy){pickerGeneration++;pickerPending=[path,cursor,keepPage];return;}
+    const generation=++pickerGeneration;
+    if(!keepPage){pickerPage=0;pickerCursors=[''];$('#file-picker-search').value='';}
     pickerBusy = true;
     $('#file-picker-message').textContent = '读取目录中…';
     try {
       const params = new URLSearchParams({ kind: pickerKind });
       if (path) params.set('path', path);
+      if (cursor) params.set('cursor',cursor);
+      if ($('#file-picker-search').value.trim()) params.set('query',$('#file-picker-search').value.trim());
       const data = await Submission.api(`/api/browse?${params}`);
+      if(generation!==pickerGeneration)return;
       renderPicker(data);
       $('#file-picker-message').textContent = `${browseLabels[pickerKind]} · 只显示允许根目录下的内容`;
     } catch (error) {
+      if(generation!==pickerGeneration)return;
       $('#file-picker-message').textContent = error.message || '读取失败';
       $('#file-picker-entries').innerHTML = '<div class="file-tree-empty error-text">无法读取该目录，请手动输入服务器绝对路径</div>';
       $('#file-picker-up').disabled = true;
       $('#file-picker-select').disabled = true;
-    } finally { pickerBusy = false; }
+      $('#file-picker-reload').classList.remove('hidden');
+    } finally { pickerBusy = false;if(pickerPending&&pickerKind){const pending=pickerPending;pickerPending=null;loadPicker(...pending);} }
   }
   function openPicker(kind, target) { pickerKind = kind; pickerTarget = target; $('#file-picker-title').textContent = `选择${browseLabels[kind] || '路径'}`; pickerReturnFocus=document.activeElement;$('#file-picker-shell').classList.add('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'false'); $('#close-file-picker').focus(); $('#drawer-shell').inert = true; $('#drawer-shell').setAttribute('aria-hidden', 'true'); loadPicker(); }
   function choosePickerPath(path) { const input = document.querySelector(`[name="${pickerTarget}"]`); if (input) { input.value = path; input.dispatchEvent(new Event('input', { bubbles: true })); } closePicker(); }
@@ -307,11 +317,11 @@
       candidate.innerHTML=`
       <td><a class="job-link" data-focus-key="job" href="/jobs/${job.id}"><strong>${esc(job.dataset)}</strong><span class="job-id">${esc(job.id)}</span></a></td>
       <td><span class="pipeline-chip ${job.pipeline}"><i></i>${esc(job.pipeline_label)}</span></td>
-      <td><span class="stage-name">${esc(job.status === 'ARCHIVING' ? '结果压缩与校验' : job.execution_phase === 'waiting_resource' ? '等待运行资源' : job.stage_labels?.[job.current_stage] || job.current_stage || '等待启动')}</span>${job.status === 'ARCHIVING' ? '<small>分析已完成，归档后可下载压缩包</small>' : ''}</td>
+      <td><span class="stage-name">${esc(job.status === 'ARCHIVING' ? '结果压缩与校验' : ['waiting_resource','waiting_stage_resources'].includes(job.execution_phase) ? '等待运行资源' : job.stage_labels?.[job.current_stage] || job.current_stage || '等待启动')}</span>${job.status === 'ARCHIVING' ? '<small>分析已完成，归档后可下载压缩包</small>' : ''}</td>
       <td><div class="progress-cell"><div class="progress-track"><span style="width:${Math.max(0, Math.min(100, job.progress))}%"></span></div><b>${job.progress}%</b></div></td>
       <td><span class="operator-name">${esc(job.operator_display_name||job.operator)}</span><small class="time-text">${formatTime(job.started_at || job.created_at)}</small></td>
       <td><span class="status-badge ${job.status.toLowerCase()}"><i></i>${esc(statusText(job.status))}</span>${job.last_error ? `<small class="error-text" title="${esc(job.last_error)}">${esc(job.last_error)}</small>` : ''}</td>
-      <td class="job-actions-cell"><div class="row-actions">${job.status === 'WAITING_REVIEW' ? `<button class="button button-review button-small" data-action="confirm" data-id="${job.id}">核对样本</button>` : ''}${stoppableStates.has(job.status) ? `<button class="button button-danger-ghost button-small" data-action="stop" data-id="${job.id}">停止</button>` : ''}<a class="button button-ghost button-small" data-focus-key="detail" href="/jobs/${job.id}">${['SUCCEEDED','ARCHIVED'].includes(job.status) ? '查看结果' : ['FAILED','INTERRUPTED','COMPLETED_WITHOUT_MARKER'].includes(job.status) ? '查看原因 / 续跑' : '详情'}</a>${!isActive(job)?`<button class="button button-danger-ghost button-small" data-action="delete" data-id="${job.id}">删除</button>`:''}</div></td>`;
+      <td class="job-actions-cell"><div class="row-actions">${job.status === 'WAITING_REVIEW' ? `<button class="button button-review button-small" data-action="confirm" data-id="${job.id}">核对样本</button>` : ''}${stoppableStates.has(job.status) ? `<button class="button button-danger-ghost button-small" data-action="stop" data-id="${job.id}">停止</button>` : ''}<a class="button button-ghost button-small" data-focus-key="detail" href="/jobs/${job.id}">${['SUCCEEDED','ARCHIVED'].includes(job.status) ? '查看结果' : ['FAILED','INTERRUPTED','COMPLETED_WITHOUT_MARKER'].includes(job.status) ? '查看原因 / 续跑' : '详情'}</a>${!isActive(job)||job.status==='DELETING'&&!job.delete_in_progress?`<button class="button button-danger-ghost button-small" data-action="delete" data-id="${job.id}">${job.status==='DELETING'?'重试删除':'删除'}</button>`:''}</div></td>`;
       const row=existing.get(job.id)||candidate;
       [...candidate.children].forEach((cell,i)=>{
         const markup=cell.innerHTML,target=row.children[i];
@@ -371,7 +381,7 @@
   function syncJobFilterTabs() {
     document.querySelectorAll('.filter-tab').forEach(tab => {
       const active=tab.dataset.filter===filter;
-      tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));
+      tab.classList.toggle('active',active);tab.setAttribute('aria-pressed',String(active));
     });
   }
   function renderJobFilters() {
@@ -513,6 +523,10 @@
   document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', () => openPicker(button.dataset.browseKind, button.dataset.browseTarget)));
   $('#close-file-picker').addEventListener('click', closePicker); $('#file-picker-cancel').addEventListener('click', closePicker); $('#file-picker-backdrop').addEventListener('click', closePicker); $('#file-picker-up').addEventListener('click', () => loadPicker($('#file-picker-up').disabled ? '' : $('#file-picker-up').dataset.path)); $('#file-picker-select').addEventListener('click', () => { if (pickerPath) choosePickerPath(pickerPath); });
   $('#file-picker-entries').addEventListener('click', (event) => { const entry = event.target.closest('.file-tree-entry'); if (!entry) return; const path = entry.dataset.path; if (entry.dataset.entryType === 'directory') { loadPicker(path); } else { choosePickerPath(path); } });
+  $('#file-picker-prev').addEventListener('click',()=>{if(pickerBusy||pickerPage===0)return;pickerPage--;loadPicker(pickerPath,pickerCursors[pickerPage],true);});
+  $('#file-picker-next').addEventListener('click',()=>{if(pickerBusy||!pickerNext)return;pickerCursors[++pickerPage]=pickerNext;loadPicker(pickerPath,pickerNext,true);});
+  $('#file-picker-reload').addEventListener('click',()=>{if(pickerBusy)return;pickerPage=0;pickerCursors=[''];loadPicker(pickerPath,'',true);});
+  $('#file-picker-search').addEventListener('input',()=>{pickerGeneration++;clearTimeout(pickerSearchTimer);pickerSearchTimer=setTimeout(()=>{pickerPage=0;pickerCursors=[''];loadPicker(pickerPath,'',true);},300);});
   document.querySelectorAll('.filter-tab').forEach(tab=>tab.addEventListener('click',()=>{if(tab.dataset.filter==='all'){resetJobFilters();return;}filter=tab.dataset.filter;page=0;syncJobFilterTabs();refreshJobs();}));
   document.addEventListener('keydown', event => {
     if(event.key!=='Tab'||document.querySelector('dialog[open]'))return;

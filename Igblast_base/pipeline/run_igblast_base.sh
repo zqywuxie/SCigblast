@@ -191,17 +191,19 @@ stop_process_tree() {
 run_monitored_stage() {
   local label="$1" requested_gb="$2" event_file stage_pid watchdog_pid stage_status available_gb
   shift 2
+  scigblast_acquire_stage_budget "$requested_gb" "$label" || return $?
   available_gb="$(available_memory_gb 2>/dev/null || true)"
-  [[ "$available_gb" =~ ^[0-9]+$ ]] || { echo "[BASE][memory] cannot read MemAvailable; refusing ${label}" >&2; return 75; }
+  [[ "$available_gb" =~ ^[0-9]+$ ]] || { echo "[BASE][memory] cannot read MemAvailable; refusing ${label}" >&2; scigblast_release_stage_budget; return 75; }
   local start_limit="$(( requested_gb + MIN_FREE_MEMORY_GB ))"
   (( start_limit < MEMORY_STOP_THRESHOLD_GB )) && start_limit="$MEMORY_STOP_THRESHOLD_GB"
-  (( available_gb >= start_limit )) || { echo "[BASE][memory] insufficient for ${label}: available=${available_gb}GB start_limit=${start_limit}GB" >&2; return 75; }
+  (( available_gb >= start_limit )) || { echo "[BASE][memory] insufficient for ${label}: available=${available_gb}GB start_limit=${start_limit}GB" >&2; scigblast_release_stage_budget; return 75; }
   echo "[BASE][memory] ${label}: available=${available_gb}GB required=${requested_gb}GB stop_threshold=${MEMORY_STOP_THRESHOLD_GB}GB"
   event_file="${OUTPUT_ROOT}/memory_stop.$$.log"
   rm -f "$event_file"
   "$@" &
   stage_pid=$!
   (
+    scigblast_release_stage_budget
     while kill -0 "$stage_pid" 2>/dev/null; do
       available_gb="$(available_memory_gb 2>/dev/null || true)"
       if ! [[ "$available_gb" =~ ^[0-9]+$ ]] || (( available_gb < MEMORY_STOP_THRESHOLD_GB )); then
@@ -215,8 +217,9 @@ run_monitored_stage() {
   ) & watchdog_pid=$!
   if wait "$stage_pid"; then stage_status=0; else stage_status=$?; fi
   kill "$watchdog_pid" 2>/dev/null || true; wait "$watchdog_pid" 2>/dev/null || true
-  if [[ -s "$event_file" ]]; then echo "[BASE][memory] ${label} stopped; details=${event_file}" >&2; return 75; fi
+  if [[ -s "$event_file" ]]; then echo "[BASE][memory] ${label} stopped; details=${event_file}" >&2; scigblast_release_stage_budget; return 75; fi
   rm -f "$event_file"
+  scigblast_release_stage_budget
   return "$stage_status"
 }
 
@@ -348,6 +351,7 @@ mark_stage() {
 
 echo "[BASE 1/5] match FASTQ pairs"
 MATCH_STATUS=0
+scigblast_acquire_stage_budget 0 match || exit $?
 SCIGBLAST_BASE_RAW_INPUT="$RAW_INPUT_DIR" \
 SCIGBLAST_BASE_OUTPUT_ROOT="$OUTPUT_ROOT" \
 SCIGBLAST_BASE_SUBMISSION="${SUBMISSION_PATH:-}" \
@@ -358,6 +362,7 @@ SCIGBLAST_MATCH_SUBMISSION="${SUBMISSION_PATH:-}" \
 SCIGBLAST_MATCH_NO_BARCODE="${SCIGBLAST_MATCH_NO_BARCODE:-1}" \
 SCIGBLAST_BASE_DEFAULT_CHAINS="${SCIGBLAST_BASE_DEFAULT_CHAINS:-}" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/01.match_sample.py" || MATCH_STATUS=$?
+scigblast_release_stage_budget
 if [[ -n "$DIRECTORY_MANIFEST" && "$MATCH_STATUS" != 0 ]]; then echo "Directory input verification failed" >&2; exit "$MATCH_STATUS"; fi
 [[ -s "$SUMMARY" ]] || { echo "[BASE] match did not produce summary" >&2; exit "${MATCH_STATUS:-1}"; }
 MAPPING_SHA256="$(hash_file "$SUMMARY" 2>/dev/null || printf unknown)"
@@ -423,6 +428,9 @@ export SCIGBLAST_IGBLAST_DEPENDENCIES
 if ! stage_done 05.igblast; then
   rm -f "${STATE_DIR}/.pipeline_stage_05.igblast.DONE"
   rm -f "${STATE_DIR}/.pipeline_stage_06.locus_split.DONE"
+  scigblast_igblast_workers "$SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS" "$SCIGBLAST_IGBLAST_THREADS" "$SCIGBLAST_PARALLEL_THREAD_BUDGET" "$SCIGBLAST_MEMORY_BUDGET_GB" "$SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB" || exit $?
+  export SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS="$SCIGBLAST_EFFECTIVE_IGBLAST_JOBS"
+  IGBLAST_REQUIRED_GB="$(( SCIGBLAST_EFFECTIVE_IGBLAST_JOBS * SCIGBLAST_IGBLAST_MEMORY_LIMIT_GB ))"
   run_monitored_stage "IgBLAST" "$IGBLAST_REQUIRED_GB" bash "${SCRIPT_DIR}/05.work_igblastn.sh" --data-dir "$PANDASEQ_DIR" --output-dir "$IGBLAST_DIR" \
     --input-mode pandaseq --db-dir "${SCIGBLAST_IGBLAST_DB_DIR:-/data/scAnalyis/Scigblast/igblast}" \
     --species "${SCIGBLAST_IGBLAST_SPECIES:-human}" \

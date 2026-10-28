@@ -439,12 +439,14 @@ stop_process_tree() {
 run_monitored_stage() {
     local label="$1" requested_gb="$2" event_file stage_pid watchdog_pid stage_status available_gb
     shift 2
-    memory_guard "$label" "$requested_gb" || return 75
+    scigblast_acquire_stage_budget "$requested_gb" "$label" || return $?
+    memory_guard "$label" "$requested_gb" || { scigblast_release_stage_budget; return 75; }
     event_file="${OUTPUT_ROOT}/memory_stop.$$.log"
     rm -f "$event_file"
     "$@" &
     stage_pid=$!
     (
+        scigblast_release_stage_budget
         while kill -0 "$stage_pid" 2>/dev/null; do
             available_gb="$(available_memory_gb 2>/dev/null || true)"
             if ! [[ "$available_gb" =~ ^[0-9]+$ ]]; then
@@ -468,9 +470,11 @@ run_monitored_stage() {
     wait "$watchdog_pid" 2>/dev/null || true
     if [[ -s "$event_file" ]]; then
         echo "[IR][memory] ${label} stopped by memory watchdog; details: ${event_file}" >&2
+        scigblast_release_stage_budget
         return 75
     fi
     rm -f "$event_file"
+    scigblast_release_stage_budget
     return "$stage_status"
 }
 hash_file() {
@@ -723,8 +727,10 @@ MATCH_STATUS=0
 MATCH_RUN_SUMMARY="${MAPPING_SUMMARY}.run.$$"
 MATCH_SUMMARY_READY=0
 rm -f "$MATCH_RUN_SUMMARY"
+scigblast_acquire_stage_budget 0 match || exit $?
 SCIGBLAST_MATCH_OUTPUT="${MATCH_RUN_SUMMARY}" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/01.match_sample.py" || MATCH_STATUS=$?
+scigblast_release_stage_budget
 if [[ -s "$MATCH_RUN_SUMMARY" ]]; then
     mv -f "$MATCH_RUN_SUMMARY" "$MAPPING_SUMMARY"
     MATCH_SUMMARY_READY=1

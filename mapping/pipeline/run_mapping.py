@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from pipeline_parallel import bounded_completed
+from pipeline_progress import Progress, run_igblast, verified_estimate
 
 if __package__:
     from ..fasta import convert, select_files
@@ -195,19 +196,24 @@ def run(input_dir: Path, output: Path, dataset: str, chains: list[str], config=N
             db_args, db_files = database_args(Path(config['SCIGBLAST_IGBLAST_DB_DIR']), item['chain'])
             signature = [metadata(fasta), metadata(binary), metadata(__file__), db_args, threads, [metadata(p) for p in db_files]]
             result = cached(marker, signature, [filtered])
+            reused = result is not None
             marker.unlink(missing_ok=True)
             if result is None:
                 temp.unlink(missing_ok=True)
                 args = [binary, '-query', str(fasta), *db_args, '-num_threads', str(threads), '-outfmt', '19', '-out', str(temp)]
+                progress.update([item['source_file'], item['chain']], 'aligning', input_count=item['input_sequences'])
                 with filtered.with_suffix('.log').open('w', encoding='utf-8') as log:
-                    rc = subprocess.run(args, stdout=log, stderr=subprocess.STDOUT).returncode
+                    rc = run_igblast(args, log, temp, progress, [item['source_file'], item['chain']], item['input_sequences'], progress.enabled and verified_estimate(binary, 'human', item['chain']))
                 if rc or not temp.is_file():
                     temp.unlink(missing_ok=True)
                     raise ValueError(f'igblast_failed exit={rc}')
+                progress.update([item['source_file'], item['chain']], 'filtering')
                 result = filter_airr(temp, filtered)
             n = item['input_sequences']
             row.update(result, status='OK', mapping_percent=f"{result['mapped_rows']*100/n:.2f}", retained_percent=f"{result['output_rows']*100/n:.2f}")
+            progress.update([item['source_file'], item['chain']], 'publishing')
             save(marker, signature, [filtered], result)
+            row['_progress_cached'] = reused
         except (OSError, ValueError) as exc:
             row['error'] = str(exc)
         finally:
@@ -215,9 +221,20 @@ def run(input_dir: Path, output: Path, dataset: str, chains: list[str], config=N
         return row
 
     usable = [r for r in conversion if r['status'] == 'OK']
+    progress = Progress('02.igblast', [([item['source_file'], item['chain']], item.get('sample_id', ''), item.get('sample_key', ''), item['chain']) for item in usable], workers)
+    def tracked_mapping(item):
+        identity = [item['source_file'], item['chain']]
+        progress.update(identity, 'preparing', input_count=item.get('input_sequences'))
+        try:
+            row = map_one(item)
+        except Exception as exc:
+            progress.update(identity, 'failed', error=str(exc))
+            raise
+        progress.update(identity, 'cached' if row.get('_progress_cached') else 'succeeded' if row['status'] == 'OK' else 'failed', error=row.get('error', ''))
+        return row
     results = [None] * len(usable)
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        for index, (source_index, row) in enumerate(bounded_completed(executor, map_one, usable, workers*2), 1):
+        for index, (source_index, row) in enumerate(bounded_completed(executor, tracked_mapping, usable, workers*2), 1):
             results[source_index] = row
             print(f"[MAPPING] percent={index*100//len(usable)} source={row['source_file']} status={row['status']}", flush=True)
     write_table(airr_root / 'chain_summary.csv', results, identity + ['species', 'input_sequences', 'raw_rows', 'mapped_rows', 'productive_rows', 'output_rows', 'mapping_percent', 'retained_percent', 'status', 'error'])

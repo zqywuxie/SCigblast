@@ -41,20 +41,23 @@
   $('#tm-task').onchange=resetScan;$('#tm-path').oninput=resetScan;
   const directoryDialog=$('#tm-directory-dialog');
   let directoryGeneration=0,directoryBusy=false,directoryData=null,directoryReturnFocus=null;
-  async function browseDirectory(path=''){
+  let directoryPage=0,directoryCursors=[''];
+  async function browseDirectory(path='',cursor='',keepPage=false){
     if(directoryBusy||!directoryDialog.open)return;
+    if(!keepPage){directoryPage=0;directoryCursors=[''];}
     directoryBusy=true;directoryData=null;const token=++directoryGeneration;
     $('#tm-directory-message').textContent='正在读取目录…';$('#tm-directory-entries').setAttribute('aria-busy','true');
     $('#tm-directory-roots').disabled=$('#tm-directory-up').disabled=$('#tm-directory-select').disabled=true;
     $('#tm-directory-entries').querySelectorAll('button').forEach(button=>button.disabled=true);
     try{
-      const data=await api(`/api/browse?${new URLSearchParams({kind:'input',path})}`);
+      const params=new URLSearchParams({kind:'input',path});if(cursor)params.set('cursor',cursor);const data=await api(`/api/browse?${params}`);
       if(token!==directoryGeneration||!directoryDialog.open)return;
       directoryData=data;$('#tm-directory-current').textContent=data.path||'允许的根目录';
       const entries=(data.entries||[]).filter(entry=>entry.type==='directory');
       $('#tm-directory-entries').innerHTML=entries.map(entry=>`<button class="file-tree-entry" type="button" data-tm-directory="${esc(entry.path)}"><span class="file-tree-icon" aria-hidden="true">▱</span><span class="file-tree-copy"><strong>${esc(entry.name)}</strong><small>目录</small></span><span class="file-tree-action" aria-hidden="true">打开 ›</span></button>`).join('')||`<div class="file-tree-empty">${data.path?'当前目录没有子目录，可以直接选用当前目录。':'没有可浏览的根目录。'}</div>`;
       $('#tm-directory-message').textContent=data.path?'打开子目录继续浏览，或选用当前目录。':'请选择一个允许的根目录。';
       $('#tm-directory-up').disabled=!data.parent;$('#tm-directory-select').disabled=!data.path||!data.can_select_current;
+      $('#tm-directory-prev').disabled=directoryPage===0;$('#tm-directory-next').disabled=!data.next_cursor;$('#tm-directory-page').textContent=`第 ${directoryPage+1} 页`;
       $('#tm-directory-entries').scrollTop=0;
     }catch(error){
       if(token!==directoryGeneration||!directoryDialog.open)return;
@@ -68,6 +71,8 @@
   directoryDialog.addEventListener('close',()=>{directoryGeneration++;directoryBusy=false;directoryData=null;directoryReturnFocus?.focus({preventScroll:true});});
   $('#tm-directory-roots').onclick=()=>browseDirectory();
   $('#tm-directory-up').onclick=()=>{if(directoryData?.parent)browseDirectory(directoryData.parent);};
+  $('#tm-directory-prev').onclick=()=>{if(directoryBusy||directoryPage===0||!directoryData)return;directoryPage--;browseDirectory(directoryData.path,directoryCursors[directoryPage],true);};
+  $('#tm-directory-next').onclick=()=>{if(directoryBusy||!directoryData?.next_cursor)return;const path=directoryData.path,cursor=directoryData.next_cursor;directoryCursors[++directoryPage]=cursor;browseDirectory(path,cursor,true);};
   $('#tm-directory-entries').onclick=event=>{const button=event.target.closest('[data-tm-directory]');if(button)browseDirectory(button.dataset.tmDirectory);};
   $('#tm-directory-select').onclick=()=>{if(directoryBusy||scanBusy||creating||!directoryData?.path||!directoryData.can_select_current)return;$('#tm-path').value=directoryData.path;resetScan();directoryDialog.close();$('#tm-path').focus();};
   $('#tm-source-form').onsubmit=async event=>{

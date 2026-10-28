@@ -128,6 +128,12 @@ Web 启动的任务最多同时运行 2 条 pipeline，名额由所有用户和�
 
 详情默认读取本次 attempt 的日志和进度；启动失败、等待共享资源锁分别显示原因。Web 进程单独重启后若旧 runner 仍存活，先核验任务进程标识，禁止重复续跑；用户可停止核验通过的上次执行。旧任务缺少身份标识时不会凭历史 PID 杀进程，应由管理员核实状态。
 
+分析环境检查会验证选中链的 BLAST 库是否可读及 V/J 是否为真实参考。缺少链专属 D 库时，也会检查 IgBLAST 的默认 D 库：即使是 VJ 链，工具仍可能尝试加载它。当前曾核验的人源库中 TRA、IGK、IGL 缺少可用 D 库，需管理员补齐并重新检查后才能运行；不会自动使用其他物种的参考。
+
+Pig、IgBLAST base 和 reMapping 在 IgBLAST 阶段显示正在处理的样本与链、阶段耗时和未筛选 AIRR 已输出的记录数；展开可搜索和分页查看任务。经验证的 IgBLAST 1.22.0、猪 TRA/TRB/IGH/IGK/IGL 与人 IGH/TRB 显示已输出记录相对输入的比例；记录持续输出且速度稳定时还显示比对预计剩余区间，该估计不包括链筛选与文件发布。其他情况不显示百分比，预计时间显示暂无法估计。记录写出可能因工具缓冲而滞后，输出条数不代表有效结果条数或最终完成。IR/10X 显示已启动的样本链批次及比对结束数；后续仍须合并筛选，暂不估算逐序列进度或 ETA。旧任务没有新进度记录时继续显示原日志。
+
+删除操作在文件删除期间显示“删除中”，失败或重启后可重试；若目录身份发生变化，须由管理员检查。浏览服务器目录时可搜索并分页，目录发生变化后重新读取。每次翻页仍需扫描当前目录，返回和内存占用有界。
+
 普通 CSV/TSV 预览使用有界读取；总数未知时显示已读取记录和“继续加载/继续查找”，不会为了首屏重复扫描大表。文件更新后游标失效，重新从首页加载。Match 审核仍基于完整清单与版本校验。reMapping 优先提供 03 UMI count 样本结果，FASTA 不提供预览或下载。
 
 Base/Pig 的 stage 与 task 缓存共同验证 IgBLAST 工具、参考库 sidecar、aux 和参数版本；参考文件保留大小/修改时间替换时，应更新各分支配置的 `SCIGBLAST_IGBLAST_REFERENCE_VERSION`。部署修改需重建镜像；新版本首次遇到旧缓存会重新验证/执行相应阶段。
@@ -138,9 +144,13 @@ Pig 会在链专属 C 区数据库存在时传入 `-c_region_db`，让 IgBLAST �
 
 同日已将该猪库 V/J 的 344 条参考 ID 去掉开头 `2026pig`，例如 `2026pigIGHV1-10*01` → `IGHV1-10*01`，版本为 `pig-vj-canonical-20261027_115846`。核苷酸序列与 D/C 标识保留；现存 V/J 索引重建，`pig.aux` 添加规范 J ID 别名且兼容旧库，内部 V 注释保留并经对照验证。完整备份（包括刚补入的 C 库、内部注释及 aux）位于 remote_nanhua 的 `/colddata/zqy/igblast/backups/pig_chain_before_vj_rename_20261027_115658/`，`SHA256.json` 校验全部 316 个原文件。现用库路径不变，详情与验证记录在库内 `.reference_sources/pig-vj-canonical-20261027_115846/`；新 mapping 使用规范名称，已有结果不会自动改名。恢复数据库时须同时恢复配套 aux，并持有平台门锁的独占锁，避免与分析进程并行替换参考。
 
-随后补充 D 标识规范化 `pig-d-canonical-20261027_192734`：IGH 的 5 条、TRB 的 3 条真实 D 参考也已去掉 `2026pig`（如 `2026pigIGHD2*01` → `IGHD2*01`），两套 D 索引重建，核苷酸及 FASTA 大小写、其余参考和 aux 保留。完整备份为 `/colddata/zqy/igblast/backups/pig_chain_before_d_rename_20261027_192734/`；迁移与验证摘要在现用库 `.reference_sources/pig-d-canonical-20261027_192734/`。10 条真实 IGH/TRB 序列改名前后仅 d_call 名称变化，Web 容器完整 AIRR 与主机一致。建库脚本现统一规范化 V/D/J，C 名称保留。数据库通过挂载直接生效，无需重建镜像；新比对使用规范 D 名称，已有 TSV 仍保留旧名称，需重新 mapping 更新。
+随后补充 D 标识规范化 `pig-d-canonical-20261027_192734`：IGH 的 5 条、TRB 的 3 条真实 D 参考也已去掉 `2026pig`（如 `2026pigIGHD2*01` → `IGHD2*01`），两套 D 索引重建，核苷酸及 FASTA 大小写、其余参考和 aux 保留。完整备份为 `/colddata/zqy/igblast/backups/pig_chain_before_d_rename_20261027_192734/`；迁移与验证摘要在现用库 `.reference_sources/pig-d-canonical-20261027_192734/`。10 条真实 IGH/TRB 序列改名前后仅 d_call 名称变化，Web 容器完整 AIRR 与主机一致。该次建库脚本规范化 V/D/J，C 名称当时保留；后续 TCR C 更新见下文。数据库通过挂载直接生效，无需重建镜像；新比对使用规范 D 名称，已有 TSV 仍保留旧名称，需重新 mapping 更新。
 
-必须使用单 Web 实例、单 Uvicorn worker。第三条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，两条任务共用，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前获取共享门锁及两个槽位之一的独占 `flock`，Web 与终端直接启动的任务合计最多执行两条。Treemap 持有门锁的独占模式，保持与主分析互斥。默认门锁为 `/colddata/SCigblast/results/.scigblast-resource.lock`，槽位文件为同路径加 `.slot-1` / `.slot-2`；文件不能在任务运行时删除。锁和槽位必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。IgBLAST 链任务的默认及硬上限为每条 pipeline 4 个，五条正式流程均限制；更高配置或 --parallel 值不能突破 4，CPU/内存不足时仍按原资源预算限制执行。这里的 4 是进程任务数，各进程线程数仍由 SCIGBLAST_IGBLAST_THREADS 设置。
+随后规范化猪 TCR C 参考 `pig-tcr-c-canonical-20261027_233313`：TRA 的 TRAC*01 和 TRB 的 TRBC1*01、TRBC2*01、TRBC3*01 均去掉 `2026pig` 前缀并重建索引；序列、原大小写、其他参考及兼容旧 J ID 的 pig.aux 不变。备份位于 `/colddata/zqy/igblast/backups/pig_chain_before_tcr_c_rename_20261027_233313/`。每链 5 条真实序列加 1 条 C 阳性合成对照验证仅 c_call 命名变化，Web 容器完整 AIRR 与主机一致；详情位于现用库 `.reference_sources/pig-tcr-c-canonical-20261027_233313/`。建库脚本现规范化 V/D/J/C 前缀。数据库挂载直接生效，历史 TSV 需重新 mapping 更新。
+
+必须使用单 Web 实例、单 Uvicorn worker。第三条及后续 Web 任务排队，等待审核不占运行位，停止中的进程仍占位。Compose 的 `300g` 是整个容器共享上限，两条任务共用，不是每条任务 300GB。所有官方 runner（包括 reMapping）在处理前获取共享门锁及两个槽位之一的独占 `flock`，Web 与终端直接启动的任务合计最多占用两个槽位。Treemap 持有门锁的独占模式，保持与主分析互斥。默认门锁为 `/colddata/SCigblast/results/.scigblast-resource.lock`，槽位文件为同路径加 `.slot-1` / `.slot-2`；文件不能在任务运行时删除。锁和槽位必须放在 Web 容器与终端 runner 都能写入的共享结果盘。更改结果根目录时，设置 `.env` 的 `SCIGBLAST_RESOURCE_LOCK_FILE`，并让终端 runner 指向映射到同一宿主机文件的路径。任务内部并行度仍由各 pipeline 的 `00.pipeline_config.env` 控制。IgBLAST 链任务的默认及硬上限为每条 pipeline 4 个，五条正式流程均限制；更高配置或 --parallel 值不能突破 4，CPU/内存不足时仍按原资源预算限制执行。这里的 4 是进程任务数，各进程线程数仍由 SCIGBLAST_IGBLAST_THREADS 设置。
+
+各阶段还通过同一路径加 `.budget` 的锁协调资源。只有两份阶段内存和线程估算都能装入共享预算时才允许并行；较大阶段、无法估算的阶段、清理、Match 和整个 reMapping 独占，另一任务会显示等待运行资源。默认按检测到的内存上限与 300 GiB 的较小值计算，并保留 150 GiB 给系统及其他开销；例如检测到 300 GiB 时，单阶段估算不超过 75 GiB 才有机会与另一阶段并行，还须满足 CPU 条件。管理员可在 `web/.env` 设置 `SCIGBLAST_SHARED_MEMORY_BUDGET_GB` 和 `SCIGBLAST_SHARED_MEMORY_RESERVE_GB`，修改后重新创建容器；目前任一值偏离默认时阶段采用独占模式。终端 runner 必须使用更新后的代码、相同的锁文件及一致配置。旧 runner 和直接运行单阶段脚本不参与此协调，升级前应等旧任务结束。此机制根据配置估算准入，不是实际内存/CPU 硬限制，原有内存检查仍会运行。
 
 `.env.example` 中 `SCIGBLAST_ALLOWED_*_ROOTS` 是容器内路径，并且必须已被 Compose 挂载；Linux 多根用冒号分隔。设置允许根不会自动增加挂载。路径验证不等于数据库/工具真实运行成功；部署后仍需各类型小数据验收，特别是 cgroup 内存限制。`deploy.sh` 检测到运行/排队任务会拒绝重建；更新期间不要提交新任务。
 
@@ -154,7 +164,7 @@ rtk proxy docker compose --env-file web/.env --project-directory web -f web/dock
 
 ## 邮件提醒与 QQ 发件邮箱
 
-用户进入“我的账户 → 邮件提醒”，保存一个接收邮箱；留空保存即可关闭。自动提醒覆盖后续执行的四类情况：开始执行（STARTED）、完成（SUCCEEDED）、失败（FAILED）、中断异常（INTERRUPTED 或 COMPLETED_WITHOUT_MARKER），仅发送给任务所属用户。开始执行提醒在本次 runner 实际获得共享资源锁后入队，不在提交、QUEUED、刚启动进程或等待资源锁时发送。首次 Match、确认后的分析和断点续跑每次执行各提醒一次，并标明执行内容；进度更新不重复发信。邮件含状态、执行次数和需要登录的任务详情链接，不附原始序列或结果文件；启用设置后不补发已经开始或结束的历史执行。等待审核和主动停止不单独发邮件，已过时的开始提醒也会跳过。
+用户进入“我的账户 → 邮件提醒”，保存一个接收邮箱；留空保存即可关闭。自动提醒覆盖后续执行的四类情况：开始执行（STARTED）、完成（SUCCEEDED）、失败（FAILED）、中断异常（INTERRUPTED 或 COMPLETED_WITHOUT_MARKER），仅发送给任务所属用户。开始执行提醒在本次 runner 获得运行槽位和首个阶段资源锁后入队，不在提交、QUEUED、刚启动进程或等待资源时发送。首次 Match、确认后的分析和断点续跑每次执行各提醒一次，并标明执行内容；进度更新不重复发信。邮件含状态、执行次数和需要登录的任务详情链接，不附原始序列或结果文件；启用设置后不补发已经开始或结束的历史执行。等待审核和主动停止不单独发邮件，已过时的开始提醒也会跳过。
 
 管理员进入“用户管理 → 发件邮箱配置”，首次配置已预填 QQ 参数：
 
@@ -175,6 +185,8 @@ QQ 参数可参考[腾讯官方 SMTP 配置表](https://intl.cloud.tencent.com/z
 配置与待发队列保存在 `SCIGBLAST_STATE_DIR` 下的 SQLite（Compose 默认 `web/runtime/scigblast.sqlite3`），重建镜像、重启容器后保留，不需要在 `.env` 写邮箱密码。授权码不会在 API 或页面回显，留空保留原值；输入新授权码替换，显式勾选清除才能删除。该数据库包含发件凭证，部署和备份只交由服务器管理员访问。
 
 后台邮件队列独立于分析进程，每项失败最多尝试 3 次（后续重试间隔 60 秒、300 秒）。修改或清空收件邮箱、停用用户、删除任务、续跑导致通知已过时，会跳过尚未发送的旧通知。关闭 SMTP 服务暂停待发队列。同一任务／执行次数／状态只入队一次，重启恢复未确认完成的发送项。测试全程使用模拟 SMTP。
+
+每封通知使用稳定 Message-ID；SMTP 已接收而平台尚未保存发送状态时如果进程中断，恢复重试仍可能产生重复邮件，不能保证 SMTP 恰好发送一次。
 
 开始提醒由现有进程监控读取本次 `launcher-N.log` 的锁获取标记，按 attempt、PID 和进程 token 核验后，在同一 SQLite 事务中记录 `execution_json.resource_acquired_at` 与邮件事件。此时间为监控观测时间，不改变原有运行时长口径。后台实际发送前再次核验当前用户邮箱、执行次数及运行状态；快速任务已结束时跳过过时的开始提醒，仍按原规则发送完成/失败邮件。发件服务、收件邮箱与重试参数不需要另行配置。
 

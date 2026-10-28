@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import heapq
 import hashlib
 import os
 import re
@@ -41,6 +43,7 @@ PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent
 sys.path.insert(0, str(PIPELINE_ROOT))
 import input_manifest
 import pipeline_input_manifest
+import pipeline_progress
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
 DEFAULT_OUTPUT_ROOT = Path(
@@ -49,9 +52,8 @@ DEFAULT_OUTPUT_ROOT = Path(
 # Compatibility with the original .env: web_output was a shared task root.
 if DEFAULT_OUTPUT_ROOT == Path('/colddata/zqy/SCigblast/results/web_output').resolve():
     DEFAULT_OUTPUT_ROOT = DEFAULT_OUTPUT_ROOT.parent
-# Pipeline memory guards are cgroup-aware, but they do not reserve budget
-# across runner processes. Keep Web-launched work serialized until that shared
-# reservation protocol is implemented and validated on Linux.
+# Two pipeline slots are shared with CLI runners through the resource gate.
+# Per-pipeline memory guards do not reserve CPU or memory across the two slots.
 MAX_ACTIVE_JOBS = 2
 
 
@@ -64,6 +66,7 @@ REGISTRY = load_registry()
 PROCESS_LOCK = threading.RLock()
 PROCESSES: dict[str, subprocess.Popen[bytes]] = {}
 STOP_REQUESTED: set[str] = set()
+DELETE_IN_PROGRESS: set[str] = set()
 DOWNLOAD_TICKETS: dict[str, dict] = {}
 DOWNLOAD_LOCK = threading.Lock()
 
@@ -280,7 +283,7 @@ BROWSE_SPECS: dict[str, tuple[str, set[str]]] = {
 }
 
 
-def browse_directory(kind: str, value: str | None) -> dict[str, Any]:
+def browse_directory(kind: str, value: str | None, cursor: str = '', query: str = '') -> dict[str, Any]:
     """Return one safe directory level for the web file-tree picker.
 
     Only configured roots and their descendants are exposed. File contents are
@@ -325,24 +328,57 @@ def browse_directory(kind: str, value: str | None) -> dict[str, Any]:
         ]
         return {"kind": kind, "path": None, "parent": None, "roots": [str(root) for root in roots], "entries": root_entries}
 
-    entries: list[dict[str, Any]] = []
+    query = query[:160].strip().casefold()
     try:
-        children = sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))
+        before = current.stat()
+        version = [before.st_dev, before.st_ino, before.st_mtime_ns]
+        path_hash = hashlib.sha256(str(current).encode()).hexdigest()
+        after = None
+        if cursor:
+            if len(cursor) > 2048:
+                raise ValueError('cursor too long')
+            saved = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode('utf-8'))
+            if saved['version'] != version or saved['path'] != path_hash or saved['kind'] != kind or saved['query'] != query:
+                raise ValueError('directory changed')
+            after = tuple(saved['key'])
+
+        def candidates():
+            with os.scandir(current) as children:
+                for child in children:
+                    if child.name.startswith('.') or query not in child.name.casefold():
+                        continue
+                    try:
+                        directory = child.is_dir()
+                        if not directory and (not child.is_file() or Path(child.name).suffix.lower() not in suffixes):
+                            continue
+                        key = (0 if directory else 1, child.name.casefold(), child.name)
+                        if after is not None and key <= after:
+                            continue
+                        resolved_child = Path(child.path).resolve()
+                        if not is_under(resolved_child, roots):
+                            continue
+                        yield key, str(resolved_child), directory
+                    except OSError:
+                        continue
+
+        selected = heapq.nsmallest(101, candidates())
+        current_stat = current.stat()
+        if [current_stat.st_dev, current_stat.st_ino, current_stat.st_mtime_ns] != version:
+            raise ValueError('directory changed')
     except OSError as exc:
         raise HTTPException(403, f"cannot list browse path: {current}") from exc
-    for child in children:
-        if child.name.startswith("."):
-            continue
+    except (ValueError, KeyError, TypeError, UnicodeError):
+        raise HTTPException(409, '目录或筛选条件已变化，请重新浏览') from None
+    entries = []
+    for key, child_path, directory in selected[:100]:
         try:
-            resolved_child = child.resolve()
-            if not is_under(resolved_child, roots):
-                continue
-            if child.is_dir():
-                entries.append({"name": child.name, "path": str(resolved_child), "type": "directory", "selectable": kind != "barcode"})
-            elif child.is_file() and child.suffix.lower() in suffixes:
-                entries.append({"name": child.name, "path": str(resolved_child), "type": "file", "selectable": True, "size": child.stat().st_size})
+            if directory:
+                entries.append({"name": key[2], "path": child_path, "type": "directory", "selectable": kind != "barcode"})
+            else:
+                entries.append({"name": key[2], "path": child_path, "type": "file", "selectable": True, "size": Path(child_path).stat().st_size})
         except OSError:
             continue
+    next_cursor = base64.urlsafe_b64encode(json.dumps({'version': version, 'path': path_hash, 'kind': kind, 'query': query, 'key': selected[99][0]}, ensure_ascii=False).encode('utf-8')).decode() if len(selected) > 100 else None
 
     parent = None
     if not any(current == root for root in roots):
@@ -355,6 +391,7 @@ def browse_directory(kind: str, value: str | None) -> dict[str, Any]:
         "parent": parent,
         "roots": [str(root) for root in roots],
         "entries": entries,
+        "next_cursor": next_cursor,
         "can_select_current": kind != "barcode",
     }
 
@@ -612,6 +649,10 @@ def execution_phase(row, text=None):
         text = attempt_tail(row)
     if 'waiting for shared pipeline resource lock' in text and 'acquired shared pipeline resource lock' not in text:
         return 'waiting_resource', '等待运行资源，已有任务正在使用分析资源'
+    waiting_stage = text.rfind('[SCigblast] waiting stage resources:')
+    acquired_stage = text.rfind('[SCigblast] acquired stage resources:')
+    if waiting_stage > acquired_stage:
+        return 'waiting_stage_resources', '当前阶段等待共享计算资源，资源可用后自动继续'
     if row['current_stage'] or 'acquired shared pipeline resource lock' in text or re.search(r'\[(IR|10X|BASE|PIG|MAPPING)(?:\s|\])', text):
         return 'running', '正在分析'
     return 'starting', '正在启动本次执行'
@@ -726,6 +767,7 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "barcode_csv": row["barcode_csv"],
         "output_root": row["output_root"],
         "status": row["status"],
+        "delete_in_progress": row['id'] in DELETE_IN_PROGRESS,
         "execution_phase": phase,
         "status_detail": status_detail,
         "can_stop_recovered": recovered_state == 'verified',
@@ -774,7 +816,11 @@ def parse_progress(row: sqlite3.Row) -> tuple[str, int]:
                 current = matched
                 stage_end = match.end()
     progress = int(row["progress"] or 0)
-    percentages = re.findall(r"(?:percent=(\d{1,3})|\[\s*\d+/\d+\s+(\d{1,3})(?:\.\d+)?%)", text[stage_end:])
+    stage_text = text[stage_end:]
+    if row['pipeline'] in {'ir_split', '10x_split'} and current.endswith('.igblast'):
+        # Legacy task labels encode submission order, not completed work.
+        stage_text = '\n'.join(line for line in stage_text.splitlines() if not re.search(r'\[\s*\d+/\d+\s+\d+(?:\.\d+)?%\]', line))
+    percentages = re.findall(r"(?:percent=(\d{1,3})|\[\s*\d+/\d+\s+(\d{1,3})(?:\.\d+)?%)", stage_text)
     if percentages:
         progress = max(0, min(100, int(next(v for v in percentages[-1] if v))))
     elif current != row["current_stage"]:
@@ -857,7 +903,8 @@ def launch_job(job_id: str) -> bool:
     attempt = int(row["attempt_no"] or 0) + 1
     token = uuid.uuid4().hex
     env['SCIGBLAST_WEB_PROCESS_TOKEN'] = token
-    metadata = {'process_token': token}
+    metadata = {'process_token': token, 'stage_gate_version': 1}
+    env['SCIGBLAST_PROGRESS_DB'] = str(STATE_ROOT / 'jobs' / job_id / f'progress-{token}.sqlite3')
     try:
         stat = log_path(row).stat()
         metadata['runtime_log'] = {'inode': stat.st_ino, 'size': stat.st_size}
@@ -935,6 +982,8 @@ def _record_execution_started(row) -> bool:
         return False
     if not re.search(r'^\[SCigblast\] acquired shared pipeline resource lock\s*$', text, re.M):
         return False
+    if metadata.get('stage_gate_version') and '[SCigblast] acquired stage resources:' not in text:
+        return False
     with db() as connection:
         connection.execute('BEGIN IMMEDIATE')
         current = connection.execute('SELECT * FROM jobs WHERE id=?', (row['id'],)).fetchone()
@@ -952,10 +1001,16 @@ def _record_execution_started(row) -> bool:
 
 def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
     row = get_job_row(job_id)
+    token = execution_metadata(row).get('process_token', '')
+    batch_progress = pipeline_progress.BatchLogProgress(STATE_ROOT / 'jobs' / job_id / f'progress-{token}.sqlite3') if row['pipeline'] in {'ir_split', '10x_split'} and re.fullmatch(r'[0-9a-f]{32}', token) else None
     while process.poll() is None:
         notify_execution_started(row)
+        if batch_progress:
+            path, boundary = attempt_log(row)
+            batch_progress.poll(path, boundary)
         current, progress = parse_progress(row)
-        update_job(job_id, current_stage=current, progress=progress)
+        if current != row['current_stage'] or progress != int(row['progress'] or 0):
+            update_job(job_id, current_stage=current, progress=progress)
         time.sleep(2)
         row = get_job_row(job_id)
     exit_code = process.returncode
@@ -974,6 +1029,9 @@ def watch_job(job_id: str, process: subprocess.Popen[bytes]) -> None:
             except ProcessLookupError:
                 pass
     row = get_job_row(job_id)
+    if batch_progress:
+        path, boundary = attempt_log(row)
+        batch_progress.poll(path, boundary)
     # Fast attempts can finish between monitor ticks; record the event before
     # the terminal transition. The mailer skips it if it is already out of date.
     notify_execution_started(row)
@@ -1393,7 +1451,7 @@ def input_assignments(job_id: str):
 def input_rematch(job_id: str, request: CreateJob):
     with PROCESS_LOCK:
         row = get_job_row(job_id)
-        if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING', 'ARCHIVED'}:
+        if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING', 'ARCHIVED', 'DELETING'}:
             raise HTTPException(409, '请等待当前任务执行结束')
         if json.loads(row['options_json']).get('sample_source') != 'directory':
             raise HTTPException(400, '任务不是目录识别模式')
@@ -1471,9 +1529,9 @@ def preflight(pipeline: str, mapping_chains: str = '', stage: str = 'match'):
 
 
 @app.get("/api/browse")
-def browse(kind: str = "input", path: str | None = None) -> dict[str, Any]:
+def browse(kind: str = "input", path: str | None = None, cursor: str = '', query: str = '') -> dict[str, Any]:
     """List a single safe directory level for the path picker."""
-    return browse_directory(kind, path)
+    return browse_directory(kind, path, cursor, query)
 
 
 @app.post("/api/submissions/import")
@@ -1556,7 +1614,7 @@ def rematch(job_id: str, request: dict):
     with PROCESS_LOCK:
         row = get_job_row(job_id)
         require_match_pipeline(row)
-        if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING", "ARCHIVING", "ARCHIVED"}:
+        if row["status"] in {"QUEUED", "RUNNING", "MATCHING", "STOPPING", "ARCHIVING", "ARCHIVED", "DELETING"}:
             raise HTTPException(409, "Wait for this attempt to finish")
         if json.loads(row['options_json']).get('sample_source') == 'directory':
             raise HTTPException(400, '请使用目录样本编辑入口重新匹配')
@@ -1723,8 +1781,13 @@ def create_job(request: CreateJob) -> dict[str, Any]:
             env.update(SCIGBLAST_OUTPUT_ROOT=str(candidate), SCIGBLAST_RUN_OUTPUT_ROOT=str(candidate))
             job['env_json'] = json.dumps(env)
         with db() as connection:
-            other_outputs = connection.execute('SELECT output_root,owner_id FROM jobs').fetchall()
+            other_outputs = connection.execute('SELECT output_root,owner_id,status FROM jobs').fetchall()
             for other in other_outputs:
+                if other['status'] == 'DELETING':
+                    deleting = Path(other['output_root'])
+                    for candidate_path in (job['output_root'], job['input_path'], job['submission_path'], job['barcode_csv']):
+                        if candidate_path and (is_under(Path(candidate_path), [deleting]) or is_under(deleting, [Path(candidate_path)])):
+                            raise HTTPException(409, '输入或输出与正在删除的任务目录重叠，请稍后重试')
                 if other['owner_id'] != user['id'] and (is_under(Path(job['output_root']), [Path(other['output_root'])]) or is_under(Path(other['output_root']), [Path(job['output_root'])])):
                     raise HTTPException(409, '输出目录与其他用户或历史任务重叠，请选择独立目录')
             collision = connection.execute("SELECT id FROM jobs WHERE output_root=? AND dataset=?", (job["output_root"], job["dataset"])).fetchone()
@@ -1748,6 +1811,8 @@ def delete_job(job_id: str, request: dict):
     """Delete only an inactive job's exclusive output, never an input or shared root."""
     with PROCESS_LOCK:
         row = get_job_row(job_id)
+        if job_id in DELETE_IN_PROGRESS:
+            raise HTTPException(409, '任务正在删除，请稍后查看')
         if request.get('output_root') != row['output_root'] or request.get('confirm') != job_id:
             raise HTTPException(400, '请确认任务和将删除的输出目录')
         if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING'} or job_id in PROCESSES:
@@ -1785,20 +1850,45 @@ def delete_job(job_id: str, request: dict):
         if is_under(STATE_ROOT, [output]) or is_under(PIPELINE_ROOT, [output]):
             raise HTTPException(409, '输出包含程序或任务数据库，禁止删除')
         TREEMAP.guard_mutation(job_id)
-        if output.exists() and (not output.is_dir() or (
+        if output.exists() and (not output.is_dir() or (row['status'] != 'DELETING' and
                 any(output.iterdir()) and not (output / '01.match' / row['dataset']).is_dir()
                 and not state_dir(row).is_dir())):
             raise HTTPException(409, '未找到该任务的阶段目录，无法安全确认输出归属')
         job_state = STATE_ROOT / 'jobs' / job_id
         if job_state.is_symlink() or not is_under(job_state, [STATE_ROOT / 'jobs']):
             raise HTTPException(409, '任务日志目录归属异常')
-        try:
-            if output.exists():
-                shutil.rmtree(output)
-            if job_state.exists():
-                shutil.rmtree(job_state)
-        except OSError as exc:
-            raise HTTPException(500, f'删除未完成，任务记录已保留，可检查权限后重试：{exc}') from exc
+        metadata = execution_metadata(row)
+        deletion = metadata.get('delete_identity')
+        def identity(path):
+            if not path.exists():
+                return None
+            stat = path.stat()
+            return [stat.st_dev, stat.st_ino]
+        if row['status'] == 'DELETING':
+            if not isinstance(deletion, dict):
+                raise HTTPException(409, '删除记录缺少目录身份，请联系管理员检查')
+            if any(path.exists() and identity(path) != deletion.get(key) for key, path in (('output', output), ('state', job_state))):
+                raise HTTPException(409, '删除目录已被替换，请联系管理员检查')
+        else:
+            deletion = {'output': identity(output), 'state': identity(job_state)}
+            metadata['delete_identity'] = deletion
+        with db() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            current = connection.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not current or current['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING'}:
+                raise HTTPException(409, '任务状态已变化，请刷新后重试')
+            active = connection.execute("SELECT 1 FROM derived_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (job_id,)).fetchone()
+            if active:
+                raise HTTPException(409, 'Treemap 尚未停止，请稍后重试')
+            connection.execute("UPDATE jobs SET status='DELETING',last_error=NULL,execution_json=? WHERE id=?", (json.dumps(metadata), job_id))
+        DELETE_IN_PROGRESS.add(job_id)
+    try:
+        if any(path.exists() and identity(path) != deletion.get(key) for key, path in (('output', output), ('state', job_state))):
+            raise HTTPException(409, '删除目录已被替换，请联系管理员检查')
+        if output.exists():
+            shutil.rmtree(output)
+        if job_state.exists():
+            shutil.rmtree(job_state)
         with db() as connection:
             import derived_store
             derived_store.delete(connection, [item[0] for item in connection.execute('SELECT id FROM derived_runs WHERE parent_job_id=?', (job_id,))])
@@ -1806,8 +1896,15 @@ def delete_job(job_id: str, request: dict):
             connection.execute('DELETE FROM reviews WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM actions WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM jobs WHERE id=?', (job_id,))
-        STOP_REQUESTED.discard(job_id)
+        with PROCESS_LOCK:
+            STOP_REQUESTED.discard(job_id)
         return {'deleted': job_id, 'output_root': str(output)}
+    except OSError as exc:
+        update_job(job_id, last_error=f'删除未完成：{exc}')
+        raise HTTPException(500, '删除未完成，任务记录已保留；检查权限后可重试删除') from exc
+    finally:
+        with PROCESS_LOCK:
+            DELETE_IN_PROGRESS.discard(job_id)
 
 
 @app.post("/api/validate")
@@ -1877,7 +1974,7 @@ def list_jobs(
         ).fetchall()
         stats = connection.execute(
             "SELECT COUNT(*) AS total, "
-            "SUM(CASE WHEN status IN ('QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING') THEN 1 ELSE 0 END) AS active, "
+            "SUM(CASE WHEN status IN ('QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING','DELETING') THEN 1 ELSE 0 END) AS active, "
             "SUM(CASE WHEN status = 'WAITING_REVIEW' THEN 1 ELSE 0 END) AS review, "
             "SUM(CASE WHEN status IN ('SUCCEEDED','ARCHIVED','FAILED','STOPPED','INTERRUPTED','COMPLETED_WITHOUT_MARKER') THEN 1 ELSE 0 END) AS done "
             "FROM jobs" + owner_where, owner_params
@@ -1897,9 +1994,25 @@ def get_job(job_id: str) -> dict[str, Any]:
     options.pop('directory_manifest_path', None)
     files = summary_files(row)
     detail = snapshot(row)
+    token = execution_metadata(row).get('process_token', '')
+    if re.fullmatch(r'[0-9a-f]{32}', token):
+        detail['igblast_progress'] = pipeline_progress.read_progress(STATE_ROOT / 'jobs' / job_id / f'progress-{token}.sqlite3')
     detail['input_assignments'] = options.get('input_assignments', [])
     return {"job": detail, "options": options, "actions": actions_for(job_id),
             "match_summary": files, "match_summary_signature": summary_file_signature(files)}
+
+
+@app.get('/api/jobs/{job_id}/igblast-progress')
+def get_igblast_progress(job_id: str, offset: int = 0, query: str = '', state: str = 'all'):
+    row = get_job_row(job_id)
+    token = execution_metadata(row).get('process_token', '')
+    if not re.fullmatch(r'[0-9a-f]{32}', token):
+        raise HTTPException(404, '本次执行没有链任务进度')
+    result = pipeline_progress.read_page(STATE_ROOT / 'jobs' / job_id / f'progress-{token}.sqlite3', offset, query, state)
+    if result is None:
+        raise HTTPException(404, '本次执行没有链任务进度')
+    result['attempt_no'] = row['attempt_no']
+    return result
 
 
 def actions_for(job_id: str) -> list[dict[str, Any]]:
