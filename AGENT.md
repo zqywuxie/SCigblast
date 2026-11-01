@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+2026-11-02 归档修复：web/archive_results.py 的归档范围与新建任务输出权限分开，兼容 DEFAULT_OUTPUT_ROOT、ALLOWED_OUTPUT_ROOTS 及 ARCHIVE_LEGACY_ROOTS（默认两种历史 results 根，显式空值关闭）；已登记目录仍须通过独占、输入/应用目录、symlink 校验，bind mount 同源根按同一路径比较以防别名绕过共享检查。压缩包发布前失败恢复 SUCCEEDED 并记录 archive-failed；已发布 results.tar.gz/manifest/pending 的失败保留 ARCHIVING 供校验恢复。--recover-stale 持有归档独占锁，先在线备份 SQLite，只恢复未发布且无 pid/pgid 的遗留状态，不压缩/清理结果。备份位于 runtime/maintenance/archive-recovery-backups；部署保护不绕过归档锁或数据库状态。Compose/.env.example 已提供单独历史范围参数。
+
+本次在线恢复：7167252126074e48、b7d0e8c7d6f74fb0、79bc5c38f35f4c92 从遗留 ARCHIVING 恢复 SUCCEEDED，结果文件未变更；维护脚本已原子更新，旧脚本和恢复前 SQLite 均有备份。三任务历史路径 dry-run 通过，部署探针确认主分析/后分析/树图/归档均空闲。没有重启容器或构建部署。临时合成验证覆盖真实压缩/逐字节校验、发布前失败恢复、已发布日志保留、bind mount 共享冲突、根目录/symlink 保护、SQLite 备份与遗留进程保护。
+
 2026-11-01 配色v18 / Workbook v11：analysis/repertoire/palette.py统一语义色。数据阶段Raw蓝/Clean青绿/Merged紫/Retained暖橙，阶段矩阵每列仍按全批最大值缩放，用阶段独立渐变色键；匹配Unique蓝/Multiple橙/Unmatched灰；Isotype五主类各固定色，IgG亚类固定蓝色深浅；C构成沿用相同Isotype色，V红/J蓝/C紫保持原报告约定。标签按实际底色选择文字，填充内文本对比>=4.5:1。Excel分类表头/Tab/数据条分主题色，Web阶段卡和V/J/C卡加语义色边线并适配夜间。新增palette模块随Docker通配打包/check_bundle检查。统计VERSION仍v11，FIGURE_VERSION=v18、Workbook VERSION=v11变化触发重绘/重导出。模拟输出outputs/new_analysis_simulation_20261101_color_v18含181分析PNG与新Excel，旧v3保留供对比；各数值和范围与旧版逐项一致。
 
 2026-11-01 Workbook v10：总览移除Samples/Sample-chain pairs/Primers总数卡，改为类别、完整样本名、链、引物组/对应方式四列样本表；去重显示全部样本/链，不截断表格，Heavy/Light/TCR由链确定，引物组只来自catalog实际group，不从名称猜测，无组名则明示未提供。write_workbook新增可选catalog参数，run传入本次catalog；下方两张原生图保留且动态下移，图表最多12组预览，组名/样本换行行高在append前设置。引物计数的统计范围改数据范围：all=统计输入，retained=筛选后保留；这是包含关系，retained由mapping/筛选状态判定，不等于引物唯一匹配，数量及原始CSV字段不变。VERSION=experiment-check-workbook-v10-sample-overview。

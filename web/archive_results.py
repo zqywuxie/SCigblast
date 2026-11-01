@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tarfile
 
@@ -14,6 +15,84 @@ PENDING = '.results-archive.pending.json'
 
 class NoSavings(Exception):
     pass
+
+
+def archive_roots(app):
+    # Archive permissions are separate from the roots allowed for NEW jobs.
+    # Historical jobs predate the narrower results/SCigblastWeb default.
+    values = [str(app.DEFAULT_OUTPUT_ROOT)]
+    values.extend(os.environ.get('SCIGBLAST_ALLOWED_OUTPUT_ROOTS', '').split(os.pathsep))
+    values.extend(os.environ.get(
+        'SCIGBLAST_ARCHIVE_LEGACY_ROOTS',
+        os.pathsep.join(('/colddata/SCigblast/results', '/colddata/zqy/SCigblast/results')),
+    ).split(os.pathsep))
+    return list(dict.fromkeys(Path(value).resolve() for value in values if value.strip()))
+
+
+def canonical_output(path, roots):
+    resolved = Path(path).resolve()
+    # Bind-mount aliases have different paths but refer to the same directory.
+    # Compare every job/input using the same spelling to detect shared outputs.
+    for index, alias in enumerate(roots):
+        if resolved.is_relative_to(alias):
+            for canonical in roots[:index]:
+                try:
+                    if alias.samefile(canonical):
+                        return canonical / resolved.relative_to(alias)
+                except OSError:
+                    continue
+    return resolved
+
+
+def unpublished(root):
+    return not any(os.path.lexists(root / name) for name in (ARCHIVE, MANIFEST, PENDING))
+
+
+def release_failed_archive(app, row, reason):
+    # Once publication/cleanup starts, preserve the recovery journal and state.
+    # A later archive run must verify the archive before finishing cleanup.
+    if not unpublished(Path(row['output_root'])):
+        return False
+    with app.db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        updated = connection.execute(
+            "UPDATE jobs SET status='SUCCEEDED' WHERE id=? AND status='ARCHIVING'",
+            (row['id'],),
+        )
+        if updated.rowcount:
+            connection.execute(
+                'INSERT INTO actions(job_id,operator,action,details,created_at) VALUES(?,?,?,?,?)',
+                (row['id'], 'system', 'archive-failed', str(reason)[:2000], app.now()),
+            )
+    return bool(updated.rowcount)
+
+
+def recover_stale(app):
+    # The CLI holds the same exclusive flock as the archive worker. Do not
+    # launch compression here: this command only releases pre-publication failures.
+    with app.db() as connection:
+        rows = connection.execute("SELECT * FROM jobs WHERE status='ARCHIVING'").fetchall()
+    if not rows:
+        print('No stale archiving jobs', flush=True)
+        return 0
+    destination = app.STATE_ROOT / 'maintenance' / 'archive-recovery-backups'
+    destination.mkdir(parents=True, exist_ok=True)
+    backup = destination / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '.sqlite3')
+    with app.db() as source, sqlite3.connect(backup) as target:
+        source.backup(target)
+    print(f'Archive recovery database backup: {backup}', flush=True)
+    unresolved = 0
+    for row in rows:
+        if any(row[key] is not None for key in ('pid', 'pgid') if key in row.keys()):
+            print(f"Archive recovery deferred: process identity {row['id']}", flush=True)
+            unresolved += 1
+            continue
+        if release_failed_archive(app, row, 'Recovered stale archive status under exclusive archive lock; no published archive or journal'):
+            print(f"Archive status recovered: {row['id']} -> SUCCEEDED", flush=True)
+        else:
+            print(f"Archive recovery deferred: published archive/journal {row['id']}", flush=True)
+            unresolved += 1
+    return unresolved
 
 
 def inventory(root):
@@ -155,28 +234,29 @@ def run(app, dry_run=False, days=14):
     with app.db() as connection:
         rows = connection.execute('SELECT * FROM jobs').fetchall()
     failures = 0
+    roots = archive_roots(app)
     for row in rows:
         if not eligible(row, cutoff):
             continue
         try:
             raw = Path(row['output_root'])
-            root = raw.resolve()
-            base = app.DEFAULT_OUTPUT_ROOT.resolve()
-            if root == base or not root.is_relative_to(base) or not root.is_dir():
+            resolved = raw.resolve()
+            if resolved in roots or not any(resolved.is_relative_to(base) for base in roots) or not resolved.is_dir():
                 raise ValueError('Output is not an exclusive results subdirectory')
             if any(p.is_symlink() for p in (raw, *raw.parents)):
                 raise ValueError('Output path contains a link')
+            root = canonical_output(raw, roots)
             for other in rows:
-                output = Path(other['output_root']).resolve()
+                output = canonical_output(other['output_root'], roots)
                 if other['id'] != row['id'] and (root.is_relative_to(output) or output.is_relative_to(root)):
                     raise ValueError('Shared output directory')
                 options = json.loads(other['options_json'])
                 for value in (other['input_path'], other['submission_path'], other['barcode_csv'], options.get('submission_path')):
                     if value:
-                        protected = Path(value).resolve()
+                        protected = canonical_output(value, roots)
                         if root.is_relative_to(protected) or protected.is_relative_to(root):
                             raise ValueError('Output overlaps an input directory')
-            if app.STATE_ROOT.resolve().is_relative_to(root) or app.PIPELINE_ROOT.resolve().is_relative_to(root):
+            if canonical_output(app.STATE_ROOT, roots).is_relative_to(root) or canonical_output(app.PIPELINE_ROOT, roots).is_relative_to(root):
                 raise ValueError('Output overlaps application files')
             print(f"archive candidate: {row['id']} {root}", flush=True)
             if dry_run:
@@ -208,6 +288,8 @@ def run(app, dry_run=False, days=14):
             print(f"archive skipped: {row['id']} {exc}", flush=True)
         except Exception as exc:
             failures += 1
+            if not dry_run:
+                release_failed_archive(app, row, exc)
             print(f"archive failed: {row['id']} {exc}", file=sys.stderr, flush=True)
     return failures
 
@@ -215,7 +297,10 @@ def run(app, dry_run=False, days=14):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--recover-stale', action='store_true', help='Back up SQLite and release stale pre-publication archive states without compressing results')
     args = parser.parse_args()
+    if args.dry_run and args.recover_stale:
+        parser.error('--dry-run and --recover-stale cannot be combined')
     # The maintenance copy in the persistent runtime uses the installed app.
     sys.path.insert(0, '/app')
     import app
@@ -228,5 +313,6 @@ if __name__ == '__main__':
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            print('Archive worker is active; no state changed.', flush=True)
             sys.exit(0)
-        sys.exit(bool(run(app, dry_run=args.dry_run)))
+        sys.exit(bool(recover_stale(app) if args.recover_stale else run(app, dry_run=args.dry_run)))

@@ -299,6 +299,10 @@ docker compose up -d --no-build
 
 ## Results 自动归档
 
+归档检查同时兼容已登记的历史 `/colddata/SCigblast/results` 与 `/colddata/zqy/SCigblast/results` 目录，不扩大新建任务的输出目录权限；需要覆盖历史范围时设置 `SCIGBLAST_ARCHIVE_LEGACY_ROOTS`（Linux 使用冒号分隔，空值关闭历史范围）。同一结果目录的 bind mount 别名按同一路径核查，仍禁止归档共享目录、输入数据和应用目录。
+
+归档在压缩包发布前失败会恢复任务为成功完成，并记录 `archive-failed` 操作；已经发布压缩包或恢复日志的任务保留归档恢复状态，避免把部分清理的输出当作完整结果。旧版遗留的无进程归档状态可用 `docker exec scigblast-web python /var/lib/scigblast-web/maintenance/archive_results.py --recover-stale` 修复：先取得归档独占锁、在线备份 SQLite，再仅恢复没有已发布压缩包或恢复日志的任务，不执行压缩或删除结果。备份保存在 `web/runtime/maintenance/archive-recovery-backups/`。
+
 部署时安装宿主机 cron，每天北京时间 03:00 检查 Web 任务。仅归档成功完成满 14 天的独立 results 子目录；运行、待审核、失败、停止任务及共享目录不处理。生成目录内的 `results.tar.gz`，逐文件校验后清理已打包文件，保留小于等于 10 MB 的统计表、日志和状态文件供网页查看。无法节省空间时保留原文件。已有 gzip 数据通常压缩收益有限。
 
 输出文件页提供完整压缩包下载；归档后的任务不能直接续跑或重新 Match，可下载解压查看。手动检查：`docker exec scigblast-web python /app/archive_results.py --dry-run`。计划：`crontab -l`；最近一次日志：`~/.local/state/scigblast/archive-results.log`。安装脚本支持 UTC 和 UTC+8 主机，重复部署更新同一条 cron。旧版 Web 未支持归档状态时计划暂不执行清理，部署新版后自动启用。
