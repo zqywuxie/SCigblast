@@ -28,15 +28,16 @@ RUN set -eu; \
         fi; \
     done; \
     apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
-    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends libltdl7 \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends libltdl7 fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 COPY web/check_runtime.py /app/check_runtime.py
 RUN python /app/check_runtime.py && pip freeze > /app/python-packages.txt
 
 COPY web/archive_results.py web/app.py web/submission.py web/auth.py web/manage_users.py web/pipeline_registry.json /app/
 COPY web/preflight.py web/table_preview.py web/process_identity.py web/artifact_download.py web/mapping_results.py /app/
+COPY web/deployment.py /app/
 COPY web/input_manifest.py web/notifications.py /app/
-COPY web/postanalysis.py web/derived_store.py /app/
+COPY web/postanalysis.py web/derived_store.py web/repertoire_analysis.py /app/
 COPY web/templates /app/templates
 COPY web/static /app/static
 
@@ -50,7 +51,8 @@ COPY pipeline_igblast_cache.py /opt/scigblast/pipeline_igblast_cache.py
 COPY pipeline_parallel.py /opt/scigblast/pipeline_parallel.py
 COPY pipeline_progress.py /opt/scigblast/pipeline_progress.py
 COPY pipeline_locus_split.py /opt/scigblast/pipeline_locus_split.py
-COPY pipeline_input_manifest.py /opt/scigblast/pipeline_input_manifest.py
+COPY pipeline_trace.py pipeline_stage_metrics.py pipeline_primer.py /opt/scigblast/
+COPY pipeline_input_manifest.py pipeline_airr_preprocessing.py /opt/scigblast/
 COPY mapping/fasta.py /opt/scigblast/mapping/fasta.py
 COPY mapping/pipeline/ /opt/scigblast/mapping/pipeline/
 COPY analysis/ /opt/scigblast/analysis/

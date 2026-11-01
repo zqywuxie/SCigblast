@@ -62,8 +62,7 @@ def database_args(db_root: Path, chain: str):
                 raise ValueError(f'缺少 {chain} {part} 数据库：{prefix}')
             continue
         args += ['-c_region_db' if part == 'C' else f'-germline_db_{part}', str(prefix)]
-        if part == 'C':
-            args += ['-num_alignments_C', '1']
+        args += [f'-num_alignments_{part}', '1']
         files.extend(matches)
     aux = db_root / 'optional_file/human_gl.aux'
     if not aux.is_file():

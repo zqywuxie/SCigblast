@@ -126,6 +126,20 @@ def verify(value):
                 raise ValueError(f"输入文件已改变或不可用，请重新扫描：{row['pair_id']} / {side.upper()}")
 
 
+def unified_stage_relative(sample, pair):
+    """Stable sample/pair path; the full pair ID disambiguates same-named lanes."""
+    import hashlib
+    pair = str(pair).replace('\\', '/')
+    stem = Path(pair).name
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '_', stem).strip('_') or 'unnamed'
+    sample_slug = re.sub(r'[^A-Za-z0-9._-]+', '_', str(sample)).strip('_') or 'unnamed'
+    if slug in {'.', '..'}:
+        slug = 'unnamed'
+    if sample_slug in {'.', '..'}:
+        sample_slug = 'unnamed'
+    return Path(sample_slug) / (slug + '-' + hashlib.sha256(pair.encode('utf-8')).hexdigest()[:12])
+
+
 def assign(snapshot, selections, pipeline, species='human'):
     if not isinstance(selections, list) or not 1 <= len(selections) <= MAX_PAIRS:
         raise ValueError('请选择至少一个有效样本')
@@ -139,7 +153,7 @@ def assign(snapshot, selections, pipeline, species='human'):
             raise ValueError('样本选择无效或重复，请重新扫描')
         ids.add(row['id'])
         name = safe_name(selection.get('sample_id', row['sample_id']))
-        if name.casefold() in names:
+        if pipeline == 'pig_igblast' and name.casefold() in names:
             raise ValueError('所选样本名称重复，请使用不同名称；多个 lane 不自动合并')
         names.add(name.casefold())
         requested = selection.get('chains', [])

@@ -20,6 +20,23 @@ FILTER_VERSION = MAPPING_FILTER_VERSION
 SCHEMA_VERSION = 2
 SUPPORTED = {"TRA", "TRB", "TRD", "TRG", "IGH", "IGK", "IGL"}
 
+# Stable identifiers are persisted with each new job, not arbitrary paths.
+REFERENCES = {
+    "human": {"human": ("human", "human_gl.aux")},
+    "pig": {"pig_chain": ("pig_chain", "pig.aux")},
+    "cat": {"cat": ("cat", "cat_gl.aux")},
+    "dog": {"dog": ("dog", "dog_gl.aux")},
+}
+
+
+def reference(species: str, database: str = "") -> tuple[str, str]:
+    species = species.strip().lower()
+    choices = REFERENCES.get(species, {})
+    database = database.strip() or next(iter(choices), "")
+    if database not in choices:
+        raise ValueError(f"Invalid species/database combination: {species}/{database}")
+    return choices[database]
+
 
 def digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -58,16 +75,19 @@ def dependency_snapshot(*, mode: str, db_root: Path, binary: str, species: str,
         "database_version": database_version, "threads": threads,
         "chains": sorted(set(chains)), "filter": FILTER_VERSION,
         "reference_version": os.environ.get("SCIGBLAST_IGBLAST_REFERENCE_VERSION", ""),
+        "primer_mapping": os.environ.get('SCIGBLAST_PRIMER_MAPPING_HASH',''),
         "implementation": hashlib.sha256(implementation.read_bytes()).hexdigest(),
         "helper": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "locus_filter": hashlib.sha256(Path(__file__).with_name('pipeline_locus_split.py').read_bytes()).hexdigest(),
+        "trace": hashlib.sha256(Path(__file__).with_name('pipeline_trace.py').read_bytes()).hexdigest(),
         "igdata": str(Path(os.environ.get("IGDATA") or db_root).resolve()),
     }
     if inherited:
         cached = json.loads(inherited)
         if cached.get("context") == context:
             return cached
-    aux = db_root / "optional_file" / ("pig.aux" if mode == "pig" else f"{species}_gl.aux")
+    aux_name = "pig.aux" if mode == "pig" else (reference(species, database_version)[1] if database_version in REFERENCES.get(species, {}) else f"{species}_gl.aux")
+    aux = db_root / "optional_file" / aux_name
     internal = Path(context["igdata"]) / "internal_data" / species
     common = {
         **{key: value for key, value in context.items() if key != "chains"},

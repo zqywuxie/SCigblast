@@ -274,6 +274,9 @@ MIN_AVAILABLE_GB = float(_env("SCIGBLAST_IR_PREPROCESSING_MIN_AVAILABLE_GB", "15
 PROGRESS_SECONDS = max(1.0, float(_env("SCIGBLAST_IR_PREPROCESSING_PROGRESS_SECONDS", "30")))
 ALLOW_ROW_CONTRACT = _env("SCIGBLAST_IR_PREPROCESSING_ALLOW_ROW_CONTRACT", "1") == "1"
 UMI_SOURCE = _env("SCIGBLAST_IR_PREPROCESSING_UMI_SOURCE", "auto").strip().lower()
+INPUT_LAYOUT = _env('SCIGBLAST_IR_PREPROCESSING_INPUT_LAYOUT','receptor')
+if INPUT_LAYOUT not in {'receptor','chains'}:
+    raise SystemExit('unknown AIRR preprocessing input layout')
 if UMI_SOURCE not in {"auto", "state", "row_contract"}:
     raise SystemExit("SCIGBLAST_IR_PREPROCESSING_UMI_SOURCE must be auto, state or row_contract")
 FINAL_FILES = {"TCR.tsv", "BCR.tsv"}
@@ -345,6 +348,9 @@ def source_fingerprint(path: Path) -> dict[str, str | int]:
 
 
 def discover_inputs(roots: list[Path]) -> list[dict[str, str]]:
+    if INPUT_LAYOUT=='chains':
+        from pipeline_airr_preprocessing import discover
+        return discover(roots)
     tasks: list[dict[str, str]] = []
     seen: set[str] = set()
     output = canonical(OUTPUT_DIR)
@@ -420,6 +426,10 @@ def build_index_for_inputs(roots: list[Path]) -> tuple[dict[str, RepresentativeI
     for configured in roots:
         root = canonical(configured)
         root_key = str(root)
+        if INPUT_LAYOUT=='chains':
+            indexes[root_key]=None
+            modes[root_key]='alignment_rows'
+            continue
         if UMI_SOURCE == "row_contract":
             indexes[root_key] = None
             modes[root_key] = "row_contract"
@@ -507,6 +517,9 @@ def read_one(task: dict[str, str], umi_index: RepresentativeIndex | None, umi_mo
 
 
 def read_sample(sample_tasks: list[dict[str, str]], umi_index: RepresentativeIndex | None, umi_mode: str) -> tuple[dict[str, tuple[dict[str, str], pd.DataFrame]], list[str], list[dict[str, int | str]]]:
+    if INPUT_LAYOUT=='chains':
+        from pipeline_airr_preprocessing import read_sample as read_chains
+        return read_chains(sample_tasks,filter_and_count)
     # Keep Future results and the final loop frame out of main(): once items
     # is released, no reader references should retain this sample's tables.
     items: dict[str, tuple[dict[str, str], pd.DataFrame]] = {}
@@ -547,7 +560,7 @@ def combine_metrics(frames: list[pd.DataFrame], sample: str, batch: str) -> pd.D
 def compute_sample(items: dict[str, tuple[dict[str, str], pd.DataFrame]], sample: str, batch: str) -> tuple[pd.DataFrame, list[str]]:
     frames = [frame for _, frame in items.values() if not frame.empty]
     if not frames:
-        return pd.DataFrame(), ["all filtered records are empty"]
+        return pd.DataFrame(), [] if INPUT_LAYOUT=='chains' else ["all filtered records are empty"]
     errors: list[str] = []
     metrics: list[pd.DataFrame] = []
     try:
@@ -577,6 +590,11 @@ def compute_sample(items: dict[str, tuple[dict[str, str], pd.DataFrame]], sample
 
 def write_junctions(items: dict[str, tuple[dict[str, str], pd.DataFrame]], output: Path, labels: dict[str, str]) -> None:
     for receptor, (task, frame) in items.items():
+        if INPUT_LAYOUT=='chains':
+            present=set(frame['locus']) if not frame.empty else set()
+            for chain in task.get('chains','').split(','):
+                if chain and chain not in present:
+                    (output/'junction_peps'/labels[task['input_root']]/task['relative_sample']/receptor/(chain+'.csv')).unlink(missing_ok=True)
         if frame.empty or "locus" not in frame:
             continue
         sample_dir = output / "junction_peps" / labels[task["input_root"]] / task["relative_sample"] / receptor
@@ -609,6 +627,7 @@ def runtime_fingerprint(umi_mode: str, state_meta: dict[str, int | str]) -> str:
         digest.update(str(path).encode())
         digest.update(path.read_bytes())
     digest.update(umi_mode.encode())
+    if INPUT_LAYOUT=='chains':digest.update(os.environ.get('SCIGBLAST_IR_PREPROCESSING_ADAPTER_SIGNATURE','').encode())
     digest.update(json.dumps(state_meta, sort_keys=True).encode())
     return digest.hexdigest()
 
@@ -618,6 +637,7 @@ def checkpoint_path(key: tuple[str, str]) -> Path:
 
 
 def load_checkpoint(key: tuple[str, str], tasks: list[dict[str, str]], fingerprint: str) -> tuple[pd.DataFrame, dict] | None:
+    if INPUT_LAYOUT=='chains' and os.environ.get('SCIGBLAST_IR_PREPROCESSING_FORCE_RERUN')=='1':return None
     directory = checkpoint_path(key)
     marker = directory / "sample.DONE.json"
     try:
@@ -715,7 +735,7 @@ def main() -> int:
     finally:
         for umi_index in {value for value in umi_indexes.values() if value is not None}:
             umi_index.close()
-    output = pd.concat(metrics_rows, ignore_index=True) if metrics_rows else pd.DataFrame()
+    output = pd.concat(metrics_rows, ignore_index=True) if metrics_rows else pd.DataFrame(columns=['sample','batch'] if INPUT_LAYOUT=='chains' else [])
     atomic_csv(output, OUTPUT_DIR / "Datapoint.csv")
     manifest_columns = [
         "input_root", "relative_sample", "sample_id", "sample", "batch",
@@ -726,10 +746,10 @@ def main() -> int:
     ]
     manifest = pd.DataFrame(manifest_rows, columns=manifest_columns)
     atomic_csv(manifest, OUTPUT_DIR / "processing_manifest.csv")
-    run_status = "DONE" if not failed and not output.empty else "INCOMPLETE"
+    run_status = "DONE" if not failed and (not output.empty or INPUT_LAYOUT=='chains') else "INCOMPLETE"
     atomic_json({"status": run_status, "umi_source": umi_mode, "samples": len(manifest_rows), "retained_rows": len(output), "failed": int(failed), "written_at": time.time()}, STATE_DIR / "run.json")
     print(f"[IR preprocessing] done samples={len(manifest_rows)} retained={len(output)} failed={int(failed)} output={OUTPUT_DIR}", flush=True)
-    return 1 if failed else (0 if not output.empty else 1)
+    return 1 if failed else (0 if not output.empty or INPUT_LAYOUT=='chains' else 1)
 
 
 if __name__ == "__main__":

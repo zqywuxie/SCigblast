@@ -2,9 +2,11 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUNTIME_OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-}"
+RUNTIME_FORCE_RERUN="${SCIGBLAST_FORCE_RERUN:-}"
 RUNTIME_DATASET_LABEL="${SCIGBLAST_DATASET_LABEL:-}"
 source "${SCRIPT_DIR}/00.pipeline_config.env" 2>/dev/null || true
 [[ -n "$RUNTIME_OUTPUT_ROOT" ]] && SCIGBLAST_OUTPUT_ROOT="$RUNTIME_OUTPUT_ROOT"
+[[ -n "$RUNTIME_FORCE_RERUN" ]] && export SCIGBLAST_FORCE_RERUN="$RUNTIME_FORCE_RERUN"
 [[ -n "$RUNTIME_DATASET_LABEL" ]] && SCIGBLAST_DATASET_LABEL="$RUNTIME_DATASET_LABEL"
 export SCIGBLAST_BASE_PIPELINE_DIR="$SCRIPT_DIR"
 export OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-${OUTPUT_ROOT:-${SCRIPT_DIR}/../output}}"
@@ -31,10 +33,12 @@ from pathlib import Path
 
 PIPELINE = Path(os.environ["SCIGBLAST_BASE_PIPELINE_DIR"])
 sys.path.insert(0, str(PIPELINE.parents[1]))
-from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
+from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint, reference
+from pipeline_input_manifest import unified_stage_relative
 from pipeline_parallel import FastaCountCache, bounded_completed
 from pipeline_progress import Progress, run_igblast, verified_estimate
 from pipeline_locus_split import filter_mapping_airr
+from pipeline_primer import prepare as prepare_primers
 ROOT = Path(os.environ["OUTPUT_ROOT"])
 RAW_ROOT = Path(os.environ["RAW_INPUT_DIR"]).resolve() if os.environ.get("RAW_INPUT_DIR") else None
 DATASET_LABEL = os.environ.get("SCIGBLAST_DATASET_LABEL", "").strip()
@@ -43,6 +47,9 @@ INPUT = Path(os.environ.get("SCIGBLAST_IGBLAST_INPUT_DIR", ROOT / "04.pandaseq")
 OUTPUT = Path(os.environ.get("SCIGBLAST_IGBLAST_OUTPUT_DIR", ROOT / "05.igblastn_out"))
 DB_ROOT = Path(os.environ.get("SCIGBLAST_IGBLAST_DB_DIR", "/data/scAnalyis/Scigblast/igblast"))
 SPECIES = os.environ.get("SCIGBLAST_IGBLAST_SPECIES", "human")
+DATABASE = os.environ.get("SCIGBLAST_IGBLAST_DATABASE", SPECIES)
+DB_VERSION, AUX_NAME = (reference(SPECIES, DATABASE) if os.environ.get('SCIGBLAST_RUN_IGBLAST_SPECIES')
+                        else (DATABASE, f"{SPECIES}_gl.aux"))
 THREADS = max(1, int(os.environ.get("SCIGBLAST_IGBLAST_THREADS", "8")))
 REQUESTED = max(1, int(os.environ.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", "4")))
 THREAD_BUDGET = max(1, int(os.environ.get("SCIGBLAST_PARALLEL_THREAD_BUDGET", "128")))
@@ -54,6 +61,7 @@ BIN = resolve_binary(os.environ.get("SCIGBLAST_IGBLAST_BIN", "igblastn"), DB_ROO
 DEPENDENCIES = {}
 FASTA_COUNTS = FastaCountCache()
 PROGRESS = None
+RAW_PAIRS = {}
 TCR = {"TRA", "TRB", "TRD", "TRG"}
 SUPPORTED = TCR | {"IGH", "IGK", "IGL"}
 
@@ -79,7 +87,7 @@ def stage_dir(parent: Path, pair_stem: str, sample: str) -> Path:
     return Path(*parts) if parts else Path()
 
 def database(chain: str, part: str) -> Path:
-    return DB_ROOT / "database_251117" / SPECIES / chain / f"{SPECIES}_gl_{chain}_{part}"
+    return DB_ROOT / "database_251117" / DB_VERSION / chain / f"{SPECIES}_gl_{chain}_{part}"
 
 def blastdb_exists(prefix: Path) -> bool:
     return any(prefix.parent.glob(prefix.name + ".*"))
@@ -94,7 +102,7 @@ def run_task(job: tuple[str, str, str, str, str]):
     # the basename is the physical pair stem here.
     pp, ss = safe(Path(str(pair).replace("\\", "/")).name), safe(sample)
     parent = relative_parent(raw_r1)
-    relative_stage = stage_dir(parent, pp, ss)
+    relative_stage = unified_stage_relative(sample, pair) if os.environ.get('SCIGBLAST_BASE_LAYOUT') == 'sample_pair_v1' else stage_dir(parent, pp, ss)
     fasta = INPUT / relative_stage / f"{pp}_merged.fasta"
     task_dir = OUTPUT / ".tasks" / relative_stage; task_dir.mkdir(parents=True, exist_ok=True)
     filtered = OUTPUT / relative_stage / f"{chain}.tsv"
@@ -104,6 +112,14 @@ def run_task(job: tuple[str, str, str, str, str]):
               "status":"ERROR","error":"","path":None,"parent":str(parent)}
     result.update(locus_input_rows=0, excluded_locus_rows=0, unknown_locus_rows=0, locus_filter_version=1)
     if not fasta.is_file(): result["error"]="missing merged FASTA"; return result
+    original_fasta=fasta
+    try:
+        primer_preparation=prepare_primers(fasta,ROOT,DATASET_LABEL,sample,pair)
+        if primer_preparation:
+            fasta=Path(primer_preparation['path'])
+            result['input_sequences']=primer_preparation['submitted_queries']
+    except Exception as error:
+        result['error']=f'primer_preparation_failed: {error}';return result
     fingerprint=task_fingerprint(fasta, DEPENDENCIES["chains"][chain])
     try:
         if marker.is_file() and filtered.is_file() and os.environ.get("SCIGBLAST_FORCE_RERUN") != "1":
@@ -119,12 +135,12 @@ def run_task(job: tuple[str, str, str, str, str]):
     filtered.unlink(missing_ok=True)
     v,j=database(chain,"V"),database(chain,"J")
     if not blastdb_exists(v) or not blastdb_exists(j): result["error"]="missing V/J database"; return result
-    aux=DB_ROOT / "optional_file" / f"{SPECIES}_gl.aux"
+    aux=DB_ROOT / "optional_file" / AUX_NAME
     if not aux.is_file(): result["error"]="missing auxiliary file"; return result
     # IgBLAST accepts ``Ig`` (not the pipeline label ``BCR``) for
     # immunoglobulin sequences.  Keep BCR/TCR only for our internal grouping.
     seqtype="TCR" if chain in TCR else "Ig"
-    args=[str(BIN),"-query",str(fasta),"-germline_db_V",str(v),"-germline_db_J",str(j),"-auxiliary_data",str(aux),"-organism",SPECIES,"-ig_seqtype",seqtype,"-num_threads",str(THREADS),"-outfmt","19","-out",str(raw)]
+    args=[str(BIN),"-query",str(fasta),"-germline_db_V",str(v),"-germline_db_J",str(j),"-num_alignments_V","1","-num_alignments_D","1","-num_alignments_J","1","-auxiliary_data",str(aux),"-organism",SPECIES,"-ig_seqtype",seqtype,"-num_threads",str(THREADS),"-outfmt","19","-out",str(raw)]
     d=database(chain,"D")
     if blastdb_exists(d): args[args.index("-germline_db_J"):args.index("-germline_db_J")]=["-germline_db_D",str(d)]
     c=database(chain,"C")
@@ -134,7 +150,14 @@ def run_task(job: tuple[str, str, str, str, str]):
     if rc or not raw.is_file(): result["error"]=f"igblast_failed exit={rc}"; raw.unlink(missing_ok=True); return result
     try:
         PROGRESS.update(job, 'filtering')
-        counts=filter_mapping_airr(raw,filtered,chain); raw.unlink(missing_ok=True)
+        counts=filter_mapping_airr(raw,filtered,chain,trace_context=dict(
+            output_root=str(ROOT), dataset=DATASET_LABEL, sample=sample, pair=pair,
+            fasta=str(original_fasta), mapping_fasta=str(fasta), primer_preparation=primer_preparation, dependency=DEPENDENCIES['chains'][chain],
+            reads={'raw_R1':raw_r1,'raw_R2':RAW_PAIRS.get((sample,pair,raw_r1)),
+                   **{f'{label}_{mate}':str(ROOT/stage/DATASET_LABEL/('data' if label=='fastp' else '')/relative_stage/f'{pp}_{mate}.fq.gz')
+                      for label,stage in (('fastp','02.fastp'),('clean','03.clean_data')) for mate in ('R1','R2')}},
+            databases={part: str(database(chain, part)) for part in ('V','D','J','C') if blastdb_exists(database(chain, part))}))
+        if counts.get('trace_complete',1): raw.unlink(missing_ok=True)
         result.update(counts,status="OK",path=filtered)
         PROGRESS.update(job, 'publishing')
         marker_temp=Path(str(marker)+".tmp")
@@ -157,22 +180,25 @@ def main() -> int:
             if row.get("status","").upper()!="OK": continue
             chains=[chain for chain in row.get("igblast_chains","").split(",") if chain in SUPPORTED]
             key=(row.get("sample_id",""),row.get("pair_id",""),row.get("r1_path",""))
+            RAW_PAIRS[key] = row.get('r2_path')
             for chain in chains:
                 task_key=key+(chain,)
                 if task_key not in seen:
                     seen.add(task_key); jobs.append((key[0],key[1],chain,key[2],row.get("species","") or SPECIES))
     if not jobs: raise SystemExit("no valid sample-specific Chain tasks in manifest")
+    if os.environ.get('SCIGBLAST_RUN_IGBLAST_SPECIES') and any(job[4].strip().lower() != SPECIES.lower() for job in jobs):
+        raise SystemExit('Manifest species does not match the selected IgBLAST database')
     OUTPUT.mkdir(parents=True,exist_ok=True); results=[]
     # Remove legacy aggregates owned by this invocation. Publish only per-chain
     # TSVs; successful task outputs remain available for resume.
     for sample,pair,chain,raw_r1,_ in jobs:
-        rel_stage=stage_dir(relative_parent(raw_r1),safe(Path(str(pair).replace("\\","/")).name),safe(sample))
+        rel_stage=unified_stage_relative(sample, pair) if os.environ.get('SCIGBLAST_BASE_LAYOUT') == 'sample_pair_v1' else stage_dir(relative_parent(raw_r1),safe(Path(str(pair).replace("\\","/")).name),safe(sample))
         (OUTPUT/rel_stage/("TCR.tsv" if chain in TCR else "BCR.tsv")).unlink(missing_ok=True)
     for name in ("igblast_summary.tsv","chain_summary.csv"):
         (OUTPUT/name).unlink(missing_ok=True)
     if not shutil.which(BIN): raise SystemExit("igblastn not found")
     DEPENDENCIES=dependency_snapshot(mode="base",db_root=DB_ROOT,binary=BIN,species=SPECIES,
-        database_version=SPECIES,threads=THREADS,chains=[job[2] for job in jobs],
+        database_version=DATABASE,threads=THREADS,chains=[job[2] for job in jobs],
         implementation=PIPELINE/"05.work_igblastn.sh",inherited=os.environ.get("SCIGBLAST_IGBLAST_DEPENDENCIES",""))
     PROGRESS = Progress('05.igblast', [(job, job[0], job[1], job[2]) for job in jobs], MAX_JOBS)
     def tracked_task(job):

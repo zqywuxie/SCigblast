@@ -92,8 +92,9 @@ check_idle() {
   local running
   running="$("${compose[@]}" ps --status running -q "$SERVICE")" || die "无法检查现有容器状态。"
   if [[ -n "$running" ]]; then
-    log "检查现有服务是否还有运行或排队任务"
-    "${compose[@]}" exec -T "$SERVICE" python -c 'import json,urllib.request,sys; s=json.load(urllib.request.urlopen("http://127.0.0.1:8000/health",timeout=5)); sys.exit(1 if s.get("active_jobs",0) or s.get("queued_jobs",0) else 0)' || die "服务仍有任务或无法确认状态；请先在网页停止任务，再部署。"
+    log "检查主分析、后分析、树图及归档状态"
+    [[ -f "${WEB_DIR}/deployment.py" ]] || die "缺少部署状态检查脚本。"
+    "${compose[@]}" exec -T "$SERVICE" python - < "${WEB_DIR}/deployment.py" || die "服务仍有活动任务或无法确认状态；请等待任务结束（或在网页取消分析任务）后再部署，归档任务请等待完成。"
   fi
 }
 check_idle

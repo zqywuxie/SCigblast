@@ -5,10 +5,12 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUNTIME_OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-}"
 RUNTIME_DATASET_LABEL="${SCIGBLAST_DATASET_LABEL:-}"
 RUNTIME_RAW_INPUT_DIR="${RAW_INPUT_DIR:-}"
+RUNTIME_FORCE_RERUN="${SCIGBLAST_FORCE_RERUN:-}"
 source "${SCRIPT_DIR}/00.pipeline_config.env" 2>/dev/null || true
 [[ -n "$RUNTIME_OUTPUT_ROOT" ]] && SCIGBLAST_OUTPUT_ROOT="$RUNTIME_OUTPUT_ROOT"
 [[ -n "$RUNTIME_DATASET_LABEL" ]] && SCIGBLAST_DATASET_LABEL="$RUNTIME_DATASET_LABEL"
 [[ -n "$RUNTIME_RAW_INPUT_DIR" ]] && RAW_INPUT_DIR="$RUNTIME_RAW_INPUT_DIR"
+[[ -n "$RUNTIME_FORCE_RERUN" ]] && export SCIGBLAST_FORCE_RERUN="$RUNTIME_FORCE_RERUN"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-${OUTPUT_ROOT:-${SCRIPT_DIR}/../output}}"; RAW_INPUT_DIR="${RAW_INPUT_DIR:-}"
 DATASET_LABEL="${SCIGBLAST_DATASET_LABEL:-}"
@@ -25,13 +27,17 @@ for value in "$THREADS" "$REQUESTED_WORKERS" "$THREAD_BUDGET" "$MEMORY_BUDGET_GB
 by_threads=$((THREAD_BUDGET/THREADS)); by_memory=$((MEMORY_BUDGET_GB/MEMORY_PER_WORKER_GB)); ((by_threads>0))||by_threads=1; ((by_memory>0))||by_memory=1
 EFFECTIVE_WORKERS="$REQUESTED_WORKERS"; ((EFFECTIVE_WORKERS>by_threads))&&EFFECTIVE_WORKERS="$by_threads"; ((EFFECTIVE_WORKERS>by_memory))&&EFFECTIVE_WORKERS="$by_memory"; mkdir -p "$OUTPUT"
 
-mapfile -t JOBS < <("$PYTHON_BIN" - "$MANIFEST" "$RAW_INPUT_DIR" <<'PY'
-import csv,re,sys
+mapfile -t JOBS < <("$PYTHON_BIN" - "$MANIFEST" "$RAW_INPUT_DIR" "${SCRIPT_DIR}/../.." <<'PY'
+import csv,re,sys,os
 from pathlib import Path, PurePosixPath
+sys.path.insert(0, sys.argv[3])
+from pipeline_input_manifest import unified_stage_relative
 manifest,raw=Path(sys.argv[1]),Path(sys.argv[2]).resolve() if sys.argv[2] else None; seen=set()
 def safe(v): return re.sub(r'[^A-Za-z0-9._-]+','_',str(v)).strip('_') or 'unnamed'
 def stage_path(rel, pair_id, sample):
     pair_stem=PurePosixPath(pair_id).name
+    if os.environ.get('SCIGBLAST_BASE_LAYOUT') == 'sample_pair_v1':
+        return pair_stem, unified_stage_relative(sample, pair_id).as_posix()
     values=[]
     for value in (rel if rel != '.' else '', pair_stem, sample):
         for part in PurePosixPath(value).parts:
@@ -57,10 +63,12 @@ log "stage_start total=${total} requested_workers=${REQUESTED_WORKERS} effective
 run_one(){
   local sample="$1" pair="$2" rel="$3" index="$4" ibase="$INPUT" obase="$OUTPUT" ss pp r1 r2 fasta marker logfile fingerprint tmp input_pairs merged pct
   ss=$(printf '%s' "$sample"|tr -cs 'A-Za-z0-9._-' '_'); pp=$(printf '%s' "$pair"|tr -cs 'A-Za-z0-9._-' '_'); [[ "$rel" != "." ]]&&ibase="${ibase}/${rel}"&&obase="${obase}/${rel}"; mkdir -p "$obase"
+  if [[ "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then pp=$(printf '%s' "$pp" | sed -E 's/^_+//;s/_+$//'); pp="${pp:-unnamed}"; fi
   r1="${ibase}/${pp}_R1.fq.gz"; r2="${ibase}/${pp}_R2.fq.gz"; fasta="${obase}/${pp}_merged.fasta"; marker="${obase}/.DONE"; logfile="${obase}/pandaseq.log"; row_file="${SUMMARY}.row.${index}"
   if [[ ! -s "$r1" || ! -s "$r2" ]]; then printf '%s,%s,0,0,0,ERROR,missing_canonical_clean_FASTQ\n' "$sample" "$pair" > "$row_file"; return 1; fi
-  fingerprint=$(printf '%s\0%s\0%s\0%s\0%s' "$r1" "$r2" "$(stat -c '%s:%Y' "$r1")" "$(stat -c '%s:%Y' "$r2")" "$THREADS" | sha256sum | awk '{print $1}')
-  if [[ -s "$fasta" && -s "$marker" ]]&&grep -qx 'status=DONE' "$marker"&&grep -qx "job_fingerprint=${fingerprint}" "$marker"; then
+  fingerprint=$(printf '%s\0%s\0%s\0%s\0%s' "$r1" "$r2" "$(stat -c '%s:%y' "$r1")" "$(stat -c '%s:%y' "$r2")" "$THREADS" | sha256sum | awk '{print $1}')
+  if [[ "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then fingerprint=$(printf '%s\0%s\0%s' "$fingerprint" "$PANDASEQ_BIN" "$(sha256sum "$0")" | sha256sum | awk '{print $1}'); fi
+  if [[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 && -s "$fasta" && -s "$marker" ]]&&grep -qx 'status=DONE' "$marker"&&grep -qx "job_fingerprint=${fingerprint}" "$marker"; then
     input_pairs=$(awk -F= '$1=="input_pairs"{print $2}' "$marker"); merged=$(awk -F= '$1=="merged_sequences"{print $2}' "$marker"); input_pairs=${input_pairs:-0}; merged=${merged:-0}; pct=$(awk -v a="$merged" -v b="$input_pairs" 'BEGIN{printf "%.2f",b?a*100/b:0}'); printf '%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; log "skip sample=${sample} pair=${pair}"; return 0
   fi
   tmp="${fasta}.tmp.${BASHPID}"

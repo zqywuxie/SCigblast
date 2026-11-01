@@ -8,6 +8,7 @@
 !web/check_bundle.py
 !web/app.py
 !web/preflight.py
+!web/deployment.py
 !web/table_preview.py
 !web/process_identity.py
 !web/artifact_download.py
@@ -52,3 +53,10 @@
 !web/derived_store.py
 !analysis/__init__.py
 !analysis/treemap/*.py
+!analysis/repertoire/*.py
+!pipeline_trace.py
+!pipeline_primer.py
+!pipeline_stage_metrics.py
+!web/repertoire_analysis.py
+
+!pipeline_airr_preprocessing.py

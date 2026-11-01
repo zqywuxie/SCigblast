@@ -5,10 +5,12 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUNTIME_OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-}"
 RUNTIME_DATASET_LABEL="${SCIGBLAST_DATASET_LABEL:-}"
 RUNTIME_RAW_INPUT_DIR="${RAW_INPUT_DIR:-}"
+RUNTIME_FORCE_RERUN="${SCIGBLAST_FORCE_RERUN:-}"
 source "${SCRIPT_DIR}/00.pipeline_config.env" 2>/dev/null || true
 [[ -n "$RUNTIME_OUTPUT_ROOT" ]] && SCIGBLAST_OUTPUT_ROOT="$RUNTIME_OUTPUT_ROOT"
 [[ -n "$RUNTIME_DATASET_LABEL" ]] && SCIGBLAST_DATASET_LABEL="$RUNTIME_DATASET_LABEL"
 [[ -n "$RUNTIME_RAW_INPUT_DIR" ]] && RAW_INPUT_DIR="$RUNTIME_RAW_INPUT_DIR"
+[[ -n "$RUNTIME_FORCE_RERUN" ]] && export SCIGBLAST_FORCE_RERUN="$RUNTIME_FORCE_RERUN"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-${OUTPUT_ROOT:-${SCRIPT_DIR}/../output}}"
 RAW_INPUT_DIR="${RAW_INPUT_DIR:-}"
@@ -35,14 +37,18 @@ workers_by_threads=$(( THREAD_BUDGET / THREADS )); workers_by_memory=$(( MEMORY_
 EFFECTIVE_WORKERS="$REQUESTED_WORKERS"; (( EFFECTIVE_WORKERS > workers_by_threads )) && EFFECTIVE_WORKERS="$workers_by_threads"; (( EFFECTIVE_WORKERS > workers_by_memory )) && EFFECTIVE_WORKERS="$workers_by_memory"
 mkdir -p "$OUTPUT"
 
-mapfile -t JOBS < <("$PYTHON_BIN" - "$MANIFEST" "$RAW_INPUT_DIR" <<'PY'
-import csv,re,sys
+mapfile -t JOBS < <("$PYTHON_BIN" - "$MANIFEST" "$RAW_INPUT_DIR" "${SCRIPT_DIR}/../.." <<'PY'
+import csv,re,sys,os
 from pathlib import Path, PurePosixPath
+sys.path.insert(0, sys.argv[3])
+from pipeline_input_manifest import unified_stage_relative
 manifest,raw=Path(sys.argv[1]),Path(sys.argv[2]).resolve() if sys.argv[2] else None
 seen=set()
 def safe(v): return re.sub(r'[^A-Za-z0-9._-]+','_',str(v)).strip('_') or 'unnamed'
 def stage_path(rel, pair_id, sample):
     pair_stem=PurePosixPath(pair_id).name
+    if os.environ.get('SCIGBLAST_BASE_LAYOUT') == 'sample_pair_v1':
+        return pair_stem, unified_stage_relative(sample, pair_id).as_posix()
     values=[]
     for value in (rel if rel != '.' else '', pair_stem, sample):
         for part in PurePosixPath(value).parts:
@@ -69,30 +75,36 @@ clean_one_read(){
   # previously raised "dst: unbound variable" for every sample.
   local src="$1" dst="$2" read_number="$3" tmp
   tmp="${dst%.gz}.tmp.${BASHPID}.gz"
+  local count_tmp="${tmp}.reads"
   local awk_program='(NR-1)%4==0 { split($0,f,/[[:space:]]+/); h=f[1]; sub(/^@/,"",h); sub(/#.*/,"",h); sub(/\/[12]$/, "", h); n=split(h,a,":"); limit=(n>=8?7:n); for(i=4;i<=limit;i++){gsub(/[A-Za-z]/,"",a[i]); sub(/^0+/,"",a[i]); if(a[i]=="")a[i]="0"}; out=a[1]; for(i=2;i<=limit;i++)out=out ":" a[i]; print "@" out "/" suffix; next } { print }'
+  awk_program+=' END { print (NR % 4 == 0 ? NR/4 : "unknown") > count_file }'
   if [[ -n "$PIGZ" ]]; then
-    if "$PIGZ" -dc -p "$THREADS" "$src" | awk -v suffix="$read_number" "$awk_program" | "$PIGZ" -p "$THREADS" > "$tmp"; then mv -f "$tmp" "$dst"; return 0; fi
+    if "$PIGZ" -dc -p "$THREADS" "$src" | awk -v suffix="$read_number" -v count_file="$count_tmp" "$awk_program" | "$PIGZ" -p "$THREADS" > "$tmp"; then mv -f "$tmp" "$dst"; CLEAN_READ_COUNT="$(cat "$count_tmp")"; rm -f "$count_tmp"; return 0; fi
   else
-    if gzip -dc "$src" | awk -v suffix="$read_number" "$awk_program" | gzip -c > "$tmp"; then mv -f "$tmp" "$dst"; return 0; fi
+    if gzip -dc "$src" | awk -v suffix="$read_number" -v count_file="$count_tmp" "$awk_program" | gzip -c > "$tmp"; then mv -f "$tmp" "$dst"; CLEAN_READ_COUNT="$(cat "$count_tmp")"; rm -f "$count_tmp"; return 0; fi
   fi
-  rm -f "$tmp"; return 1
+  rm -f "$tmp" "$count_tmp"; return 1
 }
 
 total=${#JOBS[@]}; completed=0; success=0; failed=0; declare -a PIDS=(); declare -A PID_LABEL=()
 log "stage_start total=${total} requested_workers=${REQUESTED_WORKERS} effective_workers=${EFFECTIVE_WORKERS} threads_per_worker=${THREADS} memory_per_worker_gb=${MEMORY_PER_WORKER_GB}"
 
 run_one(){
-  local sample="$1" pair="$2" rel="$3" input_base="$INPUT" output_base="$OUTPUT" ss pp r1 r2 o1 o2 marker fingerprint
+  local sample="$1" pair="$2" rel="$3" input_base="$INPUT" output_base="$OUTPUT" ss pp r1 r2 o1 o2 marker fingerprint n1 n2
   ss=$(printf '%s' "$sample" | tr -cs 'A-Za-z0-9._-' '_'); pp=$(printf '%s' "$pair" | tr -cs 'A-Za-z0-9._-' '_')
+  if [[ "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then pp=$(printf '%s' "$pp" | sed -E 's/^_+//;s/_+$//'); pp="${pp:-unnamed}"; fi
   [[ "$rel" != "." ]] && input_base="${input_base}/${rel}" && output_base="${output_base}/${rel}"
   mkdir -p "$output_base"
   r1="${input_base}/${pp}_R1.fq.gz"; r2="${input_base}/${pp}_R2.fq.gz"; o1="${output_base}/${pp}_R1.fq.gz"; o2="${output_base}/${pp}_R2.fq.gz"; marker="${output_base}/.DONE"
   [[ -s "$r1" && -s "$r2" ]] || { log "missing canonical input sample=${sample} pair=${pair}"; return 1; }
-  fingerprint=$(printf '%s\0%s\0%s\0%s\0%s' "$r1" "$r2" "$(stat -c '%s:%Y' "$r1")" "$(stat -c '%s:%Y' "$r2")" 'canonical_R1_R2_v1' | sha256sum | awk '{print $1}')
-  if [[ -s "$marker" && -s "$o1" && -s "$o2" ]] && grep -qx 'status=DONE' "$marker" && grep -qx "job_fingerprint=${fingerprint}" "$marker" && gzip -t "$o1" "$o2" 2>/dev/null; then log "skip sample=${sample} pair=${pair}"; return 0; fi
+  fingerprint=$(printf '%s\0%s\0%s\0%s\0%s' "$r1" "$r2" "$(stat -c '%s:%y' "$r1")" "$(stat -c '%s:%y' "$r2")" 'canonical_R1_R2_v1' | sha256sum | awk '{print $1}')
+  if [[ "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then fingerprint=$(printf '%s\0%s' "$fingerprint" "$(sha256sum "$0")" | sha256sum | awk '{print $1}'); fi
+  if [[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 && -s "$marker" && -s "$o1" && -s "$o2" ]] && grep -qx 'status=DONE' "$marker" && grep -qx "job_fingerprint=${fingerprint}" "$marker" && gzip -t "$o1" "$o2" 2>/dev/null; then log "skip sample=${sample} pair=${pair}"; return 0; fi
   clean_one_read "$r1" "$o1" 1 || return 1
+  n1="$CLEAN_READ_COUNT"
   clean_one_read "$r2" "$o2" 2 || return 1
-  { printf 'status=DONE\nmanifest_schema_version=2\nstage=clean\nversion=%s\njob_fingerprint=%s\noutput_naming_schema=baseline_pair_sample_v2\nsample_id=%s\npair_id=%s\n' "$STAGE_VERSION" "$fingerprint" "$sample" "$pair"; } > "${marker}.tmp.${BASHPID}"
+  n2="$CLEAN_READ_COUNT"
+  { printf 'status=DONE\nmanifest_schema_version=2\nstage=clean\nversion=%s\njob_fingerprint=%s\noutput_naming_schema=baseline_pair_sample_v2\nsample_id=%s\npair_id=%s\nr1_reads=%s\nr2_reads=%s\n' "$STAGE_VERSION" "$fingerprint" "$sample" "$pair" "$n1" "$n2"; } > "${marker}.tmp.${BASHPID}"
   mv -f "${marker}.tmp.${BASHPID}" "$marker"
 }
 
@@ -103,15 +115,20 @@ while (( ${#PIDS[@]} )); do pid="${PIDS[0]}"; PIDS=("${PIDS[@]:1}"); collect_one
 "$PYTHON_BIN" - "$OUTPUT" "$SUMMARY" <<'PY'
 import csv,os,sys
 from pathlib import Path
-root,out=Path(sys.argv[1]),Path(sys.argv[2]); rows=[]
+root,out=Path(sys.argv[1]),Path(sys.argv[2]); rows=[]; count_rows=[]
 for marker in sorted(root.rglob('.DONE')):
     values=dict(line.split('=',1) for line in marker.read_text(encoding='utf-8',errors='ignore').splitlines() if '=' in line)
     if values.get('stage')!='clean' or values.get('status')!='DONE': continue
     r1=sorted(marker.parent.glob('*_R1.fq.gz')); r2=sorted(marker.parent.glob('*_R2.fq.gz'))
+    count_rows.append({'sample_id':values.get('sample_id',marker.parent.name),'pair_id':values.get('pair_id',marker.parent.parent.name),'r1_reads':values.get('r1_reads',''),'r2_reads':values.get('r2_reads',''),'status':'OK'})
     rows.append({'sample_id':values.get('sample_id', marker.parent.name),'pair_id':values.get('pair_id', marker.parent.parent.name),'status':'OK','error':'','output_dir':marker.parent.relative_to(root).as_posix(),'r1_output':str(r1[0]) if r1 else '', 'r2_output':str(r2[0]) if r2 else ''})
 fields=['sample_id','pair_id','status','error','output_dir','r1_output','r2_output']; tmp=out.with_suffix(out.suffix+'.tmp')
 with tmp.open('w',encoding='utf-8',newline='') as fh: writer=csv.DictWriter(fh,fieldnames=fields); writer.writeheader(); writer.writerows(rows)
 os.replace(tmp,out)
+count_out=root/'clean_counts.csv'; count_tmp=count_out.with_suffix('.csv.tmp')
+with count_tmp.open('w',encoding='utf-8',newline='') as fh:
+    writer=csv.DictWriter(fh,fieldnames=['sample_id','pair_id','r1_reads','r2_reads','status']); writer.writeheader(); writer.writerows(count_rows)
+os.replace(count_tmp,count_out)
 PY
 log "completed=${success} failed=${failed} total=${total} summary=${SUMMARY}"
 (( total > 0 && failed == 0 ))

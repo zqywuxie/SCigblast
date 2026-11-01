@@ -370,12 +370,13 @@ def load_metadata(path: Path, sheet: str | None, sample_column: str, barcode_col
                 candidates = [i for i, value in enumerate(normalized) if "barcode" in value and ("候选" in value or "引物" in value or "primer" in value)]
                 barcode_idx = candidates[0] if len(candidates) == 1 else None
             break
-    if header_index is None or sample_idx is None or barcode_idx is None:
+    if header_index is None or sample_idx is None or (barcode_idx is None and not NO_BARCODE):
         raise ValueError(f"Could not resolve sample/barcode columns in {path}")
     headers = rows[header_index]
     dual_idx = resolve_optional_column(headers, dual_column, "dual")
     note_idx = resolve_optional_column(headers, note_column, "note")
     chain_idx = resolve_optional_column(headers, chain_column, "chain")
+    species_idx = next((i for i, name in enumerate(headers) if normalize_text(name) in {'species', 'speicies'}), None)
     if chain_idx is None:
         raise ValueError(f"Could not resolve Chain column in {path}")
     records: list[MetadataRecord] = []
@@ -388,9 +389,13 @@ def load_metadata(path: Path, sheet: str | None, sample_column: str, barcode_col
         if row_note:
             current_note = row_note
         sample_id = display_text(row[sample_idx] if sample_idx < len(row) else "")
-        candidate = display_text(row[barcode_idx] if barcode_idx < len(row) else "")
+        candidate = display_text(row[barcode_idx] if barcode_idx is not None and barcode_idx < len(row) else "")
         if not sample_id or normalize_text(sample_id) == sample_target:
             continue
+        if os.environ.get('SCIGBLAST_RUN_IGBLAST_SPECIES') and species_idx is not None and species_idx < len(row):
+            submitted_species = display_text(row[species_idx]).strip().casefold()
+            if submitted_species and submitted_species != DEFAULT_SPECIES.casefold():
+                raise ValueError(f"Submission species {submitted_species!r} conflicts with selected species {DEFAULT_SPECIES!r}: {sample_id}")
         if NO_BARCODE:
             barcode_name = ""
             barcode_sequence = ""
@@ -647,9 +652,20 @@ def build_rows(input_dir: Path, records: list[MetadataRecord]) -> list[dict[str,
 
 def validate_pairs(rows: list[dict[str, str]]) -> None:
     seen: set[tuple[str, str, str, str]] = set()
+    paths = {}
+    if os.environ.get('SCIGBLAST_BASE_LAYOUT') == 'sample_pair_v1':
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from pipeline_input_manifest import unified_stage_relative
     for row in rows:
         if row.get("status") != "OK":
             continue
+        if os.environ.get('SCIGBLAST_BASE_LAYOUT') == 'sample_pair_v1':
+            output = str(unified_stage_relative(row.get('sample_id', ''), row.get('pair_id', ''))).casefold()
+            identity = (row.get('sample_id', ''), row.get('pair_id', ''), row.get('r1_path', ''), row.get('r2_path', ''))
+            if output in paths and paths[output] != identity:
+                row['status'], row['error'] = 'ERROR', 'sample/pair output path collision'
+                continue
+            paths[output] = identity
         key = (row.get("pair_id", ""), row.get("sample_id", ""),
                row.get("barcode_name", ""), row.get("igblast_chains", ""))
         if key in seen:

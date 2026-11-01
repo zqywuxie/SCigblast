@@ -1,6 +1,9 @@
 # Runtime state and local deployment secrets
 web/.env
 web/runtime/
+# Server-local IgBLAST binaries, reference indices, and migration backups
+/igblast/
+/.igblast-migration/
 
 # Python caches
 __pycache__/

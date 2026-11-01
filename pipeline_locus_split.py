@@ -19,7 +19,7 @@ MAPPING_FILTER_VERSION = 'productive-valid-v-selected-locus-v1'
 BAD_V = frozenset(('', '*', '-', 'NA', 'N/A', 'NONE', 'NULL', 'NO_HIT', 'UNMAPPED', 'NOT_FOUND'))
 
 
-def filter_mapping_airr(source, target, chain):
+def filter_mapping_airr(source, target, chain, *, trace_context=None):
     """Filter one completed mapping task in one pass, before its DONE marker."""
     chain = str(chain).strip().upper()
     if chain not in CHAINS:
@@ -27,8 +27,17 @@ def filter_mapping_airr(source, target, chain):
     report = dict(raw_rows=0, mapped_rows=0, productive_rows=0, output_rows=0,
                   locus_input_rows=0, excluded_locus_rows=0, unknown_locus_rows=0,
                   locus_filter_version=1)
+    capture = None
+    trace_error = None
+    if trace_context:
+        try:
+            from pipeline_trace import begin
+            capture = begin(dict(trace_context, output_path=str(Path(target).resolve())), chain)
+        except Exception as error:
+            trace_error = str(error)
 
     def write(handle):
+        nonlocal capture, trace_error
         header = None
         with Path(source).open(encoding='utf-8-sig', newline='') as incoming:
             writer = csv.writer(handle, delimiter='\t', lineterminator='\n')
@@ -52,10 +61,19 @@ def filter_mapping_airr(source, target, chain):
                 good_p = pi >= 0 and record[pi].strip().upper() in {'T', 'TRUE'}
                 report['mapped_rows'] += int(good_v)
                 report['productive_rows'] += int(good_p)
+                locus = record[li].strip().upper()
+                reason = ('no_v_call' if not good_v else 'nonproductive_or_unknown' if not good_p else
+                          'unknown_locus' if locus not in CHAINS else 'different_locus' if locus != chain else 'retained')
+                if capture:
+                    try:
+                        capture.record(dict(zip(header, record)), reason)
+                    except Exception as error:
+                        trace_error = str(error)
+                        capture.abort()
+                        capture = None
                 if not good_v or not good_p:
                     continue
                 report['locus_input_rows'] += 1
-                locus = record[li].strip().upper()
                 if locus == chain:
                     writer.writerow(record)
                     report['output_rows'] += 1
@@ -65,7 +83,22 @@ def filter_mapping_airr(source, target, chain):
         if header is None:
             raise ValueError(f'malformed IgBLAST AIRR TSV: {source}')
 
-    atomic_text(target, write)
+    try:
+        atomic_text(target, write)
+    except Exception:
+        if capture:
+            capture.abort()
+        raise
+    if capture:
+        try:
+            capture.publish(report)
+        except Exception as error:
+            trace_error = str(error)
+            capture.abort()
+    if trace_context:
+        report['trace_complete'] = int(not trace_error)
+        if trace_error:
+            print(f'[TRACE] incomplete; retaining raw AIRR: {trace_error}', flush=True)
     return report
 
 

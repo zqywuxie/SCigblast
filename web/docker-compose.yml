@@ -20,6 +20,7 @@ services:
       start_period: 10s
     environment:
       SCIGBLAST_PIPELINE_ROOT: /opt/scigblast
+      SCIGBLAST_REFERENCE_ROOT: /opt/scigblast/igblast
       SCIGBLAST_STATE_DIR: /var/lib/scigblast-web
       HOME: /var/lib/scigblast-web/home
       XDG_CACHE_HOME: /var/lib/scigblast-web/home/.cache
@@ -41,7 +42,11 @@ services:
       SCIGBLAST_ADMIN_DISPLAY_NAME: ${SCIGBLAST_ADMIN_DISPLAY_NAME:-}
     volumes:
       - ${SCIGBLAST_HOST_COLD_DATA:-/colddata}:/colddata:ro
-      - /data/scAnalyis/Scigblast/igblast:/data/scAnalyis/Scigblast/igblast:ro
+      # One project-local reference copy for every pipeline.
+      - ${SCIGBLAST_HOST_IGBLAST_ROOT:-../igblast}:/opt/scigblast/igblast:ro
+      # Old images and historical configurations resolve to the same copy.
+      - ${SCIGBLAST_HOST_IGBLAST_ROOT:-../igblast}:/data/scAnalyis/Scigblast/igblast:ro
+      - ${SCIGBLAST_HOST_IGBLAST_ROOT:-../igblast}:/colddata/zqy/igblast:ro
       - ${SCIGBLAST_HOST_RESULTS_ROOT:-/colddata/SCigblast/results}:/colddata/SCigblast/results:rw
       # Compatibility mount for historical job paths.
       - ${SCIGBLAST_HOST_RESULTS_ROOT:-/colddata/SCigblast/results}:/colddata/zqy/SCigblast/results:rw

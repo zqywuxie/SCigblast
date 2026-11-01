@@ -12,7 +12,7 @@
   const statusText = (value) => statusLabel[value] || value;
   const isActive = (job) => activeStates.has(job.status);
   const isDone = (job) => doneStates.has(job.status);
-  let formDefaults = {}, mappingRows = [], mappingSelected = new Set(), mappingPage = 0, taskSubmitting = false;
+  let formDefaults = {}, igblastReferences = {}, mappingRows = [], mappingSelected = new Set(), mappingPage = 0, taskSubmitting = false;
   const mappingPageSize = 20;
   let scanGeneration = 0, scannedInput = '', mappingCurrent=false, mappingScanning=false, validationGeneration = 0, lastJobsUpdate = '';
   const pipelineDescriptions = {ir_split:'Bulk IR FASTQ → 样本 UMI 与免疫指标', '10x_split':'单细胞 FASTQ → 细胞链与 UMI 结果', igblast_base:'通用 FASTQ → IgBLAST 注释', pig_igblast:'猪 FASTQ → 专属参考库注释', mapping:'免疫组库 CSV → 各样本 UMI count'};
@@ -99,6 +99,8 @@
   function taskBody(form) {
     const body = Object.fromEntries(new FormData(form).entries());
     body.generate_treemap = form.elements.generate_treemap.checked;
+    body.generate_report = ['igblast_base','pig_igblast'].includes(body.pipeline)&&form.elements.generate_report.checked;
+    if(['igblast_base','pig_igblast'].includes(body.pipeline))body.primer_analysis=window.RepertoireReports.configPanel(document.querySelector('#task-report-options .rp-config')).value();
     if (body.pipeline === 'mapping') {
       body.mapping_chains = mappingSelection();
       body.mapping_samples = mappingSampleSelection();
@@ -111,6 +113,7 @@
     return body;
   }
   function resetForm() {
+    window.RepertoireReports?.configPanel(document.querySelector('#task-report-options .rp-config')).reset();
     $('#new-job-form').reset();
     DirectoryInput.reset();
     $('[name=input_path]').readOnly=false;
@@ -184,19 +187,21 @@
   function selectedPipeline() { return $('#pipeline').value; }
   async function loadPipelines() {
     pipelineInfo = await Submission.api('/api/pipelines');
+    igblastReferences = await Submission.api('/api/igblast-references');
+    $('#igblast-species').innerHTML = Object.keys(igblastReferences).map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
     const defaults = await Submission.api('/api/defaults');
     formDefaults = defaults;
     $('#barcode-hint').textContent = `留空使用默认 Barcode：${defaults.barcode_csv || '由服务器配置'}`;
     $('#output-hint').textContent = `${defaults.output_base}/姓名_短编号/Pipeline类型/YYYYMMDD_HHMMSS/（北京时间）`;
     $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
     $('#pipeline').value = 'ir_split';
-    $('#help-pipeline').innerHTML = $('#pipeline').innerHTML;
+    $('#help-pipeline').innerHTML = Object.entries(pipelineInfo).filter(([, info])=>info.new_job_visible !== false).map(([key, info])=>`<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
     $('#pipeline-help-open').disabled = false;
     updatePipelineFields();
   }
 
   function renderPipelineCards() {
-    const cards = Object.entries(pipelineInfo).map(([key, info]) => `<button type="button" class="pipeline-card ${key === selectedPipeline() ? 'selected' : ''}" data-pipeline="${key}" aria-pressed="${key === selectedPipeline()}"><span class="pipeline-dot ${info.accent || 'teal'}"></span><span class="pipeline-card-copy"><strong>${esc(info.label)}</strong><small>${esc(pipelineDescriptions[key] || info.description)}</small></span><span class="pipeline-card-check" aria-hidden="true">✓</span></button>`).join('');
+    const cards = Object.entries(pipelineInfo).filter(([, info])=>info.new_job_visible !== false).map(([key, info]) => `<button type="button" class="pipeline-card ${key === selectedPipeline() ? 'selected' : ''}" data-pipeline="${key}" aria-pressed="${key === selectedPipeline()}"><span class="pipeline-dot ${info.accent || 'teal'}"></span><span class="pipeline-card-copy"><strong>${esc(info.label)}</strong><small>${esc(pipelineDescriptions[key] || info.description)}</small></span><span class="pipeline-card-check" aria-hidden="true">✓</span></button>`).join('');
     $('#pipeline-cards').innerHTML = cards;
     document.querySelectorAll('.pipeline-card').forEach((card) => card.addEventListener('click', () => { $('#pipeline').value = card.dataset.pipeline; updatePipelineFields(); }));
   }
@@ -205,6 +210,10 @@
     invalidateValidation();
     const info = pipelineInfo[selectedPipeline()] || {};
     const mapping = selectedPipeline() === 'mapping';
+    $('#task-report-options').hidden=!['igblast_base','pig_igblast'].includes(selectedPipeline());
+    const referenceFields = $('#igblast-reference-fields');
+    referenceFields.classList.toggle('hidden', selectedPipeline() !== 'igblast_base');
+    referenceFields.disabled = selectedPipeline() !== 'igblast_base';
     const directory=DirectoryInput.active();
     $('#sample-source-field').classList.toggle('hidden',!info.supports_directory_input);
     $('#sample-source-field').disabled=!info.supports_directory_input||Boolean(DirectoryInput.editingJob());
@@ -234,6 +243,7 @@
       card.setAttribute('aria-pressed', String(selected));
     });
   }
+  $('#igblast-species').addEventListener('change', () => { DirectoryInput.setContext(); invalidateValidation(); });
 
   function renderHelp() {
     const key = $('#help-pipeline').value, info = pipelineInfo[key] || {};
@@ -266,6 +276,13 @@
       output:'05.igblastn_out 下的样本/链 TSV，以及 chain_summary.csv 的保留与排除统计。',
       note:'克隆树图和 Clone Top 直接使用第五阶段的最终链结果。'
     };
+    finalStages.igblast_base={
+      title:'AIRR 结果整理 · Preprocessing',
+      input:'第五阶段筛选后的各样本单链 AIRR TSV。',
+      processing:'复用现有 AIRR preprocessing 模型，按样本合并链数据，整理 Expression、Unique CDR3、多样性；BCR 同时计算 Isotype、CSR 和 SHM。',
+      output:'06.preprocessing 下的 Datapoint.csv、processing_manifest.csv 和按样本/链整理的 junction_peps。',
+      note:'Base 未提取 UMI 代表序列；兼容列 umi_counts 表示比对记录支持数，计数口径在整理清单中注明。'
+    };
     const finalStage = finalStages[key];
     const finalSection = finalStage ? `<section class="pipeline-final-stage" aria-labelledby="pipeline-final-title"><span class="pipeline-final-label">最后一步</span><h3 id="pipeline-final-title">${esc(finalStage.title)}</h3><dl><dt>输入</dt><dd>${esc(finalStage.input)}</dd><dt>处理</dt><dd>${esc(finalStage.processing)}</dd><dt>输出</dt><dd>${esc(finalStage.output)}</dd></dl><p class="pipeline-final-note">${esc(finalStage.note)}</p></section>` : '';
     const representative = ['ir_split', '10x_split'].includes(key) ? '<p><strong>代表序列：</strong>reads 数最高者优先；仅在并列时按平均期望错误数更低、平均质量更高排序。质量缺失或仍并列时采用确定性规则，并记录混淆和备选序列。</p>' : '';
@@ -273,7 +290,7 @@
       mapping: {input:'Human 免疫组库 CSV', output:'按样本与链整理的 UMI count 结果', folder:'remapping/input', expected:'识别 Demo_A、Demo_B 两个样本，IGH、IGK 两种链，共 3 个文件、6 条输入序列。默认全选样本；只选 IGK 时应处理 Demo_A 的 1 个文件。'},
       ir_split: {input:'Bulk IR 配对 FASTQ + Submission + Barcode', output:'样本 UMI、链结果与 Datapoint.csv 指标', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
       '10x_split': {input:'单细胞配对 FASTQ + Submission + Barcode', output:'按细胞 Barcode 整理的链与 UMI 结果', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
-      igblast_base: {input:'配对 FASTQ；扫描目录或使用 Submission', output:'IgBLAST AIRR 注释与比对汇总', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
+      igblast_base: {input:'配对 FASTQ；扫描目录或使用 Submission', output:'IgBLAST 注释、Datapoint 样本指标与 junction 序列', folder:'fastq/input', expected:'将 Submission 的 Note 改为解压后的 fastq/input 绝对路径。Match 应识别 Demo_A、Demo_B 两个样本的 2 对 FASTQ。'},
       pig_igblast: {input:'猪配对 FASTQ；扫描目录或使用 Submission', output:'使用猪参考库生成的 IgBLAST 注释', folder:'fastq/input', expected:'使用 pig_igblast.xlsx，保持 Species=Pig。将 Note 改为 fastq/input 的服务器绝对路径；Match 应识别 2 对 FASTQ。'}
     };
     const guide=teaching[key] || {input:info.description,output:'分析结果',folder:'',expected:''};
@@ -287,7 +304,7 @@
       <section class="guide-section"><h4>分析流程 <span>${(info.stages || []).length} 个阶段</span></h4><ol class="guide-flow">${(info.stages || []).map((stage,i)=>`<li><span>${String(i+1).padStart(2,'0')}</span><div><strong>${esc(info.stage_labels?.[stage] || stage)}</strong></div>${stage==='01.match'?'<em>需审核</em>':''}</li>`).join('')}</ol><p class="guide-review">${isMapping?'扫描目录后选择样本与链，无需 Match 审核。':'样本匹配完成后需审核，再继续后续步骤。'}</p></section>
       <details class="guide-technical"><summary>处理逻辑与结果字段</summary><p>${esc(details[key] || info.description)}</p>${finalSection}${representative}${isMapping ? '<p>CSV 文件名：样本__链.csv；必需列：CDR3(pep)、copy、joinedSeq。umi_count 从序列标识末尾还原原始 copy；结果条数不等于 copy 总和。</p>' : ''}</details></div>
       <aside class="guide-demo" aria-labelledby="guide-demo-title"><div class="guide-demo-heading"><h4 id="guide-demo-title">用示例数据练习</h4><span>合成数据 · v1</span></div><p>2 个样本，包含 CSV、配对 FASTQ、Submission 模板与 Barcode CSV。</p><a class="button button-ghost" href="/static/demos/scigblast-teaching-v1.zip" download>下载示例包 <span>ZIP ↓</span></a><h5>如何开始</h5><ol class="guide-instructions">${steps.map(step=>`<li>${esc(step)}</li>`).join('')}</ol><details class="guide-expected"><summary>练习检查点</summary><p>${esc(guide.expected)}</p></details><p class="guide-demo-limit">合成数据仅用于操作练习。FASTQ 未模拟 IR / 10X 建库结构，继续分析可能为空或失败；reMapping 注释也可能为空，输入条数不代表最终结果。</p><a class="guide-readme" href="/static/demos/README.txt" download>详细教程与文件清单 TXT ↓</a></aside></div>`;
-    $('#help-pipeline-nav').innerHTML=Object.entries(pipelineInfo).map(([id,pipeline])=>`<button type="button" data-help-pipeline="${esc(id)}" aria-pressed="${id===key}">${esc(pipeline.label)}</button>`).join('');
+    $('#help-pipeline-nav').innerHTML=Object.entries(pipelineInfo).filter(([, pipeline])=>pipeline.new_job_visible !== false).map(([id,pipeline])=>`<button type="button" data-help-pipeline="${esc(id)}" aria-pressed="${id===key}">${esc(pipeline.label)}</button>`).join('');
     $('#guide-current-pipeline').textContent=`当前流程：${info.label}`;
     $('#pipeline-help-content').scrollTop=0;
 
@@ -565,7 +582,7 @@
   $('[name="submission_path"]').addEventListener('input', () => { resetSubmission(); $('#submission-status').textContent = '路径已变更，可查看 / 编辑新选择的 Submission'; });
   loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); resetForm(); refreshJobs();
     const editJob=new URLSearchParams(location.search).get('edit_input_job');
-    if(editJob){Submission.api(`/api/jobs/${encodeURIComponent(editJob)}/input-assignments`).then(async saved=>{openDrawer();$('#pipeline').value=saved.pipeline;$('[name=input_path]').value=saved.input_path;$('[name=input_path]').readOnly=true;$('[name=dataset_label]').value=saved.dataset_label;$('[name=generate_treemap]').checked=Boolean(saved.generate_treemap??saved.options?.generate_treemap);$('[name=sample_source][value=directory]').checked=true;DirectoryInput.edit({...saved,job_id:editJob});$('#drawer-title').textContent='修改目录样本 / 重新 Match';updatePipelineFields();await DirectoryInput.scan();}).catch(e=>showMessage(e.message,true));} }).catch(connectionError);
+    if(editJob){Submission.api(`/api/jobs/${encodeURIComponent(editJob)}/input-assignments`).then(async saved=>{openDrawer();$('#pipeline').value=saved.pipeline;if(saved.species)$('#igblast-species').value=saved.species;$('[name=input_path]').value=saved.input_path;$('[name=input_path]').readOnly=true;$('[name=dataset_label]').value=saved.dataset_label;$('[name=generate_treemap]').checked=Boolean(saved.generate_treemap??saved.options?.generate_treemap);$('[name=sample_source][value=directory]').checked=true;DirectoryInput.edit({...saved,job_id:editJob});$('#drawer-title').textContent='修改目录样本 / 重新 Match';updatePipelineFields();await DirectoryInput.scan();}).catch(e=>showMessage(e.message,true));} }).catch(connectionError);
   window.addEventListener('pageshow', event => { if(event.persisted) { resetForm(); closeDrawer(); refreshJobs(); } });
   document.addEventListener('visibilitychange', () => { clearTimeout(pollTimer); if (!document.hidden) refreshJobs(); });
 })();

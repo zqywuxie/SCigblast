@@ -13,7 +13,7 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
     with zipfile.ZipFile(demo_dir / 'scigblast-teaching-v1.zip') as archive:
         if archive.testzip() is not None or 'scigblast-teaching-v1/README.txt' not in archive.namelist():
             raise RuntimeError('Teaching demo archive is incomplete or corrupt')
-    for filename in ('pipeline_igblast_cache.py', 'pipeline_parallel.py', 'pipeline_progress.py', 'pipeline_locus_split.py', 'pipeline_input_manifest.py', 'pipeline_resource_lock.sh'):
+    for filename in ('pipeline_igblast_cache.py', 'pipeline_parallel.py', 'pipeline_progress.py', 'pipeline_locus_split.py', 'pipeline_trace.py', 'pipeline_primer.py', 'pipeline_stage_metrics.py', 'pipeline_input_manifest.py', 'pipeline_airr_preprocessing.py', 'pipeline_resource_lock.sh'):
         path = root / filename
         if not path.is_file():
             raise RuntimeError(f'Missing shared runner dependency: {path}')
@@ -21,11 +21,14 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
             ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
         else:
             subprocess.run(['bash', '-n', str(path)], check=True)
-    for filename in ('preflight.py', 'table_preview.py', 'process_identity.py', 'artifact_download.py', 'mapping_results.py', 'input_manifest.py', 'notifications.py', 'postanalysis.py', 'derived_store.py'):
+    for filename in ('preflight.py', 'deployment.py', 'table_preview.py', 'process_identity.py', 'artifact_download.py', 'mapping_results.py', 'input_manifest.py', 'notifications.py', 'postanalysis.py', 'derived_store.py', 'repertoire_analysis.py'):
         path = registry_path.parent / filename
         ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
     for filename in ('__init__.py','sources.py','aggregate.py','render.py','run.py','clone_table.py'):
         path = root / 'analysis' / 'treemap' / filename
+        ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
+    for filename in ('__init__.py','io.py','sources.py','catalog.py','matching.py','aggregate.py','usage.py','isotype.py','palette.py','render_usage.py','render_stages.py','workbook.py','workbook_overview.py','render.py','run.py'):
+        path = root / 'analysis' / 'repertoire' / filename
         ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
     registry = json.loads(registry_path.read_text(encoding='utf-8'))
     for pipeline in registry.values():

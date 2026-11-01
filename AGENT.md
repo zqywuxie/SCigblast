@@ -1,5 +1,49 @@
 # Repository Guidelines
 
+2026-11-01 配色v18 / Workbook v11：analysis/repertoire/palette.py统一语义色。数据阶段Raw蓝/Clean青绿/Merged紫/Retained暖橙，阶段矩阵每列仍按全批最大值缩放，用阶段独立渐变色键；匹配Unique蓝/Multiple橙/Unmatched灰；Isotype五主类各固定色，IgG亚类固定蓝色深浅；C构成沿用相同Isotype色，V红/J蓝/C紫保持原报告约定。标签按实际底色选择文字，填充内文本对比>=4.5:1。Excel分类表头/Tab/数据条分主题色，Web阶段卡和V/J/C卡加语义色边线并适配夜间。新增palette模块随Docker通配打包/check_bundle检查。统计VERSION仍v11，FIGURE_VERSION=v18、Workbook VERSION=v11变化触发重绘/重导出。模拟输出outputs/new_analysis_simulation_20261101_color_v18含181分析PNG与新Excel，旧v3保留供对比；各数值和范围与旧版逐项一致。
+
+2026-11-01 Workbook v10：总览移除Samples/Sample-chain pairs/Primers总数卡，改为类别、完整样本名、链、引物组/对应方式四列样本表；去重显示全部样本/链，不截断表格，Heavy/Light/TCR由链确定，引物组只来自catalog实际group，不从名称猜测，无组名则明示未提供。write_workbook新增可选catalog参数，run传入本次catalog；下方两张原生图保留且动态下移，图表最多12组预览，组名/样本换行行高在append前设置。引物计数的统计范围改数据范围：all=统计输入，retained=筛选后保留；这是包含关系，retained由mapping/筛选状态判定，不等于引物唯一匹配，数量及原始CSV字段不变。VERSION=experiment-check-workbook-v10-sample-overview。
+
+2026-11-01 Workbook v9：修复总览KPI数字裁切。openpyxl write_only行高必须在append该行之前设置，原helper在append后设置导致导出XML不保存行高。现总览1–6行预设24/16/10/22/38/30pt，KPI数字20pt、标签/数字左对齐垂直居中；保留原值和两张原生图表。VERSION=experiment-check-workbook-v9-overview-row-heights。
+
+2026-11-01 Workbook v8：按用户要求移除Excel中的技术_参考观察明细Sheet，不只是隐藏；writer忽略reference_gene_observation及历史ambiguous_gene_observation表，不影响其余Sheet与统计。参考观察CSV/私有索引继续供后台查询，图表数据隐藏Sheet为原生图表依赖，不删除。VERSION=experiment-check-workbook-v8-no-reference-details。
+
+2026-11-01 最新用户决定（覆盖此前候选上限2/10及歧义候选展示约定）：五条正式流程Base/Pig/IR/10X/reMapping的V/D/J/C全部显式-num_alignments_*=1，每区只报告1个比对。Excel不再输出歧义候选基因Sheet，Web移除该状态筛选、候选计数和入口；保留已匹配、未观察参考基因、Isotype及引物匹配统计（primer多重匹配不是基因候选，不得一并移除）。历史多候选注释仍由兼容解析器如实处理，不强取第一个当唯一，不改旧TSV；若要更新历史需显式重跑mapping。缓存随脚本/参数指纹变化，代码修改未部署。Workbook v7=experiment-check-workbook-v7-single-hit。
+
+2026-11-01 Workbook v6：Isotype之后五张基因核查表默认可见列精简；样本已匹配=样本/基因/Reads/% Expression，引物已匹配加引物全名，未观察表仅身份列及必要提示，歧义表=样本/引物全名/基因/Candidate reads。链、基因区、核查结果/备注保留到表右侧并默认隐藏，可取消隐藏；技术明细继续隐藏。不同参考group仍以结果批次可见区分，comparison_current和零分母提示不能隐藏。基因格以V红/J蓝/C紫淡底保留区分，样本分块与数字数据条不变。只改变工作簿布局/简写表头，CSV、统计和主pipeline不变。VERSION=experiment-check-workbook-v6-compact-genes。
+
+2026-11-01 IgBLAST候选报告上限：用户明确要求五条正式流程（Base/Pig/IR/10X/reMapping）V/D/J/C统一显式-num_alignments_*=2；不得恢复为1、默认3或此前建议10。AIRR仍一条query/read一行，同字段以逗号保存并列最佳候选，2是上限而非必须有两个，超过上限仍会截断。服务器IgBLAST1.22.0实测：num_alignments=1确实截断并列V/C候选，不能把单个call误认作唯一；改参数不会恢复已有TSV中丢失的候选。Base/Pig依实现哈希、reMapping依脚本元数据与db_args、IR/10X依阶段脚本哈希使续跑缓存失效；旧完成结果不自动改写，需显式重跑比对及后续统计。修改代码不代表已部署。
+
+2026-11-01 Workbook v5：Isotype组成Sheet按样本/链/结果group及参考版本/主类-亚类隔离排序；同一Isotype的Expression与uCDR3（仅junction时uJunction）紧邻，Expression计数降序，同值按Isotype名稳定排序。排序仅作用于Excel，不改CSV、图例或统计值；缺Expression时不补0、不合并不同参考。歧义候选基因表只含unique_count=0且ambiguous_count>0的基因，等位基因先折叠到gene，多基因候选不计唯一归属；候选计数跨基因不能相加当reads数。VERSION=experiment-check-workbook-v5-isotype-rank。
+
+2026-11-01 Workbook v4：所有可见含样本列的核查表按连续样本区块交替白/浅蓝底色，样本列加深并加粗；各样本首行整行中等粗细分隔线及26pt行高，不插空行、不合并，不改数值、列、筛选、冻结、数据条或核查下拉。技术表保持原样。VERSION=experiment-check-workbook-v4-sample-blocks。
+
+2026-11-01 绘图 v17 / 工作簿 v3：移除单样本阶段数量PNG及Web入口，仅保留全样本Read counts across samples汇总矩阵。公开图表/UI使用Raw reads、Clean reads、Merged reads、IgBLAST input reads、Retained reads和% Expression / % uCDR3；原始R1+R2读端与合并后每配对一条read的换算仍明确区分，不改变计数和筛选。最终筛选后计数不称总Mapped reads。标题、图例与阶段矩阵色标统一居中。Isotype主类合并IgG亚类，uCDR3在合并后重新去重，不能简单相加。report.xlsx增加总览及原生Excel图表、交替行底色、百分比数据条、V/J/C色标、核查下拉框；图表数据和技术明细隐藏，主核查表仍精简。原生总览图预览最多12样本/组，完整数据不截断。新版模拟交付outputs/new_analysis_simulation_20261101_v3含181张分析PNG及新版工作簿，旧版本保留。
+
+2026-11-01 最新约定 v16（覆盖下文 v13/v15）：样本/逐引物 V/J/C 分布只画 unique_count>0 的已有明确注释基因，分页查询、PNG、对应主 CSV 同步过滤；分母保留原统计，不按页内重新归一化。零观察参考基因只进独立列表及 unobserved_reference_genes.csv（样本、引物各一份），只有歧义候选单独标识，不当作零命中。Web 新增参考观察清单，可按样本/引物/基因区/状态分页核查，不画零柱。未知历史参考仍不能推造零值。V/J 配色依原 report 为红 #C24D51、蓝 #4C72B0，C 为紫 #7C6C96。FIGURE_VERSION=v16，统计schema仍v11。
+
+实验核查：analysis/repertoire/workbook.py 复用平台 openpyxl 流式输出 report.xlsx；一个工作簿含中文目录与各分析Sheet、筛选、冻结表头，基因表优先样本/链/引物/基因并留核查/备注空列，技术ID置后隐藏。已匹配/未观察/只有候选分开。输入根内有06或08.preprocessing/Datapoint.csv时另纳入原流程样本指标Sheet，记录来源及原选择范围，不冒充本次AIRR记录口径。CSV/私有索引保留，已有报告不覆盖，重生成取得新版。
+
+IgBLAST base新增06.preprocessing，适用于其所有物种（包含Pig）。Igblast_base/pipeline/06.preprocessing.py经pipeline_airr_preprocessing.py读取chain_summary.csv中的本次单链结果，按样本合并配对、按BCR/TCR复用IR_split/pipeline/08.preprocessing.py和现有models；不重写过滤/Expression/Unique CDR3/多样性/Isotype/CSR/SHM公式。IR入口默认不变，仅chains布局适配。Base无UMI代表序列，清单标alignment_rows；兼容列umi_counts是比对记录支持数，不称真实分子UMI/RNA。05输出不修改；06输出Datapoint.csv、processing_manifest.csv和junction_peps。默认SHM4进程、32GB阶段预算，SCIGBLAST_BASE_PREPROCESSING_*可调。来源/模型/设置变化使06失效；仅来源变化的样本重算，产物缺失重建，空链记录EMPTY。旧已完成任务保留五阶段，新建或显式续跑Base启用airr_preprocessing_version=1，以06标记判定完成。Docker白名单/check_bundle已加入适配模块。
+
+本次模拟交付：outputs/new_analysis_simulation_20261101含8模拟样本、9样本链的189张分析PNG、report.xlsx（12个Sheet）及图形目录；同层“新增分析_完整模拟结果.zip”统一下载。数据和参考清单均模拟，不混入真实患者内容，不伪造原流程Datapoint。原报告图表清单见outputs/original_report_inventory_20261101/原报告图表清单.md。
+
+2026-11-01 绘图 v15：样本和每引物 V/J/C 柱状图分别使用蓝 #3C718F、绿 #477C78、紫 #7C6C96，Web 同步并适配夜间主题；零观察灰色空心圆、只有歧义候选赭色菱形优先于基因区配色。新增 kind=stage_overview 的全样本数据量 PNG（04_data_changes/figures/all_samples__stages.png，超过12样本分页）；采用样本×阶段数量矩阵、格内数量与变化，比重复三套柱图紧凑。颜色按各列最大值统一缩放（跨页一致），不是数据保留率。Fastp/Header 显示相对前阶段变化，合并率用输入配对作分母；mapping 只标结果行/输入序列数量比，不能当 read 保留率。Header 与 Fastp 全样本已知数量均相同才合并展示；未选链留空、缺失用横线、真实零保留0，跨链输入不累加。Web 数据变化默认全部样本，可切单样本，原竖向柱图与统计口径保留。FIGURE_VERSION=v15，统计 VERSION 仍v11，重绘缓存同样更新绘图格式标记。
+
+2026-11-01 部署检查：web/deployment.py 用只读 SQLite 与 /health 联合检查主分析/队列/ARCHIVING/DELETING、INTERRUPTED 遗留 pgid、derived_runs/report_runs 活动状态或遗留 PID。deploy.sh 将本地新探针通过 stdin 传给旧容器，构建前后及切换前检查；/health 新增 deployment_ready/deployment_blockers；不自动取消或修改任务。新探针加入 Docker 白名单和 check_bundle。服务器曾提前修改的9份受管配置已备份到 .igblast-migration/deploy-preparation-a6156673 并恢复，git status 已为空；.env/状态/结果/IgBLAST 副本保留，未来推送后再用 deploy.sh 更新。检查时3个 ARCHIVING 任务仍阻止部署，未重启服务。
+
+2026-11-01 绘图 v13：V/J/C 已观察基因使用蓝色，零观察使用灰色名称/数值与空心圆，只有歧义候选使用赭色名称/数值与菱形。Web 同步使用该配色，夜间主题提高明度；不为零值画非零柱。该样式只影响基因状态，不改变 isotype/C 构成的类别配色及任何计数。
+
+2026-11-01 绘图 v12：用户要求精简图中文字说明。PNG 不再包含分母/方法/参考库描述页脚，“各链独立统计”等解释也移到表和说明；保留坐标、图例、数值与必要实验条件标识。FIGURE_VERSION 独立于统计 VERSION，参与自动/手动分析及引物重绘去重，避免复用旧样式；统计 schema 仍 v11，可复用现有统计索引。更新示例位于 outputs/report_workspace_v12_clean_labels。
+
+2026-11-01 后续分析 v11（优先于下文 C-only/v10 约定）：用户已明确扩展样本及每引物统计为 V/J/C。`analysis/repertoire/usage.py` 将最终 AIRR、引物追溯、当次参考快照汇总到私有 details.sqlite，gene_usage 为有索引的物化表；大表通过 CSV/Excel 流式导出及 `/api/reports/{id}/usage` 有界分页读取，overview.json 不携带逐基因大表。历史缺参考时不能推造零值；仅用户显式选择 comparison_species 后读取服务器 SCIGBLAST_REFERENCE_ROOT，标记 comparison_current（当前参考比较），不可冒充历史比对库。各参考版本分 group_id，不按显示样本名静默合并。仅歧义候选与零观察分开。
+
+`isotype.py` 只将可明确识别的 IGH C 基因归类；丰度每条最终有效 AIRR 记录权重 1，不声称 UMI/RNA 表达。Unique CDR3 按文件优先 cdr3_aa；仅有 junction_aa 时单独口径，不逐行混用；标准 AA 精确去重，主类合并后重新去重，组成分母为各类型内去重数之和。共享 AA 跨 isotype 可重复计入不同类型。trace 新版为 mapping-trace-v2，保留两个 AA 字段，sources 同时兼容 v1/v2；新增 trace 实现哈希进入 Base/Pig 缓存。已有结果直接补分析读取最终 AIRR，不要求重跑 mapping。
+
+Web 在 reports-workspace.js 中复用四视图（总体概览/样本分析/引物分析/数据下载），局部筛选、零观察开关、参考版本说明；PNG 库每页最多 7 张。旧报告仍走 reports.js 原组件。新分类为 01_overview、02_sample_genes、03_primer_genes、04_data_changes、05_details；下载兼容旧 exports 路径。`/{id}/figures` 对 v11 复用已验证 summary/details 索引排队重绘，不再重复匹配/扫描。仅 PNG。样本阶段数量计算保持原口径，缺失计数不绘制 NaN 柱。
+
+2026-11-01 Web 参考目录迁移：用户要求所有流程统一采用 `/colddata/zqy/igblast` 最新版，已复制到服务器项目 `/colddata/SCigblast/platform/SCigblastWeb/igblast`，2988 文件 SHA256 一致。Compose 的 `SCIGBLAST_HOST_IGBLAST_ROOT` 默认 `../igblast`，规范容器路径 `/opt/scigblast/igblast`，`SCIGBLAST_REFERENCE_ROOT` 供五条流程读取；两个旧容器路径也指向相同只读副本以兼容现有镜像。原目录不删除。当前因 3 个 ARCHIVING 任务未重建在线容器，配置尚待应用；不要误报已切换。详情及生效命令见 `reference/IGBLAST_DEPLOYMENT.md`。运行程序仍是镜像 Conda 中的 igblastn。
+
 ## 项目定位与阅读入口
 
 SCigblast 是免疫组库分析平台：Python/Bash 执行分析，`web/` 提供 FastAPI、Jinja2、原生 JavaScript 任务界面，SQLite 保存账户、任务和操作记录。先读 `web/pipeline_registry.json`、`web/app.py`、目标流程的 runner 和配置，再参考 `web/README.md`。`pipeline/README.md` 有过时路径与流程描述，发生冲突时以当前注册表和可执行代码为准。
@@ -138,3 +182,39 @@ rtk proxy docker compose -f web/docker-compose.yml up -d
 用户指定测试服务器通过 `ssh remote_nanhua` 访问；测试数据在 `/colddata/SCigblast/data/SCigblastWeb/web_test/20260909`。远端验证使用独立临时输出和受限资源容器，输入/参考库只读挂载；不要直接修改在线服务、生产结果或并发配置。
 
 修改前检查 `rtk git status --short`，保留已有未提交改动。不要批量改写或提交 `data/`、`reference/`、数据库、结果目录及工作簿。按用户指定保留本文件名 `AGENT.md`；后续 AI 请显式读取本文件。
+# 2026-10-31 后续 QC / primer 分析
+
+`analysis/repertoire/` 为 Pig/base 后续分析模块，`pipeline_stage_metrics.py` 读取已有阶段 JSON/摘要，`pipeline_trace.py` 在每链 05 过滤时保存未筛选精简注释、query 全集和 BGZF+SQLite 索引。`filter_mapping_airr(..., trace_context=...)` 旁路失败时保留 raw，返回 trace_complete=0，原筛选列/顺序/谓词不变。默认 mapping 档；Web 新建任务 trace_mode=full 时再归档原始 R1/R2 序列与 fastp/clean 成员关系，不存 quality、不改输出 header。跨样本用来源分区隔离，同分区 ID 碰撞/多注释行不可猜测归属；一条 query 的多个链任务不相加作输入总数。
+
+`web/repertoire_analysis.py` 提供 `/api/reports` 的上传、扫描快照、列映射预览、前置计划、队列、取消/重试、PNG/统计表/ZIP、分页记录及受筛选的 FASTA/TSV 导出；`/reports` 是独立已有结果入口，详情页有“数据变化”“引物分析”。使用独立 report_* 小表和任务私有明细 SQLite，不能将逐 read 放进 Web 主库。匹配仍是严格 5′ 全长 IUPAC，read N 不视为确定命中；同序列异名的名称/家族口径分开。XLS/XLSX 实际合并范围继承，公式只读保存值。Submission 的组名/完整引物名混用由显式开关控制，不能凭模糊名称猜测预期基因。
+
+新任务默认 generate_report=true，但只为 Pig/base 完成后自动入队；旧任务没有该选项不会自动补算，手动入口可用。已有 merged+final 可补全部 query 的 primer 匹配，但最终缺行的原因未知；仅 final 时只统计结果子集。没有当次参考清单不补造零命中。图与 Web 共用 summary.json；**用户最新要求只导出 PNG，不生成 PDF/SVG**。图页最多 7 张，可单独排队绘制某个 primer 的 C 区分布。参考基因零观察与未注释序列分开，不据此断言引物失败。
+
+后分析单进程独占同一平台门锁，主分析有队列时不启动；Linux 用进程组身份 token 做取消和 RSS/时限监督。活动 report runs 在重新 Match/续跑/删除/归档前阻止来源变更；归档声明需在 SQLite 写事务内检查 report_runs，不能只看 Python 锁。报告随来源归档，独立目录分析不改来源。新增模块已加入 Docker 白名单/check_bundle；pip 依赖 xlrd、matplotlib 和系统 fonts-noto-cjk 需镜像重建。CLI 与边界详见 `analysis/repertoire/README.md`。验证脚本与产物仅放独立临时目录，结束清理，不新增永久测试目录。
+# 2026-10-31 最新引物处理规则（优先于上文无剪切的初始方案）
+
+用户最新要求为“先记录 primer 归属，再去除引物进行 mapping”，且未匹配/不同长度多重匹配保留原序列继续比对，不能排除。`pipeline_primer.py` 在 Base/Pig 05 的 IgBLAST 前记录逐 query 的全部名称/家族、状态和前后长度；可确定相同长度时剪切，否则原样保留（primer-only 也保留）。不改原合并 FASTA 和 ID，所有记录数保留，独立生成比对输入。正式分析启动前 `REPORTS.freeze_mapping()` 冻结运行前配置到私有 JSON，SHA 和新输入参与缓存；Match-only 不进行此处理。没有表/明确关闭前置处理时走原输入。运行中/结束后补表只重新统计，不能伪装成已经重新去引物比对。
+
+trace 归档未剪切的原 query，并记录实际 mapping 来源及 `primer_preparation`，注释始终来自真实比对输入。逐 query 归属索引通过原 ordinal 关联，AIRR 仍按唯一原 ID 核验；ID 不唯一继续标未知。统计和 PNG 将已去引物/保留原序列分开，明细的 mapping_primers 与本次分析 primers 分开保存；不能在去引物后的序列上重新识别原 primer 而丢失归属。Web 可按 C 区处理分组、精确剪切状态筛选/导出。新准备模块已加入 Docker/check_bundle。规则和配置入口详见 `analysis/repertoire/README.md`。
+
+2026-10-31：引物与基因统计仅汇总 primer 对应的 C 区（c_call）分布，CSV/XLSX、Web 与 PNG 同步收敛到 C；缺少或歧义 C 注释仍单列。原始 AIRR 与私有追溯保留 V/D/J/C 字段，不改变 IgBLAST 比对和链筛选。报告版本已更新，旧报告需重新生成后获得 C-only 导出。
+
+2026-10-31 分类输出：后续分析报告 v4 将 CSV 与 PNG 分到 01_data_changes、02_primer_matching、03_primer_preparation、04_primer_c_distribution、05_filter_summary；report.xlsx 与 sample_summary.csv 保留根目录。数据变化以样本为单位，每样本输出一张 <样本标识>__stages.png，汇总该样本全部阶段/配对/链，按单位分区，不跨链累加；Web 默认选择一个样本并显示其图，链筛选作用于明细。引物配置默认仅展示上传、列对应、序列类型和前置去引物开关，单工作表自动选择，多工作表才显示选择器；结构/表头/范围等参数保留在高级设置中。summary.exports 记录 CSV 路径，文件 API 兼容旧的 CSV 名称请求，ZIP 保留分类结构。旧报告需重新生成，新目录不搬移旧产物。
+
+2026-11-01 后续分析 v7：引物匹配构成改为三类总统计（唯一/多重/未匹配），取消 X 轴；matching_total_summary.csv/Excel 同名 Sheet 提供总计。共享输入按样本配对、归档来源与记录序号跨链去重，重复 ID 不合并；原始端与 query 分开，历史只有最终 TSV 时保留链结果行口径并说明，未评估不计入未匹配。Web 的 matching_totals 按 chains 成员筛选，不能直接累加各链 match_counts 冒充输入总量。不再输出 primer/coverage/filters 三类 PNG，旧图从图库隐藏；03/05 的 CSV 和全部私有追溯仍保留。
+
+2026-11-01 后续分析 v8：render.py 统一蓝灰/赭色科学绘图样式，支持中文字体回退、实测全名标签宽度、0–100% 统一比较轴、右侧数值列、热图格内比例；stage 图仍用竖向柱状图，多于三链时采用上二下一跨列布局。render 的 figure_audit 回调在最终画布绘制后、PNG 保存前执行，用于本地技能的物理对齐/文字/碰撞审阅，生产不依赖技能安装。该版本只改绘图与缓存版本，不改统计或 pipeline。模拟计数不代表真实分析，输出仍仅 PNG。
+
+2026-11-01 v9 纠正“总统计”含义：引物匹配总览是全部样本的一张 100% 堆叠竖柱图，每样本一柱（唯一/多重/未匹配），不再把所有样本合并为三条水平条形。matching.py 从已跨链去重的 matching_totals 按 sample+unit 汇总，每样本使用自己的分母；CSV/Excel matching_total_summary 也按样本分列三类。Web 总览按当前链筛选展示所有样本，样本筛选用于其他图及明细。N1* 等替代引物组结果必须作为同一样本的独立对照标明，不能与原条件混算或声称新生物样本；不自动猜测引物组。
+
+2026-11-01 v10：引物 × C 基因图由 heatmap 改为 composition 类型的 100% 堆叠柱，每引物一柱，C 基因固定配色，标注 ≥6% 组分；_composition_ 替代新文件名中的 _heatmap_。统计继续使用唯一 C 注释的引物内分母，Top N 以外合并其他类以保持 100%，不虚构 Expression/Unique CDR3 指标。CSV/源计数不变。Web 图库需同时识别 composition 与历史 heatmap。单引物 C 分布标题不显示“去引物后”，剪切分组仍在元数据中保留。
+
+2026-10-31 引物列预览：默认列配置保留；上传后列输入下显示表头与示例，修改列立即同步，展开所选列内容可见前 5 条数据及真实 Excel 行号，名称/序列成对展示。工作表/表头行切换使用有界预览并忽略过期响应；支持 AA 等列，组名仅按真实合并区域继承且标注合并，不向下填充普通空白。预览仅供核对，不改变匹配规则。
+
+2026-10-31 引物配置 UI：使用上传/列对应/匹配方式三个分区，文件上传卡保留原生可访问文件输入并显示读取状态；列映射按两张表分组，所选列预览通过可键盘切换的 Tab 展示，修改列自动定位对应表。预览表明确区分 Excel 行号、列字母、表头和等宽序列，长表在内部滚动；共用主题变量适配日夜与窄屏。字段、默认值和匹配算法不变。
+
+2026-10-31 后续分析界面统一：数据变化、引物 C 区与独立入口使用记录状态条、筛选区、数据范围、下载区和折叠明细；图片按分析类别筛选并保持每页最多 7 张，共享图标明全部样本/全部引物。数据变化页只展示所选样本的一张汇总图。独立入口有已有结果时优先展示结果，无记录时展开配置；扫描可全选/清空，分析按钮显示加载状态。导出的 PNG 与统计字段不改动，默认配置与分析规则保留；浏览器已验证扫描、分类、分页、追溯、下载、状态、日夜主题和 390px 窄屏。
+
+2026-10-31 数据量汇总 v5：数据变化聚焦原始/Fastp/Header 清理后的 reads 数、相邻减少量和保留率、输入配对与合并序列数及合并率、各链 IgBLAST 输入序列和最终 AIRR 结果行数。每样本一张 PNG，新增 01_data_changes/stage_volume_summary.csv 与 Excel 同名 Sheet；原始阶段指标仍在 stage_summary.csv/折叠明细。按样本汇总时上游每个配对只计一次，某配对缺计数时不冒充完整总量；mapping 的合并分母按该链实际覆盖配对计算，不跨链累加。不同单位不直接相减或计算保留率，明确配对到合并序列的关系用于合并率。Web 首屏显示输入 reads、Fastp 后 reads 和合并序列三项。主 pipeline 与结果 TSV 不改动；已有报告重新生成后取得新汇总。
+
+2026-10-31 数据量图 v6：每个样本仍输出一张 PNG，reads、双端合并和分链 IgBLAST 输入/结果三个区域全部改为竖向柱状图。柱顶标注数量，质控保留率/减少量和合并率保留，统计口径与 CSV/XLSX 不变。已有报告重新生成后取得竖向样式。

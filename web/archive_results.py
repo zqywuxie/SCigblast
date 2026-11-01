@@ -186,6 +186,10 @@ def run(app, dry_run=False, days=14):
                 # Both services claim through SQLite: an archive process does
                 # not share the Web process's in-memory scheduling lock.
                 has_derived = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='derived_runs'").fetchone()
+                has_reports = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='report_runs'").fetchone()
+                if has_reports and connection.execute("SELECT 1 FROM report_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (row['id'],)).fetchone():
+                    print(f"archive deferred: active report {row['id']}", flush=True)
+                    continue
                 if has_derived and connection.execute("SELECT 1 FROM derived_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (row['id'],)).fetchone():
                     print(f"archive deferred: active Treemap {row['id']}", flush=True)
                     continue

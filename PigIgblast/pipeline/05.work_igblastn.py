@@ -14,6 +14,7 @@ from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fin
 from pipeline_parallel import FastaCountCache, bounded_completed
 from pipeline_progress import Progress, run_igblast, verified_estimate
 from pipeline_locus_split import atomic_text, filter_mapping_airr
+from pipeline_primer import prepare as prepare_primers
 
 def safe(value): return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
 
@@ -34,6 +35,7 @@ BIN = resolve_binary(BIN, DB_ROOT, "pig")
 DEPENDENCIES = {}
 FASTA_COUNTS = FastaCountCache()
 PROGRESS = None
+RAW_PAIRS = {}
 THREADS = int(cfg.get("SCIGBLAST_IGBLAST_THREADS", cfg.get("IGBLAST_THREADS", "16")))
 MAX_JOBS = min(4, int(cfg.get("SCIGBLAST_IGBLAST_MAX_PARALLEL_JOBS", cfg.get("MAX_JOBS", "4"))),
                int(cfg.get('SCIGBLAST_PARALLEL_THREAD_BUDGET', '128')) // max(1, THREADS),
@@ -65,6 +67,14 @@ def task(job):
     common = {"sample_id": sample, "pair_id": pair, "chain": chain, "input_sequences": n, "raw_rows": 0, "mapped_rows": 0, "productive_rows": 0, "output_rows": 0, "status": "ERROR", "error": "", "path": None, "parent": str(parent), "relative": str(relative)}
     common.update(locus_input_rows=0, excluded_locus_rows=0, unknown_locus_rows=0, locus_filter_version=1)
     if not fasta.is_file(): common["error"] = "missing merged FASTA"; return common
+    original_fasta=fasta
+    try:
+        primer_preparation=prepare_primers(fasta,OUTPUT_ROOT,DATASET_LABEL,sample,pair)
+        if primer_preparation:
+            fasta=Path(primer_preparation['path'])
+            n=primer_preparation['submitted_queries'];common['input_sequences']=n
+    except Exception as error:
+        common['error']=f'primer_preparation_failed: {error}';return common
     try:
         fingerprint = task_fingerprint(fasta, DEPENDENCIES["chains"][chain])
         if done.is_file() and filtered.is_file() and os.environ.get("SCIGBLAST_FORCE_RERUN") != "1":
@@ -91,7 +101,8 @@ def task(job):
     # pipeline's internal BCR/TCR labels, but pass the documented CLI value
     # for immunoglobulin chains.
     seqtype = "Ig" if chain.upper().startswith("IG") else "TCR"
-    args = [BIN, "-germline_db_V", str(v), "-germline_db_J", str(j)]
+    args = [BIN, "-germline_db_V", str(v), "-germline_db_J", str(j),
+            "-num_alignments_V", "1", "-num_alignments_D", "1", "-num_alignments_J", "1"]
     # Omitting D makes IgBLAST load its default pig_gl_D, even for TRA.
     # Use the configured chain-specific D prefix, including VJ placeholders.
     d = db(chain, "D")
@@ -106,7 +117,14 @@ def task(job):
     if rc or not raw.is_file(): common["error"] = "igblast_failed"; raw.unlink(missing_ok=True); return common
     try:
         PROGRESS.update(job, 'filtering')
-        counts = filter_mapping_airr(raw, filtered, chain); raw.unlink(missing_ok=True)
+        counts = filter_mapping_airr(raw, filtered, chain, trace_context=dict(
+            output_root=str(OUTPUT_ROOT), dataset=DATASET_LABEL, sample=sample, pair=pair,
+            fasta=str(original_fasta), mapping_fasta=str(fasta), primer_preparation=primer_preparation, dependency=DEPENDENCIES['chains'][chain],
+            reads={'raw_R1':raw_r1,'raw_R2':RAW_PAIRS.get((sample,pair,raw_r1)),
+                   **{f'{label}_{mate}':str(stage_root(stage)/('data' if label=='fastp' else '')/relative/f'{safe(pair)}_{mate}.fq.gz')
+                      for label,stage in (('fastp','02.fastp'),('clean','03.clean_data')) for mate in ('R1','R2')}},
+            databases={part: str(db(chain, part)) for part in ('V', 'D', 'J', 'C') if db_ok(db(chain, part))}))
+        if counts.get('trace_complete', 1): raw.unlink(missing_ok=True)
         common.update(counts, status="OK", path=filtered)
         PROGRESS.update(job, 'publishing')
         atomic_write_text(done, "\n".join(("version=2", f"job_fingerprint={fingerprint}", f"dependency_fingerprint={DEPENDENCIES['chains'][chain]}",
@@ -125,6 +143,7 @@ def main():
     with MANIFEST.open(encoding="utf-8", newline="") as fh:
         for row in csv.DictReader(fh):
             key=(row.get("sample_id", ""), row.get("pair_id", ""), row.get("r1_path", ""))
+            RAW_PAIRS[key] = row.get('r2_path')
             if row.get("status") == "OK" and key not in seen:
                 seen.add(key); jobs.extend((key[0], key[1], chain, key[2]) for chain in filter(None, row.get("igblast_chains", "").split(",")))
     if not jobs:

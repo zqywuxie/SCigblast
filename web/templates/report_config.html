@@ -1,0 +1,67 @@
+<details class="rp-config advanced-details">
+  <summary class="rp-config-summary"><span class="rp-config-title">引物匹配配置</span><span class="rp-config-caption">默认列已设置，可预览核对</span></summary>
+  <div class="rp-config-body">
+    <div class="rp-section-heading"><span class="rp-step">01</span><h4>上传数据表</h4><span class="rp-section-hint">XLS / XLSX</span></div>
+    <div class="rp-upload-layout">
+      <label class="rp-upload-card" data-rp-file-card="submission" data-state="empty">
+        <span class="rp-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg></span>
+        <span class="rp-upload-copy"><span class="rp-upload-heading"><strong>Submission 表</strong><span data-rp-upload-state="submission">未选择</span></span><small data-rp-upload-note="submission">样本与引物组对应表</small></span>
+        <span class="rp-upload-action" data-rp-upload-action="submission">选择文件</span>
+        <input type="file" data-rp-upload="submission" accept=".xlsx,.xls" aria-label="上传 Submission 表">
+      </label>
+      <label class="rp-upload-card" data-rp-file-card="primer" data-state="empty">
+        <span class="rp-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg></span>
+        <span class="rp-upload-copy"><span class="rp-upload-heading"><strong>引物序列表</strong><span data-rp-upload-state="primer">未选择</span></span><small data-rp-upload-note="primer">引物名称与序列表</small></span>
+        <span class="rp-upload-action" data-rp-upload-action="primer">选择文件</span>
+        <input type="file" data-rp-upload="primer" accept=".xlsx,.xls" aria-label="上传引物序列表">
+      </label>
+    </div>
+    <div class="rp-config-grid rp-sheet-grid">
+      <label hidden>Submission 工作表<select data-rp-field="submission_sheet"><option value="">上传后选择</option></select></label>
+      <label hidden>引物工作表<select data-rp-field="primer_sheet"><option value="">上传后选择</option></select></label>
+    </div>
+    <div class="rp-section-heading"><span class="rp-step">02</span><h4>确认列对应</h4><span class="rp-section-hint">列字母修改后自动预览</span></div>
+    <div class="rp-column-grid rp-mapping-layout">
+      <section class="rp-map-group" aria-label="Submission 列对应">
+        <div class="rp-map-heading"><strong>Submission</strong><span>样本 → 引物组</span></div>
+        <label class="rp-map-field"><span>样本列</span><input data-rp-field="sample_column" value="B" maxlength="3" aria-label="Submission 样本列"><small data-rp-column-note="sample_column">上传后显示列内容</small></label>
+        <label class="rp-map-field"><span>引物组列</span><input data-rp-field="submission_join_column" value="I" maxlength="3" aria-label="Submission 引物组列"><small data-rp-column-note="submission_join_column">上传后显示列内容</small></label>
+      </section>
+      <section class="rp-map-group" aria-label="引物表列对应">
+        <div class="rp-map-heading"><strong>引物序列表</strong><span>引物组 → 名称与序列</span></div>
+        <label class="rp-map-field"><span>分组列</span><input data-rp-field="primer_join_column" value="B" maxlength="3" aria-label="引物表分组列"><small data-rp-column-note="primer_join_column">上传后显示列内容</small></label>
+        <label class="rp-map-field"><span>名称 : 序列列对</span><input data-rp-field="primer_columns" value="C:D,E:F" placeholder="例如 C:D,E:F" aria-label="引物名称与序列列对"><small data-rp-column-note="primer_columns">上传后显示名称与序列列头</small></label>
+      </section>
+    </div>
+    <details class="advanced-details rp-column-check" data-rp-selected-columns hidden>
+      <summary><span>核对列内容</span><span class="rp-preview-caption">前 5 条 · 保留 Excel 行号</span></summary>
+      <div class="rp-preview-tabs" role="tablist" aria-label="选择预览的数据表"><button type="button" role="tab" data-rp-preview-tab="submission">Submission</button><button type="button" role="tab" data-rp-preview-tab="primer">引物序列表</button></div>
+      <div data-rp-selected-preview aria-live="polite"></div>
+    </details>
+    <div class="rp-section-heading"><span class="rp-step">03</span><h4>匹配方式</h4></div>
+    <div class="rp-behavior-grid">
+      <label class="rp-sequence-field">引物表中的序列<select data-rp-field="sequence_mode"><option value="oligo">完整引物：Adapter + UMI + Barcode + C primer</option><option value="primer">仅 C primer 匹配序列</option></select></label>
+      <label class="rp-trim-choice"><input type="checkbox" data-rp-field="trim_before_mapping" checked><span><strong>比对前去引物</strong><small>先记录归属，再去除明确匹配的引物</small></span></label>
+    </div>
+    <p class="rp-config-note">未明确匹配的序列保留原样；任务完成后补表只进行统计。</p>
+    <details class="advanced-details rp-secondary" data-rp-advanced><summary>高级设置</summary>
+      <div class="rp-config-grid">
+        <label>Submission 表头行<input data-rp-field="submission_header_row" type="number" value="1" min="1"></label>
+        <label>引物表头行<input data-rp-field="primer_header_row" type="number" value="1" min="1"></label>
+        <label>多组分隔符<input data-rp-field="group_separator" placeholder="留空表示单组"></label>
+        <label>匹配数据范围<select data-rp-field="observation_stage"><option value="mapping">比对输入；历史数据不足时仅最终结果</option><option value="retained">仅最终保留结果</option><option value="raw_R1">原始 R1（需全流程追溯）</option><option value="raw_R2">原始 R2（需全流程追溯）</option></select></label>
+        <label>统计数据中的引物位置<select data-rp-field="read_structure"><option value="window">序列从 C primer 起始</option><option value="oligo">仍含 Adapter + UMI + Barcode</option></select></label>
+        <label>Mapping 输入中的引物位置<select data-rp-field="mapping_read_structure"><option value="window">合并序列从 C primer 起始</option><option value="oligo">仍含 Adapter + UMI + Barcode</option></select></label>
+      </div>
+      <label class="check-label"><input type="checkbox" data-rp-field="allow_primer_name_join" checked> 未找到组名时，按完整引物名称精确关联</label>
+      <details class="advanced-details"><summary>完整引物结构参数</summary><div class="rp-config-grid">
+        <label class="rp-wide">Adapter<input data-rp-field="adapter" value="ACACTCTTTCCCTACACGACGCTCTTCCGATCT"></label>
+        <label>UMI 长度<input data-rp-field="umi_length" type="number" value="10" min="0" max="100"></label>
+        <label>Barcode 长度<input data-rp-field="barcode_length" type="number" value="8" min="0" max="100"></label>
+      </div></details>
+      <p class="muted">匹配规则：序列 5′ 起点全长匹配，按 IUPAC 简并碱基识别。</p>
+    </details>
+    <details class="advanced-details rp-secondary"><summary>完整工作表预览</summary><div data-rp-workbook-preview class="rp-workbook-preview"></div></details>
+    <p class="page-error hidden" data-rp-config-error role="alert"></p>
+  </div>
+</details>

@@ -23,6 +23,7 @@ CONFIG_FILE="${SCRIPT_DIR}/00.pipeline_config.env"
 RUNTIME_OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-}"
 RUNTIME_DATASET_LABEL="${SCIGBLAST_DATASET_LABEL:-}"
 RUNTIME_RAW_INPUT_DIR="${RAW_INPUT_DIR:-}"
+RUNTIME_FORCE_RERUN="${SCIGBLAST_FORCE_RERUN:-}"
 if [[ -f "$CONFIG_FILE" ]]; then
     set -a
     . "$CONFIG_FILE"
@@ -31,6 +32,7 @@ fi
 [[ -n "$RUNTIME_OUTPUT_ROOT" ]] && SCIGBLAST_OUTPUT_ROOT="$RUNTIME_OUTPUT_ROOT"
 [[ -n "$RUNTIME_DATASET_LABEL" ]] && SCIGBLAST_DATASET_LABEL="$RUNTIME_DATASET_LABEL"
 [[ -n "$RUNTIME_RAW_INPUT_DIR" ]] && RAW_INPUT_DIR="$RUNTIME_RAW_INPUT_DIR"
+[[ -n "$RUNTIME_FORCE_RERUN" ]] && export SCIGBLAST_FORCE_RERUN="$RUNTIME_FORCE_RERUN"
 OUTPUT_ROOT="${SCIGBLAST_OUTPUT_ROOT:-${BRANCH_ROOT}/output}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
@@ -183,11 +185,14 @@ collect_samples() {
         # <raw-relative-parent>/<pair_stem>/<sample_id>/<canonical FASTQ>.
         # pair_id already contains the raw-relative parent and pair stem.
         SAMPLE_OUTPUT_DIRS+=("$pair_id")
-    done < <("${PYTHON_BIN}" - "$MAPPING_SUMMARY" "$input_dir" <<'PY'
+    done < <("${PYTHON_BIN}" - "$MAPPING_SUMMARY" "$input_dir" "${SCRIPT_DIR}/../.." <<'PY'
 import csv
 import re
 import sys
+import os
 from pathlib import Path, PurePosixPath
+sys.path.insert(0, sys.argv[3])
+from pipeline_input_manifest import unified_stage_relative
 
 summary = Path(sys.argv[1])
 input_root = Path(sys.argv[2]).expanduser().resolve()
@@ -223,6 +228,10 @@ with summary.open("r", encoding="utf-8-sig", newline="") as handle:
             raise SystemExit(f"pair/sample resolves to conflicting FASTQ pairs: {pair_id} / {sample_id}")
         seen[key] = value
 for (pair_id, sample_id), (r1, r2) in seen.items():
+    if os.environ.get('SCIGBLAST_BASE_LAYOUT') == 'sample_pair_v1':
+        relative = unified_stage_relative(sample_id, pair_id).as_posix()
+        print(f"{relative}\t{safe(PurePosixPath(pair_id).name)}\t{r1}\t{r2}")
+        continue
     # Emit a path-safe relative output key. The manifest retains the original
     # pair_id; only stage filesystem paths are normalized here.
     pair_parts = [safe(part) for part in PurePosixPath(pair_id).parts]
@@ -348,7 +357,7 @@ run_fastp_sample() {
     forward_in="${SAMPLE_FORWARDS[i]}"
     reverse_in="${SAMPLE_REVERSES[i]}"
     sample_rel="${SAMPLE_OUTPUT_DIRS[i]}"
-    if [[ "$(basename "$sample_rel")" == "$sample" ]]; then
+    if [[ "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 || "$(basename "$sample_rel")" == "$sample" ]]; then
         sample_out_dir="${OUTPUT_DIR}/${sample_rel}"
         report_out_dir="${REPORT_DIR}/${sample_rel}"
     else
@@ -360,6 +369,9 @@ run_fastp_sample() {
     html_out="${report_out_dir}/${sample}.html"
     json_out="${report_out_dir}/${sample}.json"
     marker_key="$(fastp_marker_key "$sample" "$forward_in")"
+    if [[ "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then
+        marker_key="$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s' "$forward_in" "$reverse_in" "$(stat -c '%s:%y' "$forward_in")" "$(stat -c '%s:%y' "$reverse_in")" "$QUAL_THRESHOLD" "$N_BASE_LIMIT" "$THREADS" "$FASTP_BIN" "$(sha256sum "$0")" | sha256sum | cut -c1-24)"
+    fi
     done_marker="${sample_out_dir}/.fastp.DONE.${marker_key}.json"
     legacy_done_marker="${sample_out_dir}/.fastp.DONE.json"
 
@@ -370,12 +382,12 @@ run_fastp_sample() {
     # is incomplete (for example, samples that were ERROR in the mapping
     # summary and were fixed later).  The marker is intentionally retained
     # when sequence payloads are cleaned by the runner.
-    if [[ -f "$done_marker" && -s "$json_out" && -s "$forward_out" && -s "$reverse_out" ]]; then
+    if [[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 && -f "$done_marker" && -s "$json_out" && -s "$forward_out" && -s "$reverse_out" ]] && gzip -t "$forward_out" "$reverse_out" 2>/dev/null; then
         info "[BASE][fastp] worker_done sample=${sample} status=SKIPPED"
         return 2
     fi
     # Migrate complete outputs from the legacy lane-shared marker.
-    if [[ ! -f "$done_marker" && -f "$legacy_done_marker" && -s "$json_out" && -s "$forward_out" && -s "$reverse_out" ]]; then
+    if [[ "${SCIGBLAST_BASE_LAYOUT:-}" != sample_pair_v1 && "${SCIGBLAST_FORCE_RERUN:-0}" != 1 && ! -f "$done_marker" && -f "$legacy_done_marker" && -s "$json_out" && -s "$forward_out" && -s "$reverse_out" ]]; then
         marker_tmp="${done_marker}.tmp.${BASHPID:-$$}"
         printf '{"status":"DONE","sample":"%s","forward":"%s","reverse":"%s","migrated_from_legacy":true}\n' \
             "$sample" "$forward_out" "$reverse_out" > "$marker_tmp"

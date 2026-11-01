@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 from functools import lru_cache
+from pipeline_igblast_cache import reference
 
 FOLDERS = {'mapping': 'mapping', 'ir_split': 'IR_split', '10x_split': '10X_split',
            'igblast_base': 'Igblast_base', 'pig_igblast': 'PigIgblast'}
@@ -66,6 +67,10 @@ def effective_config(pipeline, env, pipeline_root):
         if len(parts) == 1:
             config[match[1]] = parts[0]
     values = {**config, **values} if pipeline == 'mapping' else {**values, **config}
+    # Per-job overrides must match the runner's post-config override order.
+    if pipeline == 'igblast_base' and env.get('SCIGBLAST_RUN_IGBLAST_SPECIES'):
+        values['SCIGBLAST_IGBLAST_SPECIES'] = env['SCIGBLAST_RUN_IGBLAST_SPECIES']
+        values['SCIGBLAST_IGBLAST_DATABASE'] = env.get('SCIGBLAST_RUN_IGBLAST_DATABASE', '')
     # These are the only expansions used by dependency paths in the shipped config.
     context = {**values, 'PIPELINE_DIR': str(folder), 'SCRIPT_DIR': str(folder)}
     for key in CONFIG_KEYS & values.keys():
@@ -151,11 +156,26 @@ def check_dependencies(pipeline, env, chains=None, *, pipeline_root=None, stage=
     database_root = Path(config.get('DB_ROOT' if pig else 'SCIGBLAST_IGBLAST_DB_DIR', ''))
     if not database_root.is_absolute():
         database_root = folder / database_root
-    version = config.get('PIG_DB_VERSION', 'pig_new') if pig else species
-    aux = database_root / 'optional_file' / ('pig.aux' if pig else f'{species}_gl.aux')
+    if pipeline == 'igblast_base' and env.get('SCIGBLAST_RUN_IGBLAST_SPECIES'):
+        try:
+            version, aux_name = reference(species, config.get('SCIGBLAST_IGBLAST_DATABASE', ''))
+        except ValueError as exc:
+            error('invalid_reference', str(exc), 'species')
+            return result
+    else:
+        version = config.get('PIG_DB_VERSION', 'pig_new') if pig else species
+        aux_name = 'pig.aux' if pig else f'{species}_gl.aux'
+    aux = database_root / 'optional_file' / aux_name
+    if pipeline == 'igblast_base' and env.get('SCIGBLAST_RUN_IGBLAST_SPECIES'):
+        config.setdefault('IGDATA', str(database_root))
+        config.setdefault('BLASTDB', str(database_root / 'database_251117' / version))
     missing_db = []
     if not aux.is_file():
         missing_db.append(f'辅助文件不可用：{aux}')
+    if pipeline == 'igblast_base' and env.get('SCIGBLAST_RUN_IGBLAST_SPECIES'):
+        internal = Path(config.get('IGDATA') or database_root) / 'internal_data' / species
+        if not internal.is_dir() or not any(path.is_file() for path in internal.rglob('*')):
+            missing_db.append(f'物种内部参考不可用：{internal}')
     # Match the arguments actually passed by each branch (including VJ placeholders).
     required_parts = {'V', 'D', 'J', 'C'} if pipeline in {'ir_split', '10x_split'} else (
         {'V', 'D', 'J'} if pig else {'V', 'J'})

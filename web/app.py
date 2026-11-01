@@ -21,7 +21,7 @@ import submission
 import auth
 import notifications
 import postanalysis
-import preflight as runtime_preflight
+import repertoire_analysis
 from table_preview import read_preview
 from process_identity import group_state, signal_group
 from artifact_download import stream_zip
@@ -41,8 +41,10 @@ from pydantic import BaseModel
 APP_DIR = Path(__file__).resolve().parent
 PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent).resolve()
 sys.path.insert(0, str(PIPELINE_ROOT))
+import preflight as runtime_preflight
 import input_manifest
 import pipeline_input_manifest
+from pipeline_igblast_cache import REFERENCES, reference
 import pipeline_progress
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
@@ -135,6 +137,7 @@ def init_db() -> None:
         auth.init_schema(connection)
         notifications.init_schema(connection)
         postanalysis.init_schema(connection)
+        repertoire_analysis.init_schema(connection)
         columns = {column[1] for column in connection.execute('PRAGMA table_info(jobs)')}
         if 'execution_json' not in columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN execution_json TEXT NOT NULL DEFAULT '{}'")
@@ -146,6 +149,7 @@ def update_job(job_id: str, **values: Any) -> None:
         return
     if values.get('status') == 'QUEUED':
         TREEMAP.guard_mutation(job_id)
+        REPORTS.guard_mutation(job_id)
     assignments = ", ".join(f"{key} = ?" for key in values)
     with db() as connection:
         connection.execute(
@@ -158,6 +162,10 @@ def update_job(job_id: str, **values: Any) -> None:
                 postanalysis.enqueue_auto(connection, job_id, now())
             except Exception as error:
                 postanalysis.LOG.warning('Unable to queue Treemap: %s', type(error).__name__)
+            try:
+                repertoire_analysis.enqueue_auto(connection, job_id, now())
+            except Exception as error:
+                repertoire_analysis.LOG.warning('Unable to queue report: %s', type(error).__name__)
 
 
 def enqueue_notification(connection, job_id, *, event=None):
@@ -442,17 +450,29 @@ class CreateJob(BaseModel):
     ir_variant: str = "representative"
     run_preprocessing: str = "1"
     sample_source: str = "submission"
+    species: str = "human"
+    database: str = ""
     input_scan_id: str = ""
     input_assignments: list[dict] = []
     mapping_chains: list[str] = []
     mapping_samples: list[str] | None = None
     generate_treemap: bool = False
+    generate_report: bool = True
+    primer_analysis: dict | None = None
+    trace_mode: str = 'mapping'
 
 
 def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     request.output_root = (request.output_root or '').strip() or None
     if request.pipeline not in REGISTRY:
         raise HTTPException(400, "unknown pipeline")
+    if request.pipeline == 'igblast_base':
+        request.species = request.species.strip().lower()
+        request.database = request.database.strip() or next(iter(REFERENCES.get(request.species, {})), '')
+        try:
+            reference(request.species, request.database)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     config = REGISTRY[request.pipeline]
     input_path = validate_input_path(request.input_path, "input_path")
     mapping_inputs = None
@@ -466,8 +486,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
             raise HTTPException(400, '目录模式不接受 Submission 或 Barcode 参数')
         try:
             scan = input_manifest.get_scan(STATE_ROOT, request.input_scan_id, auth.require_user()['id'], request.pipeline, input_path)
-            effective, _ = runtime_preflight.effective_config(request.pipeline, {}, PIPELINE_ROOT)
-            directory_value = pipeline_input_manifest.assign(scan, request.input_assignments, request.pipeline, effective.get('SCIGBLAST_IGBLAST_SPECIES', 'human'))
+            directory_value = pipeline_input_manifest.assign(scan, request.input_assignments, request.pipeline, request.species)
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
     try:
@@ -514,6 +533,18 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
         "SCIGBLAST_OUTPUT_ROOT": str(output_root),
         "SCIGBLAST_RUN_OUTPUT_ROOT": str(output_root),
     }
+    if request.pipeline == 'igblast_base':
+        env.update(SCIGBLAST_RUN_IGBLAST_SPECIES=request.species,
+                   SCIGBLAST_RUN_IGBLAST_DATABASE=request.database,
+                   SCIGBLAST_BASE_LAYOUT='sample_pair_v1')
+    if request.primer_analysis:
+        request.primer_analysis = REPORTS.config(request.primer_analysis)
+    if request.trace_mode not in {'mapping','full'}:
+        raise HTTPException(400, '未知追溯模式')
+    if request.pipeline in {'igblast_base','pig_igblast'}:
+        env['SCIGBLAST_TRACE_MODE'] = request.trace_mode
+        if request.primer_analysis and request.primer_analysis.get('columns',{}).get('observation_stage','mapping').startswith('raw_') and request.trace_mode!='full':
+            raise HTTPException(400, '原始读端引物统计需要将“后续追溯范围”设为“全流程”')
     if not config.get('requires_match_review', True):
         for key in ('SCIGBLAST_MATCH_ONLY_FIRST_RUN', 'SCIGBLAST_RUN_MATCH_ONLY_FIRST_RUN', 'SCIGBLAST_WEB_MATCH_ONLY'):
             env[key] = '0'
@@ -536,6 +567,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     options = request.model_dump()
     if request.pipeline in {'igblast_base', 'pig_igblast'}:
         options['inline_locus_filter_version'] = 1
+    if request.pipeline=='igblast_base':options['airr_preprocessing_version']=1
     if mapping_inputs is not None:
         # UI completeness only: the runner's selection and output contract are unchanged.
         options['mapping_inputs'] = mapping_inputs
@@ -736,7 +768,7 @@ def snapshot(row: sqlite3.Row) -> dict[str, Any]:
         marker_name = stage.split('.', 1)[1] if row['pipeline'] == 'pig_igblast' else stage
         marker = state / f".pipeline_stage_{marker_name}.DONE"
         if marker.is_file() and "status=DONE" in marker.read_text(encoding="utf-8", errors="replace"):
-            if stage != '05.igblast' or not json.loads(row['options_json']).get('inline_locus_filter_version') or pipeline_done(row):
+            if stage != '05.igblast' or not json.loads(row['options_json']).get('inline_locus_filter_version') or 'locus_filter_version=1' in marker.read_text(encoding='utf-8',errors='replace').splitlines():
                 done.append(stage)
     if '01.match' in config['stages'] and '01.match' not in done and summary_files(row) and (row['status'] in {'WAITING_REVIEW', 'SUCCEEDED'} or row['current_stage'] not in {'', None, '01.match'}):
         done.insert(0, '01.match')
@@ -891,6 +923,12 @@ def launch_job(job_id: str) -> bool:
             options.pop('locus_split_version', None)
             update_job(job_id, options_json=json.dumps(options, ensure_ascii=False))
             row = get_job_row(job_id)
+    if row['pipeline']=='igblast_base':
+        options=json.loads(row['options_json'])
+        if not options.get('airr_preprocessing_version'):
+            options['airr_preprocessing_version']=1
+            update_job(job_id,options_json=json.dumps(options,ensure_ascii=False))
+            row=get_job_row(job_id)
     env = json.loads(row["env_json"])
     env = {str(key): str(value) for key, value in env.items()}
     env.update({key: value for key, value in os.environ.items() if key not in env})
@@ -916,6 +954,10 @@ def launch_job(job_id: str) -> bool:
     try:
         destination = STATE_ROOT / "jobs" / job_id
         destination.mkdir(parents=True, exist_ok=True)
+        primer_mapping=REPORTS.freeze_mapping(row,env,destination)
+        if primer_mapping:
+            metadata['primer_mapping']=primer_mapping
+            update_job(job_id,execution_json=json.dumps(metadata))
         if env.get('SCIGBLAST_WEB_MATCH_ONLY') == '1':
             (state_dir(row) / '.match_review.done').unlink(missing_ok=True)
         with (destination / f"launcher-{attempt}.log").open("ab") as launcher:
@@ -931,7 +973,7 @@ def launch_job(job_id: str) -> bool:
                 start_new_session=True,
             )
         pgid = process.pid
-    except OSError as exc:
+    except (OSError,ValueError,KeyError) as exc:
         try:
             with (destination / f'launcher-{attempt}.log').open('a', encoding='utf-8') as launcher:
                 launcher.write(f'启动失败：{exc}\n')
@@ -1091,6 +1133,8 @@ def job_config(row):
     config = dict(REGISTRY[row["pipeline"]])
     config["stages"] = list(config["stages"])
     options = json.loads(row["options_json"])
+    if row['pipeline']=='igblast_base' and not options.get('airr_preprocessing_version') and not (Path(row['output_root'])/'06.preprocessing'/row['dataset']).exists():
+        config['stages'].remove('06.preprocessing')
     # Existing six-stage jobs retain their display until explicitly resumed.
     # New invocations filter each completed chain inside stage 5.
     if row['pipeline'] in {'igblast_base', 'pig_igblast'} and not options.get('inline_locus_filter_version'):
@@ -1169,6 +1213,11 @@ def stage_reports(row):
     if row['pipeline'] == 'ir_split':
         entries.append(('datapoint', 'IR Datapoint', 'Preprocessing 后的样本指标，支持按 sample / batch 检索',
                         [root / '08.preprocessing' / dataset / 'Datapoint.csv']))
+    if row['pipeline']=='igblast_base' and '06.preprocessing' in job_config(row)['stages']:
+        entries.append(('datapoint','样本指标 Datapoint','AIRR preprocessing 后的 Expression、Unique CDR3 及免疫指标；权重为比对记录支持数',
+                        [root/'06.preprocessing'/dataset/'Datapoint.csv']))
+        entries.append(('preprocessing','AIRR 整理记录','逐样本状态、来源与计数口径',
+                        [root/'06.preprocessing'/dataset/'processing_manifest.csv']))
     reports = []
     for kind, label, description, candidates in entries:
         path = next((p for p in candidates if p and p.is_file() and is_under(p, [root])), None)
@@ -1270,6 +1319,8 @@ app.include_router(notifications.router(db))
 MAILER = notifications.Dispatcher(db)
 TREEMAP = postanalysis.Service(sys.modules[__name__])
 app.include_router(postanalysis.router(TREEMAP))
+REPORTS = repertoire_analysis.Service(sys.modules[__name__])
+app.include_router(repertoire_analysis.router(REPORTS))
 
 
 @app.middleware('http')
@@ -1326,10 +1377,12 @@ def startup() -> None:
     MAILER.start()
     schedule()
     TREEMAP.start()
+    REPORTS.start()
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    REPORTS.stop()
     TREEMAP.stop()
     MAILER.stop()
 
@@ -1342,6 +1395,11 @@ def index(request: Request) -> HTMLResponse:
 @app.get('/treemap', response_class=HTMLResponse)
 def treemap_page(request: Request):
     return templates.TemplateResponse('treemap.html', {'request': request})
+
+
+@app.get('/reports', response_class=HTMLResponse)
+def reports_page(request: Request):
+    return templates.TemplateResponse('reports.html', {'request': request})
 
 
 @app.get('/login', response_class=HTMLResponse)
@@ -1365,9 +1423,14 @@ def job_page(request: Request, job_id: str) -> HTMLResponse:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    from deployment import snapshot as deployment_snapshot
     with db() as connection:
         queued = connection.execute("SELECT COUNT(*) FROM jobs WHERE status='QUEUED'").fetchone()[0]
-    return {"status": "ok", "pipelines": list(REGISTRY), "active_jobs": active_count(), "queued_jobs": queued, "max_active_jobs": MAX_ACTIVE_JOBS}
+        deployment=deployment_snapshot(connection)
+    active=active_count()
+    return {"status": "ok", "pipelines": list(REGISTRY), "active_jobs": active, "queued_jobs": queued,
+        "max_active_jobs": MAX_ACTIVE_JOBS,'deployment_ready':deployment['ready'] and not active,
+        'deployment_blockers':deployment['counts']}
 
 
 @app.get("/api/pipelines")
@@ -1385,9 +1448,15 @@ def pipelines() -> dict[str, Any]:
             "stages": value["stages"],
             "stage_labels": value.get("stage_labels", {}),
             "form_fields": value.get("form_fields", []),
+            "new_job_visible": key != 'pig_igblast',
         }
         for key, value in REGISTRY.items()
     }
+
+
+@app.get('/api/igblast-references')
+def igblast_references():
+    return {species: list(databases) for species, databases in REFERENCES.items()}
 
 
 @app.get('/api/defaults')
@@ -1444,6 +1513,7 @@ def input_assignments(job_id: str):
         raise HTTPException(400, '任务不是目录识别模式')
     # Editing starts with a new scan; this view only restores saved assignments.
     return {'pipeline': row['pipeline'], 'input_path': row['input_path'], 'dataset_label': row['dataset'],
+            'species': options.get('species', ''), 'database': options.get('database', ''),
             'assignments': options['input_assignments'], 'generate_treemap': bool(options.get('generate_treemap'))}
 
 
@@ -1451,6 +1521,7 @@ def input_assignments(job_id: str):
 def input_rematch(job_id: str, request: CreateJob):
     with PROCESS_LOCK:
         row = get_job_row(job_id)
+        REPORTS.guard_mutation(job_id)
         if row['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING', 'ARCHIVED', 'DELETING'}:
             raise HTTPException(409, '请等待当前任务执行结束')
         if json.loads(row['options_json']).get('sample_source') != 'directory':
@@ -1459,9 +1530,20 @@ def input_rematch(job_id: str, request: CreateJob):
             raise HTTPException(400, '重新匹配不能修改任务流程或输入根')
         apply_task_policy(request, auth.require_user())
         request.dataset_label = row['dataset']
-        updated, _ = build_job(request)
         previous = json.loads(row['options_json'])
+        if row['pipeline'] == 'igblast_base':
+            old_env = json.loads(row['env_json'])
+            effective, _ = runtime_preflight.effective_config(row['pipeline'], old_env, PIPELINE_ROOT)
+            request.species = previous.get('species') or old_env.get('SCIGBLAST_RUN_IGBLAST_SPECIES') or effective.get('SCIGBLAST_IGBLAST_SPECIES', 'human')
+            request.database = previous.get('database', '')
+        updated, _ = build_job(request)
         updated_options = json.loads(updated['options_json'])
+        for report_key in ('generate_report','primer_analysis','trace_mode'):
+            if report_key in previous:
+                updated_options[report_key] = previous[report_key]
+        if row['pipeline'] == 'igblast_base' and 'species' not in previous:
+            updated_options.pop('species', None)
+            updated_options.pop('database', None)
         # Keep this task's layout when re-matching; never mix old and new files
         # inside an existing result root. New tasks opt into the compact layout.
         if row['pipeline'] == 'pig_igblast':
@@ -1611,6 +1693,7 @@ def download_submission(revision: str, filename: str, original: bool = False):
 
 @app.post("/api/jobs/{job_id}/rematch")
 def rematch(job_id: str, request: dict):
+    REPORTS.guard_mutation(job_id)
     with PROCESS_LOCK:
         row = get_job_row(job_id)
         require_match_pipeline(row)
@@ -1638,6 +1721,7 @@ def rematch(job_id: str, request: dict):
 
 @app.post("/api/jobs/{job_id}/review")
 def annotate_match(job_id: str, request: dict):
+    REPORTS.guard_mutation(job_id)
     with PROCESS_LOCK:
         row = get_job_row(job_id)
         keys = request.get('row_keys', [request.get('row_key')])
@@ -1752,6 +1836,8 @@ def apply_task_policy(request: CreateJob, user: dict) -> None:
 @app.post("/api/jobs")
 def create_job(request: CreateJob) -> dict[str, Any]:
     user = auth.require_user()
+    if request.pipeline == 'pig_igblast':
+        raise HTTPException(400, '请使用 IgBLAST base 并选择 pig 数据库')
     apply_task_policy(request, user)
     if request.pipeline not in REGISTRY:
         raise HTTPException(400, 'unknown pipeline')
@@ -1850,6 +1936,7 @@ def delete_job(job_id: str, request: dict):
         if is_under(STATE_ROOT, [output]) or is_under(PIPELINE_ROOT, [output]):
             raise HTTPException(409, '输出包含程序或任务数据库，禁止删除')
         TREEMAP.guard_mutation(job_id)
+        REPORTS.guard_mutation(job_id)
         if output.exists() and (not output.is_dir() or (row['status'] != 'DELETING' and
                 any(output.iterdir()) and not (output / '01.match' / row['dataset']).is_dir()
                 and not state_dir(row).is_dir())):
@@ -1878,6 +1965,9 @@ def delete_job(job_id: str, request: dict):
             if not current or current['status'] in {'QUEUED', 'RUNNING', 'MATCHING', 'STOPPING', 'ARCHIVING'}:
                 raise HTTPException(409, '任务状态已变化，请刷新后重试')
             active = connection.execute("SELECT 1 FROM derived_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (job_id,)).fetchone()
+            active_report = connection.execute("SELECT 1 FROM report_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (job_id,)).fetchone()
+            if active_report:
+                raise HTTPException(409, '后续分析尚未停止，请稍后重试')
             if active:
                 raise HTTPException(409, 'Treemap 尚未停止，请稍后重试')
             connection.execute("UPDATE jobs SET status='DELETING',last_error=NULL,execution_json=? WHERE id=?", (json.dumps(metadata), job_id))
@@ -1893,6 +1983,8 @@ def delete_job(job_id: str, request: dict):
             import derived_store
             derived_store.delete(connection, [item[0] for item in connection.execute('SELECT id FROM derived_runs WHERE parent_job_id=?', (job_id,))])
             connection.execute('DELETE FROM derived_runs WHERE parent_job_id=?', (job_id,))
+            connection.execute('DELETE FROM report_runs WHERE parent_job_id=?', (job_id,))
+            connection.execute('DELETE FROM report_plans WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM reviews WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM actions WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM jobs WHERE id=?', (job_id,))
