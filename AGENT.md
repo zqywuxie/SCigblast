@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+2026-11-02 非 root PID 注册修复：Base run_igblast_base.sh 不再在 SCRIPT_DIR 写 run_igblast_base.<pid>.pid，而是在解析运行时输出根后写 <OUTPUT_ROOT>/.pipeline_state/pids/run.<pid>.pid，EXIT 清理；包含批量父进程及子任务，原 stop.sh 的 */pids/*.pid 搜索兼容，不改共享两任务/四链调度与阶段处理。IR 03.split_barcode.py 的 PID_FILE 从源码目录迁移到 <OUTPUT_ROOT>/.pipeline_state/<DATASET_LABEL>/pids/split_barcode.pid，保留同一输出/数据集的运行检查和退出清理。Pig/10X/IR主启动器已使用输出内状态目录，reMapping未发现源码目录PID写入。隔离 Linux 容器以1012:1014、只读源码挂载验证：两个真实 Base Match-only 任务完成，失败启动无残留PID，现有stop.sh可停止对应输出而不影响另一个输出；IR分输出并行、同输出拒绝重复、遗留PID恢复与清理通过。没有对真实任务/结果重跑或修改权限；需新镜像部署后生效。
+
+2026-11-02 目录选择弹窗：index.html 的 file-picker-message/search 改为统一 toolbar，搜索框显式边框/内边距/图标/焦点和清空按钮；路径、列表、分页、底部操作分别固定布局，仅目录列表滚动，短屏紧凑显示并保留列表最小高度。路径可换行且保留完整 title，长目录名保留 title；目录/文件使用 SVG 图标。清空复用原搜索 input 事件，保留分页游标、目录权限和过期请求防护。样式限定 .file-picker，不改后端浏览 API。Playwright 隔离预览复用真实弹窗模板/样式和目录事件代码，已检查1360桌面、320/390窄屏、844x390横屏、长路径、目录列表滚动、查询/清空、分页、读取失败恢复、选择及Escape；临时验证脚本不保留，预览在 outputs/directory_picker_20261102。代码修改不等于部署。
+
 2026-11-02 引物配置改为上传后选列（覆盖此前 B/I、B、C:D/E:F 预设 UI）：共享 report_config.html/configPanel 用于新建任务、任务详情和独立后续分析。未上传前不展示列选择；成功解析 XLS/XLSX 后，按实际 column_count、当前工作表/表头的列字母与表头生成下拉项，空表头可带示例，不猜测字段归属、不默认选列。引物名称/序列使用可增删的成对下拉（1–12 对，支持 AA/AB 等列），请求仍为原 primer_columns 二维数组。选择后即时显示前五条及真实行号/合并单元格；更换文件/工作表/表头立即清空旧选择并忽略过期响应。未读完、读取失败、必需列或任一列对未完成时阻止提交，未上传任何表仍可按原规则只做数据量统计。统计/匹配和后端 API 未改。Playwright 已检查真实临时 XLSX 解析、无预选、多个列对、合并预览、表头越界、替换上传竞态、重置、日夜及390px布局；临时验证代码不纳入项目。
 
 2026-11-02 归档修复：web/archive_results.py 的归档范围与新建任务输出权限分开，兼容 DEFAULT_OUTPUT_ROOT、ALLOWED_OUTPUT_ROOTS 及 ARCHIVE_LEGACY_ROOTS（默认两种历史 results 根，显式空值关闭）；已登记目录仍须通过独占、输入/应用目录、symlink 校验，bind mount 同源根按同一路径比较以防别名绕过共享检查。压缩包发布前失败恢复 SUCCEEDED 并记录 archive-failed；已发布 results.tar.gz/manifest/pending 的失败保留 ARCHIVING 供校验恢复。--recover-stale 持有归档独占锁，先在线备份 SQLite，只恢复未发布且无 pid/pgid 的遗留状态，不压缩/清理结果。备份位于 runtime/maintenance/archive-recovery-backups；部署保护不绕过归档锁或数据库状态。Compose/.env.example 已提供单独历史范围参数。

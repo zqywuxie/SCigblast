@@ -7,9 +7,6 @@ export SCIGBLAST_INPUT_MANIFEST="$DIRECTORY_MANIFEST" SCIGBLAST_INPUT_MANIFEST_H
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BRANCH_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
-PID_FILE="${SCRIPT_DIR}/run_igblast_base.$$.pid"
-printf '%s\n' "$$" > "$PID_FILE"
-trap 'rm -f "$PID_FILE"' EXIT
 CONFIG_FILE="${SCRIPT_DIR}/00.pipeline_config.env"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUN_RAW_INPUT_OVERRIDE="${SCIGBLAST_RUN_RAW_INPUT_DIR:-}"
@@ -51,6 +48,14 @@ OUTPUT_ROOT="$(resolve_output_root "${SCIGBLAST_OUTPUT_ROOT:-${OUTPUT_ROOT:-}}")
 SCIGBLAST_OUTPUT_ROOT="$OUTPUT_ROOT"
 export SCIGBLAST_OUTPUT_ROOT
 RAW_INPUT_DIR="${RAW_INPUT_DIR:-}"
+
+# Installed pipeline sources may be read-only (Docker/non-root execution).
+# Register each invocation under its resolved output, including batch parents.
+PID_DIR="${OUTPUT_ROOT}/.pipeline_state/pids"
+mkdir -p "$PID_DIR"
+PID_FILE="${PID_DIR}/run.$$.pid"
+printf '%s\n' "$$" > "$PID_FILE"
+trap 'rm -f -- "$PID_FILE"' EXIT
 
 # Batch mode uses SCIGBLAST_DATA_INPUTS and optional SCIGBLAST_SUBMISSIONS arrays in
 # 00.pipeline_config.env. No barcode file is used by the baseline pipeline.

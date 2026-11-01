@@ -82,6 +82,8 @@ bash deploy.sh
 
 容器 HOME 与缓存位于可写的运行状态目录 `/var/lib/scigblast-web/home`。部署会先用目标用户检查状态、SQLite、结果和共享锁的访问权限，失败时保留旧服务。旧 root 部署首次迁移时，需等待主分析、树图及归档进程结束，备份 `web/runtime` 后将该目录和本平台结果目录中 root 拥有的对象移交给目标 UID/GID；保留其他用户的文件、权限、ACL、锁文件及参考库。已有 Docker 权限的账号可通过一次性维护容器完成，无需 sudo；不可只切换运行用户后忽略旧 SQLite/结果文件的权限。
 
+Pipeline 程序目录可以保持只读。Base 的启动 PID 写入任务输出的 `.pipeline_state/pids/run.<pid>.pid`；IR 拆分阶段写入 `.pipeline_state/<数据集>/pids/split_barcode.pid`，退出自动清理，现有 `stop.sh` 兼容这些位置。若旧镜像报 `/opt/scigblast/.../*.pid: Permission denied`，更新并重新构建部署镜像，无需切回 root 或给程序目录开放写权限。
+
 Base/Pig 逐链结果及 Pig 完成标记的原子写入遵循正常文件创建模式和目录 ACL：使用独占创建的唯一临时文件，按 umask/default ACL 生成最终权限，而不保留 mkstemp 的固定 0600。没有默认 ACL 时，umask 0022/0002 对应 0644/0664；有 ACL 时由内核计算有效权限。该修复影响后续写入，不自动更改历史文件的属主或权限；单纯修复旧文件权限无需重新 mapping。
 
 Web 和四条 pipeline 使用同一个 `/opt/conda` 环境。`environment.yml` 固定核心分析依赖版本（fastp、PANDAseq、IgBLAST、BLAST、NumPy、pandas、Biopython、scikit-bio、parmap），`requirements.txt` 固定 Web 直接依赖版本。构建时执行 `check_runtime.py` 检查导入和工具启动，实际解析出的 Conda/Python 包清单保存在镜像 `/app/conda-explicit.txt`、`/app/python-packages.txt`。这些是版本记录，不是已预生成的全依赖锁文件。

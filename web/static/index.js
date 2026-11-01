@@ -139,13 +139,14 @@
   let pickerReturnFocus=null;
   function closePicker() { pickerGeneration++;pickerPending=null;clearTimeout(pickerSearchTimer);$('#drawer-shell').inert = false; $('#drawer-shell').setAttribute('aria-hidden', String(!$('#drawer-shell').classList.contains('open'))); pickerReturnFocus?.focus(); $('#file-picker-shell').classList.remove('open'); $('#file-picker-shell').setAttribute('aria-hidden', 'true'); pickerKind = ''; pickerTarget = ''; pickerPath = ''; }
   function pickerEntry(entry) {
-    const icon = entry.type === 'directory' ? '▱' : '▤';
+    const icon = entry.type === 'directory' ? '<svg viewBox="0 0 24 24" fill="none"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/></svg>' : '<svg viewBox="0 0 24 24" fill="none"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
     const size = entry.size == null ? '' : ` · ${(entry.size / 1024).toFixed(1)} KB`;
-    return `<button type="button" class="file-tree-entry ${entry.type}" data-path="${esc(entry.path)}" data-entry-type="${entry.type}" ${entry.type==='file'&&!entry.selectable ? 'disabled' : ''}><span class="file-tree-icon">${icon}</span><span class="file-tree-copy"><strong>${esc(entry.name)}</strong><small>${entry.type === 'directory' ? '目录' : `文件${size}`}</small></span><span class="file-tree-action">${entry.type === 'directory' ? '打开 ›' : (entry.selectable ? '选择' : '')}</span></button>`;
+    return `<button type="button" class="file-tree-entry ${entry.type}" data-path="${esc(entry.path)}" data-entry-type="${entry.type}" ${entry.type==='file'&&!entry.selectable ? 'disabled' : ''}><span class="file-tree-icon" aria-hidden="true">${icon}</span><span class="file-tree-copy"><strong title="${esc(entry.name)}">${esc(entry.name)}</strong><small>${entry.type === 'directory' ? '目录' : `文件${size}`}</small></span><span class="file-tree-action">${entry.type === 'directory' ? '打开 ›' : (entry.selectable ? '选择' : '')}</span></button>`;
   }
   function renderPicker(data) {
     pickerPath = data.path || '';
     $('#file-picker-current').textContent = data.path || '允许的根目录';
+    $('#file-picker-current').title = data.path || '允许的根目录';
     $('#file-picker-up').disabled = !data.parent;
     $('#file-picker-up').dataset.path = data.parent || '';
     $('#file-picker-select').disabled = !data.can_select_current || !data.path;
@@ -158,7 +159,7 @@
   async function loadPicker(path = '', cursor = '', keepPage = false) {
     if (pickerBusy){pickerGeneration++;pickerPending=[path,cursor,keepPage];return;}
     const generation=++pickerGeneration;
-    if(!keepPage){pickerPage=0;pickerCursors=[''];$('#file-picker-search').value='';}
+    if(!keepPage){pickerPage=0;pickerCursors=[''];$('#file-picker-search').value='';$('#file-picker-clear-search').hidden=true;}
     pickerBusy = true;
     $('#file-picker-message').textContent = '读取目录中…';
     try {
@@ -543,7 +544,8 @@
   $('#file-picker-prev').addEventListener('click',()=>{if(pickerBusy||pickerPage===0)return;pickerPage--;loadPicker(pickerPath,pickerCursors[pickerPage],true);});
   $('#file-picker-next').addEventListener('click',()=>{if(pickerBusy||!pickerNext)return;pickerCursors[++pickerPage]=pickerNext;loadPicker(pickerPath,pickerNext,true);});
   $('#file-picker-reload').addEventListener('click',()=>{if(pickerBusy)return;pickerPage=0;pickerCursors=[''];loadPicker(pickerPath,'',true);});
-  $('#file-picker-search').addEventListener('input',()=>{pickerGeneration++;clearTimeout(pickerSearchTimer);pickerSearchTimer=setTimeout(()=>{pickerPage=0;pickerCursors=[''];loadPicker(pickerPath,'',true);},300);});
+  $('#file-picker-search').addEventListener('input',()=>{$('#file-picker-clear-search').hidden=!$('#file-picker-search').value;pickerGeneration++;clearTimeout(pickerSearchTimer);pickerSearchTimer=setTimeout(()=>{pickerPage=0;pickerCursors=[''];loadPicker(pickerPath,'',true);},300);});
+  $('#file-picker-clear-search').addEventListener('click',()=>{const input=$('#file-picker-search');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();});
   document.querySelectorAll('.filter-tab').forEach(tab=>tab.addEventListener('click',()=>{if(tab.dataset.filter==='all'){resetJobFilters();return;}filter=tab.dataset.filter;page=0;syncJobFilterTabs();refreshJobs();}));
   document.addEventListener('keydown', event => {
     if(event.key!=='Tab'||document.querySelector('dialog[open]'))return;

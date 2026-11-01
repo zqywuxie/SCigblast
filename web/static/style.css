@@ -90,7 +90,26 @@ input,select,textarea { font-size:var(--text-control); line-height:1.5; }
 .igblast-chain{font-weight:700;color:var(--primary)}.igblast-progress-empty{margin:5px 0}.igblast-progress>p{margin:10px 0 0;font-size:12px}
 .igblast-task-controls,.igblast-task-pager{display:flex;align-items:center;gap:8px;margin-top:12px}.igblast-task-controls input{max-width:300px}.igblast-task-pager span{margin-right:auto}
 .igblast-task-item{display:grid;grid-template-columns:minmax(0,1fr) 65px 100px;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}.igblast-task-item small{display:block;color:var(--muted);overflow-wrap:anywhere}.igblast-task-error{grid-column:1 / -1}
-.file-picker-pager{display:flex;align-items:center;gap:8px;padding:8px 0}.file-picker-pager span{font-size:12px}#file-picker-search{width:100%;margin:0 0 8px}
+.file-picker-pager{display:flex;align-items:center;gap:8px;padding:8px 0}.file-picker-pager span{font-size:12px}
+.file-picker{max-height:min(760px,calc(100dvh - 30px))}
+.file-picker>.file-picker-header,.file-picker>.file-picker-path,.file-picker-toolbar,.file-picker>.file-picker-pager,.file-picker>.file-picker-footer{flex-shrink:0}
+.file-picker .file-picker-path>.button{flex:none}
+.file-picker .file-picker-path code{flex:1;white-space:normal;overflow-wrap:anywhere;line-height:1.7;max-height:64px;overflow:auto}
+.file-picker-toolbar{padding:14px 24px 12px;border-bottom:1px solid var(--line);background:var(--surface)}
+.file-picker-toolbar .file-picker-message{padding:0;margin:0 0 10px;line-height:1.6;overflow-wrap:anywhere}
+.file-picker-search{display:flex;align-items:center;gap:9px;width:100%;min-width:0;min-height:42px;padding:0 12px;border:1px solid var(--control-border,var(--line-strong));border-radius:8px;background:var(--surface);transition:border-color .15s,box-shadow .15s}
+.file-picker-search:focus-within{border-color:var(--focus);box-shadow:0 0 0 3px var(--focus-soft)}
+.file-picker-search>svg{flex:none;width:16px;height:16px;stroke:var(--muted);stroke-width:1.6;stroke-linecap:round}
+.file-picker-search #file-picker-search{display:block;flex:1;min-width:0;width:100%;height:40px;margin:0;padding:0;border:0;border-radius:0;outline:0;box-shadow:none;background:transparent;color:var(--ink);font:400 13px/1.5 var(--font);appearance:none}
+#file-picker-search::-webkit-search-cancel-button{appearance:none}
+.file-picker-clear{display:grid;place-items:center;flex:none;width:26px;height:26px;padding:0;border:0;border-radius:5px;background:var(--surface-soft);color:var(--muted);font:18px/1 var(--font);cursor:pointer}
+.file-picker-clear[hidden]{display:none}.file-picker-clear:hover{color:var(--ink)}.file-picker-clear:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.file-picker>.file-tree{flex:1 1 auto;min-height:100px;padding:10px 15px;overscroll-behavior:contain;scrollbar-gutter:stable}
+.file-picker .file-tree-icon>svg{width:17px;height:17px;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.file-picker>.file-picker-pager{padding:10px 24px;border-top:1px solid var(--line);gap:8px;flex-wrap:wrap}
+.file-picker>.file-picker-pager span{margin-right:auto}
+@media(max-width:760px){.file-picker{max-height:calc(100dvh - 20px)}.file-picker-toolbar{padding:12px 18px}.file-picker>.file-tree{padding:8px 9px;min-height:64px}.file-picker>.file-picker-pager{padding:10px 18px}.file-picker .file-picker-header h2{font-size:18px}}
+@media(max-height:520px){.file-picker{overflow:auto}.file-picker>.file-tree{min-height:72px}.file-picker .file-picker-header{padding:8px 18px}.file-picker .file-picker-header h2{font-size:18px}.file-picker .file-picker-path{padding:6px 18px}.file-picker-toolbar{padding:8px 18px}.file-picker-toolbar .file-picker-message{font-size:11px;margin-bottom:6px}.file-picker-search{min-height:36px}.file-picker-search #file-picker-search{height:34px}.file-picker .file-picker-path code{max-height:24px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.file-picker>.file-picker-pager{padding:6px 18px}.file-picker>.file-picker-footer{padding:8px 18px}.file-picker .button{min-height:34px;padding:6px 9px;font-size:12px}}
 @media(max-width:700px){.igblast-progress{padding:14px}.igblast-progress-row{grid-template-columns:minmax(0,1fr) auto;gap:5px 12px}.igblast-progress-row>div{grid-column:1}.igblast-progress-row>span:last-child{text-align:right}}
 .filter-tab span,.topbar-caption { font-size:var(--text-caption); }
 .topbar-right,.stat-label { font-size:var(--text-small); }
