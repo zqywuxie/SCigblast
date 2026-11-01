@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+2026-11-02 引物配置改为上传后选列（覆盖此前 B/I、B、C:D/E:F 预设 UI）：共享 report_config.html/configPanel 用于新建任务、任务详情和独立后续分析。未上传前不展示列选择；成功解析 XLS/XLSX 后，按实际 column_count、当前工作表/表头的列字母与表头生成下拉项，空表头可带示例，不猜测字段归属、不默认选列。引物名称/序列使用可增删的成对下拉（1–12 对，支持 AA/AB 等列），请求仍为原 primer_columns 二维数组。选择后即时显示前五条及真实行号/合并单元格；更换文件/工作表/表头立即清空旧选择并忽略过期响应。未读完、读取失败、必需列或任一列对未完成时阻止提交，未上传任何表仍可按原规则只做数据量统计。统计/匹配和后端 API 未改。Playwright 已检查真实临时 XLSX 解析、无预选、多个列对、合并预览、表头越界、替换上传竞态、重置、日夜及390px布局；临时验证代码不纳入项目。
+
 2026-11-02 归档修复：web/archive_results.py 的归档范围与新建任务输出权限分开，兼容 DEFAULT_OUTPUT_ROOT、ALLOWED_OUTPUT_ROOTS 及 ARCHIVE_LEGACY_ROOTS（默认两种历史 results 根，显式空值关闭）；已登记目录仍须通过独占、输入/应用目录、symlink 校验，bind mount 同源根按同一路径比较以防别名绕过共享检查。压缩包发布前失败恢复 SUCCEEDED 并记录 archive-failed；已发布 results.tar.gz/manifest/pending 的失败保留 ARCHIVING 供校验恢复。--recover-stale 持有归档独占锁，先在线备份 SQLite，只恢复未发布且无 pid/pgid 的遗留状态，不压缩/清理结果。备份位于 runtime/maintenance/archive-recovery-backups；部署保护不绕过归档锁或数据库状态。Compose/.env.example 已提供单独历史范围参数。
 
 本次在线恢复：7167252126074e48、b7d0e8c7d6f74fb0、79bc5c38f35f4c92 从遗留 ARCHIVING 恢复 SUCCEEDED，结果文件未变更；维护脚本已原子更新，旧脚本和恢复前 SQLite 均有备份。三任务历史路径 dry-run 通过，部署探针确认主分析/后分析/树图/归档均空闲。没有重启容器或构建部署。临时合成验证覆盖真实压缩/逐字节校验、发布前失败恢复、已发布日志保留、bind mount 共享冲突、根目录/symlink 保护、SQLite 备份与遗留进程保护。

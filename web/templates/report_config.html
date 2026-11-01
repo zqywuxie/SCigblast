@@ -1,5 +1,5 @@
 <details class="rp-config advanced-details">
-  <summary class="rp-config-summary"><span class="rp-config-title">引物匹配配置</span><span class="rp-config-caption">默认列已设置，可预览核对</span></summary>
+  <summary class="rp-config-summary"><span class="rp-config-title">引物匹配配置</span><span class="rp-config-caption">上传表格后选择对应列</span></summary>
   <div class="rp-config-body">
     <div class="rp-section-heading"><span class="rp-step">01</span><h4>上传数据表</h4><span class="rp-section-hint">XLS / XLSX</span></div>
     <div class="rp-upload-layout">
@@ -20,17 +20,22 @@
       <label hidden>Submission 工作表<select data-rp-field="submission_sheet"><option value="">上传后选择</option></select></label>
       <label hidden>引物工作表<select data-rp-field="primer_sheet"><option value="">上传后选择</option></select></label>
     </div>
-    <div class="rp-section-heading"><span class="rp-step">02</span><h4>确认列对应</h4><span class="rp-section-hint">列字母修改后自动预览</span></div>
-    <div class="rp-column-grid rp-mapping-layout">
-      <section class="rp-map-group" aria-label="Submission 列对应">
+    <div class="rp-section-heading"><span class="rp-step">02</span><h4>选择对应列</h4><span class="rp-section-hint">从表头选择 · 即时预览</span></div>
+    <p class="rp-column-empty" data-rp-column-empty role="status">上传数据表后，将自动识别工作表和列。</p>
+    <div class="rp-column-grid rp-mapping-layout" data-rp-column-mapping hidden>
+      <section class="rp-map-group" data-rp-map-group="submission" aria-label="Submission 列对应" hidden>
         <div class="rp-map-heading"><strong>Submission</strong><span>样本 → 引物组</span></div>
-        <label class="rp-map-field"><span>样本列</span><input data-rp-field="sample_column" value="B" maxlength="3" aria-label="Submission 样本列"><small data-rp-column-note="sample_column">上传后显示列内容</small></label>
-        <label class="rp-map-field"><span>引物组列</span><input data-rp-field="submission_join_column" value="I" maxlength="3" aria-label="Submission 引物组列"><small data-rp-column-note="submission_join_column">上传后显示列内容</small></label>
+        <label class="rp-map-field"><span>样本列</span><select data-rp-field="sample_column" aria-label="Submission 样本列" disabled><option value="">上传后选择</option></select><small data-rp-column-note="sample_column">请选择样本列</small></label>
+        <label class="rp-map-field"><span>引物组列</span><select data-rp-field="submission_join_column" aria-label="Submission 引物组列" disabled><option value="">上传后选择</option></select><small data-rp-column-note="submission_join_column">请选择引物组列</small></label>
       </section>
-      <section class="rp-map-group" aria-label="引物表列对应">
+      <section class="rp-map-group" data-rp-map-group="primer" aria-label="引物表列对应" hidden>
         <div class="rp-map-heading"><strong>引物序列表</strong><span>引物组 → 名称与序列</span></div>
-        <label class="rp-map-field"><span>分组列</span><input data-rp-field="primer_join_column" value="B" maxlength="3" aria-label="引物表分组列"><small data-rp-column-note="primer_join_column">上传后显示列内容</small></label>
-        <label class="rp-map-field"><span>名称 : 序列列对</span><input data-rp-field="primer_columns" value="C:D,E:F" placeholder="例如 C:D,E:F" aria-label="引物名称与序列列对"><small data-rp-column-note="primer_columns">上传后显示名称与序列列头</small></label>
+        <label class="rp-map-field"><span>分组列</span><select data-rp-field="primer_join_column" aria-label="引物表分组列" disabled><option value="">上传后选择</option></select><small data-rp-column-note="primer_join_column">请选择分组列</small></label>
+        <div class="rp-primer-pair-editor">
+          <div class="rp-pair-heading"><strong>引物名称与序列</strong><button type="button" class="button button-ghost button-small" data-rp-add-pair disabled>＋ 添加列对</button></div>
+          <div data-rp-primer-pairs></div>
+          <small data-rp-column-note="primer_columns">每组分别选择名称列和序列列</small>
+        </div>
       </section>
     </div>
     <details class="advanced-details rp-column-check" data-rp-selected-columns hidden>

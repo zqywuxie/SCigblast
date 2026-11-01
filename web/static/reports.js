@@ -20,13 +20,50 @@ window.RepertoireReports = (() => {
     const columnNumber=text=>{text=text.trim().toUpperCase();if(!/^[A-Z]{1,3}$/.test(text))throw Error('列须用 Excel 字母，例如 B、I、AA');return [...text].reduce((n,c)=>n*26+c.charCodeAt(0)-64,0)-1;};
     const columnName=index=>{let name='';for(let n=index+1;n>0;n=Math.floor((n-1)/26))name=String.fromCharCode(65+(n-1)%26)+name;return name;};
     const headerRow=key=>{const row=Number(field(key+'_header_row').value);if(!Number.isInteger(row)||row<1||row>500000)throw Error('表头行须为 1–500000 的整数');return row;};
+    const mappingFields={submission:['sample_column','submission_join_column'],primer:['primer_join_column']};
+    const pairs=()=>[...root.querySelectorAll('[data-rp-primer-pair]')].map(row=>[row.querySelector('[data-rp-pair-name]').value,row.querySelector('[data-rp-pair-sequence]').value]);
+    const readyBook=key=>{try{return books[key]&&books[key].sheet===field(key+'_sheet').value&&(books[key].preview_start||0)===headerRow(key)-1;}catch{return false;}};
+    function columnOptions(key){
+      const book=books[key],header=headerRow(key)-1;
+      return '<option value="">请选择列</option>'+Array.from({length:book.column_count},(_,index)=>{
+        const letter=columnName(index),title=cell(book,header,index).value;
+        const example=Array.from({length:5},(_,i)=>cell(book,header+i+1,index,true).value).find(Boolean)||'';
+        const label=title||('空表头'+(example?' · '+example:''));
+        return `<option value="${letter}">${esc(letter+' · '+label.slice(0,90))}</option>`;
+      }).join('');
+    }
+    function columnsChanged(key){previewKey=key;showPreview();$('[data-rp-selected-columns]').open=true;error.classList.add('hidden');}
+    function addPair(){
+      if(!readyBook('primer')||pairs().length>=12)return;
+      const row=document.createElement('div');row.className='rp-primer-pair';row.dataset.rpPrimerPair='';
+      row.innerHTML=`<label>名称列<select data-rp-pair-name aria-label="引物名称列">${columnOptions('primer')}</select></label><span class="rp-pair-arrow" aria-hidden="true">→</span><label>序列列<select data-rp-pair-sequence aria-label="引物序列列">${columnOptions('primer')}</select></label><button type="button" class="button button-ghost button-small" data-rp-remove-pair aria-label="移除此名称与序列列对">移除</button>`;
+      row.querySelectorAll('select').forEach(select=>select.addEventListener('change',()=>columnsChanged('primer')));
+      row.querySelector('[data-rp-remove-pair]').onclick=()=>{row.remove();syncPairButtons();columnsChanged('primer');};
+      $('[data-rp-primer-pairs]').append(row);syncPairButtons();
+    }
+    function syncPairButtons(){
+      const rows=[...root.querySelectorAll('[data-rp-primer-pair]')];
+      rows.forEach((row,index)=>{row.querySelector('[data-rp-remove-pair]').disabled=rows.length===1;row.querySelector('[data-rp-pair-name]').setAttribute('aria-label',`第 ${index+1} 对引物名称列`);row.querySelector('[data-rp-pair-sequence]').setAttribute('aria-label',`第 ${index+1} 对引物序列列`);});
+      $('[data-rp-add-pair]').disabled=!readyBook('primer')||rows.length>=12;
+    }
+    function clearColumns(key){
+      mappingFields[key].forEach(name=>{field(name).innerHTML='<option value="">上传后选择</option>';field(name).disabled=true;});
+      if(key==='primer'){$('[data-rp-primer-pairs]').replaceChildren();syncPairButtons();}
+    }
+    function populateColumns(key){
+      if(headerRow(key)>books[key].row_count)throw Error('所选表头行超出工作表，请调整表头行');
+      const options=columnOptions(key);
+      mappingFields[key].forEach(name=>{field(name).innerHTML=options;field(name).disabled=false;});
+      if(key==='primer'){$('[data-rp-primer-pairs]').replaceChildren();addPair();}
+    }
+    $('[data-rp-add-pair]').onclick=()=>{addPair();columnsChanged('primer');};
     function fail(e){error.textContent=e.message;error.classList.remove('hidden');}
     function uploadState(key,state){
       const card=$(`[data-rp-file-card="${key}"]`);card.dataset.state=state;
       $(`[data-rp-upload-state="${key}"]`).textContent={empty:'未选择',loading:'读取中',ready:'已载入',error:'未完成'}[state];
       $(`[data-rp-upload-action="${key}"]`).textContent=state==='ready'?'更换文件':'选择文件';
     }
-    function resetSheet(key){const select=field(key+'_sheet');select.disabled=false;select.innerHTML='<option value="">上传后选择</option>';select.closest('label').hidden=true;const note=$(`[data-rp-upload-note="${key}"]`);note.textContent=key==='submission'?'样本与引物组对应表':'引物名称与序列表';note.removeAttribute('title');uploadState(key,'empty');}
+    function resetSheet(key){clearColumns(key);const select=field(key+'_sheet');select.disabled=false;select.innerHTML='<option value="">上传后选择</option>';select.closest('label').hidden=true;const note=$(`[data-rp-upload-note="${key}"]`);note.textContent=key==='submission'?'样本与引物组对应表':'引物名称与序列表';note.removeAttribute('title');uploadState(key,'empty');}
     function syncPreviewTabs(){
       if(!books[previewKey])previewKey=Object.keys(books)[0]||'submission';
       root.querySelectorAll('[data-rp-preview-tab]').forEach(button=>{const key=button.dataset.rpPreviewTab,active=key===previewKey;button.hidden=!books[key];button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;});
@@ -45,21 +82,28 @@ window.RepertoireReports = (() => {
       if(inherit)for(const merged of book.merged||[])if(row>=merged.rows[0]&&row<merged.rows[1]&&col>=merged.columns[0]&&col<merged.columns[1])return {value:String(merged.value??''),merged:row!==merged.rows[0]||col!==merged.columns[0]};
       return {value:String(book.preview[row-(book.preview_start||0)]?.[col]??''),merged:false};
     }
-    function selected(key){
+    function selected(key,required=false){
       const columns=key==='submission'?[['sample_column','样本',false],['submission_join_column','引物组',true]]:[['primer_join_column','引物组',true]];
-      const result=columns.map(([name,role,inherit])=>({name,role,inherit,letter:field(name).value.trim().toUpperCase(),index:columnNumber(field(name).value)}));
+      const result=[];
+      for(const [name,role,inherit] of columns){const letter=field(name).value;if(!letter){if(required)throw Error(`请选择${key==='submission'?' Submission':'引物表'}的${role}列`);continue;}result.push({name,role,inherit,letter,index:columnNumber(letter)});}
       if(key==='primer'){
-        const pairs=field('primer_columns').value.split(',').map(p=>p.trim()).filter(Boolean);
-        if(!pairs.length||pairs.length>12)throw Error('请选择 1–12 对名称:序列列，例如 C:D,E:F');
-        for(const pair of pairs){const parts=pair.split(':');if(parts.length!==2)throw Error('名称:序列列对格式为 C:D,E:F');parts.forEach((text,i)=>result.push({name:'primer_columns',role:i?'序列':'名称',inherit:false,letter:text.trim().toUpperCase(),index:columnNumber(text)}));}
+        const chosen=pairs();
+        if(required&&(!chosen.length||chosen.length>12))throw Error('请选择 1–12 对引物名称与序列列');
+        for(const [index,pair] of chosen.entries()){
+          if(required&&pair.some(letter=>!letter))throw Error(`请选择第 ${index+1} 对引物的名称列和序列列`);
+          if(required&&pair[0]===pair[1])throw Error(`第 ${index+1} 对引物的名称列和序列列不能相同`);
+          pair.forEach((letter,i)=>{if(letter)result.push({name:'primer_columns',role:i?'序列':'名称',inherit:false,letter,index:columnNumber(letter)});});
+        }
       }
+      if(result.some(col=>col.index>=books[key].column_count))throw Error('所选列不在当前工作表中，请重新选择');
       return result;
     }
     function showPreview(){
       const sections=[];
       for(const key of ['submission','primer']){
-        const book=books[key],names=key==='submission'?['sample_column','submission_join_column']:['primer_join_column','primer_columns'];
-        names.forEach(name=>{const note=$(`[data-rp-column-note="${name}"]`);note.textContent=book?'':'上传后显示列内容';note.classList.remove('rp-column-warning');});
+        const book=readyBook(key)?books[key]:null,names=key==='submission'?['sample_column','submission_join_column']:['primer_join_column','primer_columns'];
+        $(`[data-rp-map-group="${key}"]`).hidden=!book;
+        names.forEach(name=>{const note=$(`[data-rp-column-note="${name}"]`);note.textContent='请选择对应列';note.classList.remove('rp-column-warning');});
         if(!book)continue;
         const title=(key==='submission'?'Submission':'引物表')+' · '+book.sheet;
         try{
@@ -68,6 +112,7 @@ window.RepertoireReports = (() => {
           const columns=selected(key),sampleRows=Array.from({length:Math.max(0,Math.min(5,book.row_count-header-1))},(_,i)=>header+i+1);
           for(const name of names){
             const note=$(`[data-rp-column-note="${name}"]`),chosen=columns.filter(c=>c.name===name);
+             if(!chosen.length)continue;
             if(name==='primer_columns')note.textContent=chosen.map(c=>c.letter+'：'+(cell(book,header,c.index).value||'空列')).join('；');
             else{
               const col=chosen[0],values=[...new Set(sampleRows.map(r=>cell(book,r,col.index,col.inherit).value).filter(Boolean))].slice(0,3);
@@ -75,9 +120,10 @@ window.RepertoireReports = (() => {
               if(!values.length)note.classList.add('rp-column-warning');
             }
           }
-          sections.push(`<section id="${previewId}-${key}" role="tabpanel" aria-labelledby="${previewId}-${key}-tab" data-rp-preview-section="${key}"><div class="rp-preview-heading"><strong>${key==='submission'?'Submission':'引物表'}</strong><span class="rp-sheet-name">${esc(book.sheet)}</span><span class="rp-row-count">${sampleRows.length} 条预览</span></div>${previewTable(book,header,columns,sampleRows)}</section>`);
+          sections.push(`<section id="${previewId}-${key}" role="tabpanel" aria-labelledby="${previewId}-${key}-tab" data-rp-preview-section="${key}"><div class="rp-preview-heading"><strong>${key==='submission'?'Submission':'引物表'}</strong><span class="rp-sheet-name">${esc(book.sheet)}</span><span class="rp-row-count">${sampleRows.length} 条预览</span></div>${columns.length?previewTable(book,header,columns,sampleRows):'<p class="rp-preview-message">选择对应列后，在此核对内容。</p>'}</section>`);
         }catch(e){names.forEach(name=>{const note=$(`[data-rp-column-note="${name}"]`);note.textContent=e.message;note.classList.add('rp-column-warning');});sections.push(`<section id="${previewId}-${key}" role="tabpanel" aria-labelledby="${previewId}-${key}-tab" data-rp-preview-section="${key}"><p class="rp-preview-message">${esc(title)}：${esc(e.message)}</p></section>`);}
       }
+      $('[data-rp-column-mapping]').hidden=!sections.length;$('[data-rp-column-empty]').hidden=!!sections.length;
       $('[data-rp-selected-columns]').hidden=!sections.length;
       $('[data-rp-selected-preview]').innerHTML=sections.join('');syncPreviewTabs();
       $('[data-rp-workbook-preview]').innerHTML=Object.entries(books).map(([key,book])=>`<h4>${key==='submission'?'Submission':'引物表'} · ${esc(book.sheet)}</h4>${table(book.preview.slice(0,10).map((row,index)=>Object.fromEntries([['行',(book.preview_start||0)+index+1],...row.map((value,col)=>[columnName(col),value])])) )}`).join('');
@@ -86,17 +132,17 @@ window.RepertoireReports = (() => {
       if(!uploads[key]){showPreview();return;}
       let header;try{header=headerRow(key);}catch(e){showPreview();fail(e);return;}
       const token=uploads[key],revision=generation,epoch=++revisions[key],sheet=field(key+'_sheet').value;
-      pending++;showPreview();
+      delete books[key];clearColumns(key);pending++;showPreview();uploadState(key,'loading');
       try{
         const book=await api(`/api/reports/workbook/${token}?sheet=${encodeURIComponent(sheet)}&header_row=${header}`);
         if(revision!==generation||epoch!==revisions[key]||uploads[key]!==token)return;
-        books[key]=book;showPreview();error.classList.add('hidden');
-      }catch(e){if(revision===generation&&epoch===revisions[key]){delete books[key];showPreview();fail(e);}}
+        books[key]=book;populateColumns(key);uploadState(key,'ready');showPreview();error.classList.add('hidden');
+      }catch(e){if(revision===generation&&epoch===revisions[key]){delete books[key];clearColumns(key);uploadState(key,'error');showPreview();fail(e);}}
       finally{pending--;}
     }
     root.querySelectorAll('[data-rp-upload]').forEach(input=>input.addEventListener('change',async()=>{
       const file=input.files[0],key=input.dataset.rpUpload,revision=generation,epoch=++revisions[key];
-      delete uploads[key];delete books[key];showPreview();if(!file){resetSheet(key);return;}
+      delete uploads[key];delete books[key];resetSheet(key);showPreview();if(!file)return;
       let header;try{header=headerRow(key);}catch(e){fail(e);return;}
       pending++;error.classList.add('hidden');uploadState(key,'loading');field(key+'_sheet').disabled=true;$(`[data-rp-upload-note="${key}"]`).textContent='上传中…';
       try{
@@ -105,27 +151,28 @@ window.RepertoireReports = (() => {
         if(revision!==generation||epoch!==revisions[key])return;
         uploads[key]=data.id;books[key]=data;
         const sheetSelect=field(key+'_sheet');sheetSelect.innerHTML=data.sheets.map(name=>`<option>${esc(name)}</option>`).join('');sheetSelect.value=data.sheet;sheetSelect.closest('label').hidden=data.sheets.length<=1;
-        $(`[data-rp-upload-note="${key}"]`).textContent=file.name;$(`[data-rp-upload-note="${key}"]`).title=file.name;uploadState(key,'ready');previewKey=key;showPreview();
+        populateColumns(key);$(`[data-rp-upload-note="${key}"]`).textContent=file.name;$(`[data-rp-upload-note="${key}"]`).title=file.name;uploadState(key,'ready');previewKey=key;showPreview();
         if(headerRow(key)-1!==data.preview_start)await refreshBook(key);
-      }catch(e){if(revision===generation&&epoch===revisions[key]){uploadState(key,'error');fail(e);$(`[data-rp-upload-note="${key}"]`).textContent='上传失败，请重新选择';}}
-      finally{pending--;if(revision===generation)field(key+'_sheet').disabled=false;}
+      }catch(e){if(revision===generation&&epoch===revisions[key]){delete books[key];clearColumns(key);showPreview();uploadState(key,'error');fail(e);$(`[data-rp-upload-note="${key}"]`).textContent='读取失败，请重新选择文件或调整表头行';}}
+      finally{pending--;if(revision===generation&&epoch===revisions[key])field(key+'_sheet').disabled=false;}
     }));
     for(const key of ['submission','primer']){
       field(key+'_sheet').addEventListener('change',()=>{previewKey=key;refreshBook(key);});
-      field(key+'_header_row').addEventListener('input',showPreview);
+      field(key+'_header_row').addEventListener('input',()=>{if(uploads[key])revisions[key]++;delete books[key];clearColumns(key);showPreview();});
       field(key+'_header_row').addEventListener('change',()=>{previewKey=key;refreshBook(key);});
     }
-    for(const name of ['sample_column','submission_join_column','primer_join_column','primer_columns'])field(name).addEventListener('input',()=>{previewKey=name.startsWith('primer')?'primer':'submission';showPreview();$('[data-rp-selected-columns]').open=true;});
+    for(const [key,names] of Object.entries(mappingFields))for(const name of names)field(name).addEventListener('change',()=>columnsChanged(key));
     const result={value(){
       if(pending)throw Error('请等待工作簿预览加载完成');
-      if(!uploads.submission&&!uploads.primer)return {};
+      if(!uploads.submission&&!uploads.primer){if([...root.querySelectorAll('[data-rp-upload]')].some(input=>input.files.length))throw Error('数据表尚未成功读取，请重新上传后选择对应列');return {};}
       if(!uploads.submission||!uploads.primer)throw Error('请同时上传 Submission 和引物表');
+      for(const key of ['submission','primer']){if(!readyBook(key))throw Error('请等待工作表和表头读取完成，读取失败时请重新上传');selected(key,true);}
       const columns={};root.querySelectorAll('[data-rp-field]').forEach(input=>columns[input.dataset.rpField]=input.type==='checkbox'?input.checked:input.value.trim());
-      columns.primer_columns=columns.primer_columns.split(',').filter(Boolean).map(pair=>{const parts=pair.split(':').map(s=>s.trim());if(parts.length!==2)throw Error('名称:序列列对格式为 C:D,E:F');return parts;});
+      columns.primer_columns=pairs();
       ['submission_header_row','primer_header_row','umi_length','barcode_length'].forEach(k=>columns[k]=Number(columns[k]));
       return {submission_id:uploads.submission,primer_id:uploads.primer,columns};
     },reset(){generation++;Object.keys(uploads).forEach(k=>delete uploads[k]);Object.keys(books).forEach(k=>delete books[k]);root.querySelectorAll('input[type=file]').forEach(i=>i.value='');for(const key of ['submission','primer'])resetSheet(key);previewKey='submission';showPreview();$('[data-rp-selected-columns]').open=false;error.classList.add('hidden');}};
-    configs.set(root,result);return result;
+    for(const key of ['submission','primer'])clearColumns(key);showPreview();configs.set(root,result);return result;
   }
   function table(rows,columns){
     if(!rows.length)return '<p class="muted">暂无数据</p>';
