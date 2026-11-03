@@ -1,6 +1,7 @@
 # models/shm_calculate.py
 from Bio import pairwise2
 import pandas as pd
+from .call_resolution import unique_constant_gene
 import numpy as np
 import parmap
 import multiprocessing as mp
@@ -170,6 +171,8 @@ def calculate_shm(df: pd.DataFrame) -> pd.DataFrame:
     return final_df
 
 def calculate_shm_result(df):
+    df=df.copy()
+    df['c_call']=df['c_call'].map(unique_constant_gene)
     df_shm = calculate_shm(df)
     shm_dict = {}
 

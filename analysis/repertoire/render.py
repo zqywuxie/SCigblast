@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from pathlib import Path
 import textwrap
+import os
 
 from . import FIGURE_CATEGORIES, FIGURE_VERSION
 from .io import label_name
@@ -12,7 +13,7 @@ from .palette import MATCH_COLORS,constant_color,text_on
 STYLE_VERSION = FIGURE_VERSION
 
 
-def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
+def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None,cache_root=None):
     """Draw supported figures; an optional callback audits final geometry."""
     import matplotlib
     matplotlib.use('Agg')
@@ -25,7 +26,7 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
 
     fonts = {font.name for font in font_manager.fontManager.ttflist}
     preferred = next((n for n in ('Arial', 'DejaVu Sans') if n in fonts), 'sans-serif')
-    cjk = next((n for n in ('Microsoft YaHei', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'SimHei') if n in fonts), 'DejaVu Sans')
+    cjk = next((n for n in ('Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans CJK JP', 'WenQuanYi Micro Hei', 'SimHei') if n in fonts), 'DejaVu Sans')
     theme = {
         'font.family': [preferred, cjk], 'font.sans-serif': [preferred, cjk, 'DejaVu Sans'],
         'font.size': 9.5, 'axes.titlesize': 11, 'axes.labelsize': 9,
@@ -45,6 +46,12 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
 
     def wrapped(label, width=42):
         # Line wrapping preserves full identifiers.
+        label = {'[多重匹配]':'[Multiple matches]', '[未匹配]':'[Unmatched]',
+            '[未评估]':'[Unassessed]', '[多基因候选]':'[Multiple gene calls]',
+            '[无注释]':'[Unannotated]', '[未配置 C 参考]':'[C reference unavailable]',
+            '[未评估 C 注释]':'[C annotation unassessed]', '[关联不唯一，未评估]':'[Ambiguous lineage]',
+            '[缺少输出，未评估]':'[Missing output]', '[最终无记录，原因未知]':'[Absent from final output]',
+            '[未进入比对]':'[Not mapped]', '[阶段关联不可用]':'[Stage lineage unavailable]'}.get(label, label)
         return '\n'.join('\n'.join(textwrap.wrap(line, width, break_long_words=True, break_on_hyphens=False)) for line in str(label).split('\n'))
 
     def heading(fig, title, left=.08, y=.955):
@@ -59,7 +66,11 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
             fig.canvas.draw()
             if figure_audit is not None:
                 figure_audit(fig, name, exclude_axes=exclude_axes)
-            fig.savefig(path, dpi=300, bbox_inches='tight', pad_inches=.12)
+            temporary=path.with_name('.'+path.name+'.'+str(os.getpid())+'.tmp')
+            try:
+                fig.savefig(temporary,format='png',dpi=300,bbox_inches='tight',pad_inches=.12)
+                os.replace(temporary,path)
+            finally:temporary.unlink(missing_ok=True)
         finally:
             plt.close(fig)
         artifacts.append(dict(id=name, title=title, sample=sample, chain=chain,
@@ -103,80 +114,47 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
         return fig, ax, bars
 
     with plt.rc_context(theme):
+        from .output_metrics import render as render_outputs
+        render_outputs(data.get('sample_output_summary',[]),pyplot=plt,save=save)
         from pipeline_stage_metrics import summarize_volume
         volumes = data.get('stage_volumes') or summarize_volume(data['stages'], data.get('samples', []))
         from .render_stages import render_overview
         render_overview(volumes,pyplot=plt,save=save)
+        for sample in sorted({r['sample'] for r in volumes}):
+            render_overview([r for r in volumes if r['sample']==sample],pyplot=plt,save=save,target_sample=sample)
 
-        matching_totals = data.get('matching_totals', [])
-        if matching_totals:
-            from .matching import summarize_matching
-            categories = {'unique': '唯一匹配', 'multiple': '多重匹配', 'unmatched': '未匹配'}
-            grouped = defaultdict(dict)
-            for row in summarize_matching(matching_totals):
-                grouped[(row['sample'], row['unit'])][row['match_class']] = row
-            order = {sample: index for index, sample in enumerate(data.get('matching_sample_order', []))}
-            keys = sorted(grouped, key=lambda key: (order.get(key[0], len(order)), key))
-            if any(row['match_class'] in categories and row['count'] for row in matching_totals):
-                width = max(8.2, .88*len(keys)+1.4)
-                fig, ax = plt.subplots(figsize=(width, 4.5))
-                labels_map = data.get('matching_sample_labels', {})
-                repeated = Counter(sample for sample, _ in keys)
-                labels = [wrapped(labels_map.get(sample, sample), 22) + ('\n'+unit if repeated[sample]>1 else '') for sample, unit in keys]
-                rotation = 30 if any(len(label)>18 for label in labels) else 0
-                fig.subplots_adjust(left=.075, right=.985, top=.77, bottom=.32 if rotation else .25)
-                positions = np.arange(len(keys))
-                bottom = np.zeros(len(keys))
-                for category, color in zip(categories, (blue, amber, neutral)):
-                    values = np.array([grouped[key][category]['percent'] or 0 for key in keys])
-                    ax.bar(positions, values, bottom=bottom, width=.6, color=color, label=categories[category], edgecolor='white', linewidth=.4)
-                    bottom += values
-                for index, key in enumerate(keys):
-                    row = grouped[key]['unique']
-                    value = row['percent']
-                    if value is None:
-                        ax.text(index, 50, '—', ha='center', va='center', color='#66737F')
-                    elif value >= 12:
-                        ax.text(index, value/2, f'{value:.1f}%', ha='center', va='center', fontsize=9, color='white')
-                    else:
-                        ax.text(index, 5, f'{value:.4f}%' if 0<value<.1 else f'{value:.1f}%', ha='center', va='center', fontsize=9, color='#233343')
-                ax.set_ylim(0, 100)
-                center=(len(keys)-1)/2
-                span=max(1.2,center+.6)
-                ax.set_xlim(center-span,center+span)
-                ax.set_yticks([0, 25, 50, 75, 100], ['0%', '25%', '50%', '75%', '100%'])
-                ax.set_xticks(positions, labels, rotation=rotation, ha='right' if rotation else 'center', rotation_mode='anchor')
-                ax.tick_params(axis='x', length=0, pad=9)
-                # Measure rendered identifiers, including wide CJK glyphs, rather
-                # than assuming character count predicts label clearance.
-                for angle in (30, 45, 60):
-                    fig.canvas.draw()
-                    boxes = [label.get_window_extent() for label in ax.get_xticklabels()]
-                    crowded = any(left.x1+fig.dpi*5/72 > right.x0 for left, right in zip(boxes, boxes[1:]))
-                    if not crowded:
-                        break
-                    if angle >= rotation:
-                        for label in ax.get_xticklabels():
-                            label.set_rotation(angle)
-                            label.set_horizontalalignment('right')
-                            label.set_rotation_mode('anchor')
-                        rotation = angle
-                        fig.subplots_adjust(bottom=.34)
-                ax.spines['left'].set_visible(False)
-                ax.set_ylabel('')
-                ax.set_xlabel('')
-                ax.set_axisbelow(True)
-                ax.grid(axis='y', color='#E7EBEF', linewidth=.65)
-                ax.legend(loc='lower center', bbox_to_anchor=(.5, 1.04), ncol=3, borderaxespad=0, handlelength=1.2)
-                # Preserve explicit experimental-condition labels, not method footers.
-                notes = data.get('matching_comparison_notes', [])
-                title = '引物匹配构成 · 全部样本'
-                heading(fig, title, left=.075)
-                if notes:
-                    fig.text(.075, .015, wrapped('；'.join(notes), 130), fontsize=8, color='#66737F', va='bottom')
-                save(fig, 'primer_matching_total', title, kind='matching')
+        from .render_matching import render as render_matching
+        if data.get('dual_matching_summary'):
+            for stage in ('raw_R1','mapping'):
+                scoped=dict(data,matching_totals=[r for r in data['dual_matching_summary'] if r['stage']==stage],
+                    primer_group_comparisons=[r for r in data.get('primer_group_comparisons',[]) if r.get('stage','mapping')==stage])
+                # Both stages use their own complete, deduplicated input scope.
+                scoped['primer_group_comparisons']=[dict(r,unit='reads') for r in scoped['primer_group_comparisons']]
+                render_matching(scoped,pyplot=plt,save=save,stage=stage)
+                for sample in sorted({r['sample'] for r in scoped['matching_totals']}):
+                    selected=dict(scoped,matching_totals=[r for r in scoped['matching_totals'] if r['sample']==sample],
+                        primer_group_comparisons=[r for r in scoped['primer_group_comparisons'] if r['sample']==sample])
+                    render_matching(selected,pyplot=plt,save=save,stage=stage,target_sample=sample)
+        else:
+            render_matching(data, pyplot=plt, save=save)
+
+        metrics=data.get('primer_mapping_summary',[])
+        for sample,chain,stage in sorted({(r['sample'],r['chain'],r['stage']) for r in metrics}):
+            selected=sorted([r for r in metrics if (r['sample'],r['chain'],r['stage'])==(sample,chain,stage) and not r['primer'].startswith('[')],key=lambda r:(-r['matched_reads'],r['primer']))
+            stage_label={'raw_R1':'Raw','mapping':'Mapping reads'}[stage]
+            for page in range(0,len(selected),20):
+                batch=selected[page:page+20]
+                for field,kind,label,color in (('match_percent','primers','Unique primer matching','#419A8B'),('mapping_percent','primer_mapping','Mapping rate by primer',blue)):
+                    if kind=='primer_mapping' and stage!='mapping':continue
+                    title=f'{sample} / {chain} · {label} · {stage_label}'
+                    values=[r[field] or 0 for r in batch]
+                    texts=[('N/A' if r[field] is None else f'{r[field]:.4f}%')+f" · {r['matched_reads']:,}" if kind=='primers' else
+                        ('N/A' if r[field] is None else f'{r[field]:.2f}%')+f" · {number(r['mapped_reads'])} / {r['matched_reads']:,}" for r in batch]
+                    fig,_,_=horizontal([r['primer'] for r in batch],values,title,value_labels=texts,xlabel='Unique primer match (%)' if kind=='primers' else 'Mapping rate (%)',colors=color)
+                    save(fig,label_name(sample)+f'__{chain}__{stage}__{kind}_{page//20+1}',title,sample,chain,kind,preparation=stage)
 
         for sample, primers in (data.get('catalog') or {}).get('assignments', {}).items():
+            if metrics:break
             for chain in sorted({r['chain'] for r in data['samples'] if r['sample'] == sample}):
                 counts = Counter()
                 for row in data['primer_counts']:
@@ -187,7 +165,7 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
                 for page in range(0, len(ranked), 20):
                     batch = ranked[page:page+20]
                     values = [v*100/total if total else 0 for _, v in batch]
-                    title = f'{sample} / {chain} · 引物唯一匹配率'
+                    title = f'{sample} / {chain} · Unique primer matching'
                     fig, _, _ = horizontal([name for name, _ in batch], values, title,
                         value_labels=[f'{percent:.4f}% · {count:,}' if total else f'— · {count:,}' for (_, count), percent in zip(batch, values)],
                         xlabel='Unique primer match (%)',colors='#419A8B')
@@ -205,7 +183,7 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
                     gene_groups[(row['sample'], row['chain'], row['segment'], row['primer'] if requested else '', preparation)][row['gene']] += row['count']
                 if not row['primer'].startswith('[') and not row['gene'].startswith('['):
                     composition_groups[(row['sample'], row['chain'], row['segment'], preparation)][(row['primer'], row['gene'])] += row['count']
-            group_label = {'trimmed': '去引物后', 'untrimmed': '保留原序列', 'not_recorded': ''}
+            group_label = {'trimmed': 'Primer trimmed', 'untrimmed': 'Original sequence retained', 'not_recorded': ''}
             for (sample, chain, segment, primer, preparation), counts in gene_groups.items():
                 total = sum(counts.values())
                 if not total:
@@ -213,10 +191,10 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
                 ranked = sorted(counts.items(), key=lambda row: (-row[1], row[0]))
                 shown = ranked[:top_n]
                 if len(ranked) > top_n:
-                    shown.append((f'其他（{len(ranked)-top_n} 类）', sum(v for _, v in ranked[top_n:])))
+                    shown.append((f'Other ({len(ranked)-top_n} classes)', sum(v for _, v in ranked[top_n:])))
                 values = [v*100/total for _, v in shown]
                 show_preparation = bool(group_label[preparation]) and not (primer and preparation == 'trimmed')
-                title = f'{sample} / {chain} · C 基因分布'+(' · '+group_label[preparation] if show_preparation else '')
+                title = f'{sample} / {chain} · C gene distribution'+(' · '+group_label[preparation] if show_preparation else '')
                 if primer:
                     title += '\n' + primer
                 fig, _, _ = horizontal([label for label, _ in shown], values, title,
@@ -235,7 +213,7 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
                 ranked_genes = [gene for gene, _ in totals.most_common()]
                 genes = sorted(ranked_genes[:top_n])
                 remainder = ranked_genes[top_n:]
-                other_label = f'其他（{len(remainder)} 类）'
+                other_label = f'Other ({len(remainder)} classes)'
                 shown_genes = genes + ([other_label] if remainder else [])
                 primers = sorted({p for p, _ in counts})
                 for page in range(0, len(primers), 16):
@@ -269,12 +247,14 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None):
                     ax.set_axisbelow(True)
                     ax.grid(False)
                     ax.legend(loc='lower center', bbox_to_anchor=(.5, 1.03), ncol=min(5,len(shown_genes)), borderaxespad=0, handlelength=1.2, columnspacing=1.3)
-                    title = f'{sample} / {chain} · 引物对应 C 基因构成'+(' · '+group_label[preparation] if preparation=='untrimmed' else '')
+                    title = f'{sample} / {chain} · C gene composition by primer'+(' · '+group_label[preparation] if preparation=='untrimmed' else '')
                     heading(fig, title, left=.085, y=1-.16/height)
                     name = label_name(sample)+f'__{chain}__{segment}__{preparation}_composition_{page//16+1}'
                     save(fig, name, title, sample, chain, 'composition', preparation=preparation, segment=segment)
 
     if data.get('usage'):
-        from .render_usage import render as render_usage
-        artifacts.extend(render_usage(data, output, figure_audit=figure_audit,figure_progress=figure_progress))
+        from .figure_jobs import render_usage
+        artifacts.extend(render_usage(data, output, figure_audit=figure_audit,figure_progress=figure_progress,cache_root=cache_root))
+    from .repertoire_metrics import render as render_repertoire_metrics
+    render_repertoire_metrics(data, pyplot=plt, save=save)
     return artifacts

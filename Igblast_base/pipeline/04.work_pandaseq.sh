@@ -20,7 +20,7 @@ MANIFEST="$(stage_root 01.match)/sample_manifest.csv"; INPUT="$(stage_root 03.cl
 PANDASEQ_BIN="${SCIGBLAST_PANDASEQ_BIN:-${PANDASEQ_BIN:-pandaseq}}"; THREADS="${SCIGBLAST_PANDASEQ_THREADS:-${PANDASEQ_THREADS:-16}}"
 REQUESTED_WORKERS="${SCIGBLAST_PANDASEQ_MAX_PARALLEL_SAMPLES:-${PANDASEQ_MAX_PARALLEL_SAMPLES:-2}}"
 THREAD_BUDGET="${SCIGBLAST_PARALLEL_THREAD_BUDGET:-${PARALLEL_THREAD_BUDGET:-128}}"; MEMORY_BUDGET_GB="${SCIGBLAST_MEMORY_BUDGET_GB:-300}"; MEMORY_PER_WORKER_GB="${SCIGBLAST_PANDASEQ_MEMORY_LIMIT_GB:-${SCIGBLAST_PANDASEQ_MEMORY_GB:-${PANDASEQ_MEMORY_GB:-32}}}"
-STAGE_VERSION="4"
+STAGE_VERSION="5"
 log(){ printf '[%s] [BASE][pandaseq] %s\n' "$(date '+%F %T')" "$*"; }; die(){ log "ERROR $*" >&2; exit 1; }; positive(){ [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 [[ -s "$MANIFEST" ]] || die "missing canonical manifest: $MANIFEST"; command -v "$PANDASEQ_BIN" >/dev/null 2>&1 || die "pandaseq not found: $PANDASEQ_BIN"
 for value in "$THREADS" "$REQUESTED_WORKERS" "$THREAD_BUDGET" "$MEMORY_BUDGET_GB" "$MEMORY_PER_WORKER_GB"; do positive "$value" || die "invalid positive integer resource value: $value"; done
@@ -69,13 +69,13 @@ run_one(){
   fingerprint=$(printf '%s\0%s\0%s\0%s\0%s' "$r1" "$r2" "$(stat -c '%s:%y' "$r1")" "$(stat -c '%s:%y' "$r2")" "$THREADS" | sha256sum | awk '{print $1}')
   if [[ "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then fingerprint=$(printf '%s\0%s\0%s' "$fingerprint" "$PANDASEQ_BIN" "$(sha256sum "$0")" | sha256sum | awk '{print $1}'); fi
   if [[ "${SCIGBLAST_FORCE_RERUN:-0}" != 1 && -s "$fasta" && -s "$marker" ]]&&grep -qx 'status=DONE' "$marker"&&grep -qx "job_fingerprint=${fingerprint}" "$marker"; then
-    input_pairs=$(awk -F= '$1=="input_pairs"{print $2}' "$marker"); merged=$(awk -F= '$1=="merged_sequences"{print $2}' "$marker"); input_pairs=${input_pairs:-0}; merged=${merged:-0}; pct=$(awk -v a="$merged" -v b="$input_pairs" 'BEGIN{printf "%.2f",b?a*100/b:0}'); printf '%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; log "skip sample=${sample} pair=${pair}"; return 0
+    input_pairs=$(awk -F= '$1=="input_pairs"{print $2}' "$marker"); merged=$(awk -F= '$1=="merged_sequences"{print $2}' "$marker"); input_pairs=${input_pairs:-0}; merged=${merged:-0}; pct=$(awk -v a="$merged" -v b="$input_pairs" 'BEGIN{printf "%.2f",b?a*100/b:0}'); printf '%s,%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; log "skip sample=${sample} pair=${pair}"; return 0
   fi
   tmp="${fasta}.tmp.${BASHPID}"
   if "$PANDASEQ_BIN" -f "$r1" -r "$r2" -B -w "$tmp" -T "$THREADS" > "$logfile" 2>&1; then
     mv -f "$tmp" "$fasta"; merged=$(grep -c '^>' "$fasta" || true); input_pairs=$(gzip -cd "$r1" | awk 'END{print int(NR/4)}'); pct=$(awk -v a="$merged" -v b="$input_pairs" 'BEGIN{printf "%.2f",b?a*100/b:0}')
     { printf 'status=DONE\nmanifest_schema_version=2\nstage=pandaseq\nversion=%s\njob_fingerprint=%s\ninput_pairs=%s\nmerged_sequences=%s\noutput_naming_schema=baseline_pair_sample_v2\nsample_id=%s\npair_id=%s\n' "$STAGE_VERSION" "$fingerprint" "$input_pairs" "$merged" "$sample" "$pair"; } > "${marker}.tmp.${BASHPID}"; mv -f "${marker}.tmp.${BASHPID}" "$marker"
-    printf '%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; return 0
+    printf '%s,%s,%s,%s,%s,OK,\n' "$sample" "$pair" "$input_pairs" "$merged" "$pct" > "$row_file"; return 0
   fi
   rm -f "$tmp"; printf '%s,%s,0,0,0,ERROR,pandaseq_failed\n' "$sample" "$pair" > "$row_file"; return 1
 }

@@ -7,7 +7,7 @@
 # Stages fitting half of both budgets may coexist; larger/unknown stages take
 # the budget gate exclusively. All runners must use the same lock file.
 scigblast_acquire_stage_budget() {
-    local memory_gb="$1" label="$2" lock_file wait_seconds total_gb current cpus threads mode=exclusive threshold shared_gb root python_bin resources resource_ok=0
+    local memory_gb="$1" label="$2" lock_file wait_seconds total_gb current cpus threads mode=exclusive threshold shared_gb root python_bin resources resource_ok=0 extra_threads
     lock_file="${SCIGBLAST_RESOURCE_LOCK_FILE:-/colddata/SCigblast/results/.scigblast-resource.lock}"
     wait_seconds="${SCIGBLAST_RESOURCE_LOCK_WAIT_SECONDS:-86400}"
     [[ "$memory_gb" =~ ^[0-9]+$ && "$wait_seconds" =~ ^[0-9]+$ ]] || { echo "[SCigblast] invalid stage resource estimate" >&2; return 2; }
@@ -46,6 +46,9 @@ PY
     esac
     # Different per-pipeline watchdog thresholds must not overlap: another
     # stage could otherwise cause the stricter watchdog to terminate work.
+    extra_threads="${SCIGBLAST_STAGE_EXTRA_THREADS:-0}"
+    [[ "$extra_threads" =~ ^[0-9]+$ ]] || { echo "[SCigblast] invalid extra stage thread estimate" >&2; return 2; }
+    threads=$(( threads + extra_threads ))
     current="${MEMORY_STOP_THRESHOLD_GB:-${SCIGBLAST_MEMORY_STOP_THRESHOLD_GB:-$threshold}}"
     if [[ "$current" =~ ^[0-9]+$ ]] && (( resource_ok == 1 && ${SCIGBLAST_SHARED_MEMORY_BUDGET_GB:-300} == 300 && threshold == 150 && current <= threshold && threads > 0 && threads * 2 <= cpus && memory_gb * 2 <= shared_gb )); then
         mode=shared

@@ -39,6 +39,7 @@ from pipeline_parallel import FastaCountCache, bounded_completed
 from pipeline_progress import Progress, run_igblast, verified_estimate
 from pipeline_locus_split import filter_mapping_airr
 from pipeline_primer import prepare as prepare_primers
+from pipeline_airr_preprocessing import SamplePreprocessing
 ROOT = Path(os.environ["OUTPUT_ROOT"])
 RAW_ROOT = Path(os.environ["RAW_INPUT_DIR"]).resolve() if os.environ.get("RAW_INPUT_DIR") else None
 DATASET_LABEL = os.environ.get("SCIGBLAST_DATASET_LABEL", "").strip()
@@ -211,9 +212,10 @@ def main() -> int:
         PROGRESS.update(job, 'cached' if result.get('_progress_cached') else 'succeeded' if result['status'] == 'OK' else 'failed', input_count=result.get('input_sequences'), error=result.get('error', ''))
         return result
     print(f"[BASE][igblast] stage_start total={len(jobs)} requested_workers={REQUESTED} effective_workers={MAX_JOBS} threads_per_worker={THREADS} memory_per_worker_gb={MEMORY_PER_JOB}",flush=True)
-    with ThreadPoolExecutor(max_workers=MAX_JOBS) as executor:
+    with SamplePreprocessing(OUTPUT,ROOT/'06.preprocessing'/DATASET_LABEL,jobs) as early, ThreadPoolExecutor(max_workers=MAX_JOBS) as executor:
         for index,(_,result) in enumerate(bounded_completed(executor,tracked_task,jobs,MAX_JOBS*2),1):
             results.append(result); print(f"[BASE][igblast] progress={index}/{len(jobs)} percent={index*100//len(jobs)} sample={result['sample_id']}/{result['pair_id']}/{result['chain']} status={result['status']}",flush=True)
+            early.completed_task(result)
     fields=["sample_id","pair_id","species","chain","input_sequences","raw_rows","mapped_rows","mapped_seqs","unmapped_seqs","productive_rows","productive_seqs","productive_percent","output_rows","filtered_seqs","mapping_percent","filtered_percent","retained_percent","locus_input_rows","excluded_locus_rows","unknown_locus_rows","locus_filter_version","status","error","output_path"]
     for result in results:
         n=result["input_sequences"]; mapped=int(result["mapped_rows"]); productive=int(result["productive_rows"]); filtered=int(result["output_rows"])

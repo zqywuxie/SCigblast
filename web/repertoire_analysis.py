@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import closing
+from contextlib import closing, contextmanager
 import csv
 import io
 import logging
@@ -16,11 +16,12 @@ import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
 import auth
-from artifact_download import stream_zip
+from artifact_download import stream_zip, file_response
 from process_identity import group_state
 
 LOG=logging.getLogger(__name__)
@@ -40,6 +41,8 @@ def init_schema(connection):
             UNIQUE(owner_id,dedupe_key));
         CREATE INDEX IF NOT EXISTS report_parent ON report_runs(parent_job_id,attempt_no);
         CREATE INDEX IF NOT EXISTS report_due ON report_runs(status,created_at);
+        CREATE TABLE IF NOT EXISTS report_read_leases(id TEXT PRIMARY KEY,run_id TEXT,parent_job_id TEXT,expires REAL);
+        CREATE INDEX IF NOT EXISTS report_read_parent ON report_read_leases(parent_job_id,expires);
     ''')
 
 
@@ -57,7 +60,7 @@ def enqueue_auto(connection,job_id,now):
     from analysis.repertoire.workbook import VERSION as WORKBOOK_VERSION
     key=digest(['auto-report',VERSION,FIGURE_VERSION,WORKBOOK_VERSION,job_id,row['attempt_no'],config])
     run_id=uuid.uuid4().hex
-    source=dict(input_root=row['output_root'],items=None)
+    source=dict(input_root=row['output_root'],items=None,task_name=row['dataset'])
     folder=Path(row['output_root'])/'analysis'/'reports'/run_id[:12]
     connection.execute('INSERT OR IGNORE INTO report_runs(id,owner_id,parent_job_id,attempt_no,source_json,config_json,output_root,dedupe_key,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
         (run_id,row['owner_id'],job_id,row['attempt_no'],json.dumps(source),json.dumps(config),str(folder),key,now))
@@ -94,8 +97,46 @@ class Service:
     def guard_mutation(self,job_id):
         with self.app.db() as conn:
             active=conn.execute('SELECT 1 FROM report_runs WHERE parent_job_id=? AND '+ACTIVE+' LIMIT 1',(job_id,)).fetchone()
+            reading=conn.execute('SELECT 1 FROM report_read_leases WHERE parent_job_id=? AND expires>? LIMIT 1',(job_id,time.time())).fetchone()
         if active:
             raise HTTPException(409,'后续分析尚在排队或运行，请先取消后再修改/删除来源任务')
+        if reading:
+            raise HTTPException(409,'报告正在导出，请稍后再修改或删除来源任务')
+
+    @contextmanager
+    def read_lease(self,row):
+        token=uuid.uuid4().hex;stop=threading.Event()
+        with self.app.db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current=conn.execute('SELECT status,output_root FROM report_runs WHERE id=?',(row['id'],)).fetchone()
+            if not current or current['status']!='succeeded' or current['output_root']!=row['output_root']:
+                raise ValueError('Report changed before HTML export')
+            if row['parent_job_id']:
+                parent=conn.execute('SELECT status FROM jobs WHERE id=?',(row['parent_job_id'],)).fetchone()
+                if not parent or parent['status']!='SUCCEEDED':raise ValueError('Report source is not available for HTML export')
+            conn.execute('DELETE FROM report_read_leases WHERE expires<=?',(time.time(),))
+            conn.execute('INSERT INTO report_read_leases VALUES(?,?,?,?)',(token,row['id'],row['parent_job_id'],time.time()+90))
+        def heartbeat():
+            while not stop.wait(20):
+                try:
+                    with self.app.db() as conn:conn.execute('UPDATE report_read_leases SET expires=? WHERE id=?',(time.time()+90,token))
+                except Exception:LOG.warning('Cannot renew report read lease %s',row['id'])
+        thread=threading.Thread(target=heartbeat,daemon=True);thread.start()
+        try:yield
+        finally:
+            stop.set();thread.join(timeout=2)
+            with self.app.db() as conn:conn.execute('DELETE FROM report_read_leases WHERE id=?',(token,))
+
+    def purge_html_cache(self,rows):
+        from analysis.repertoire.html_cache import purge
+        base=(self.app.STATE_ROOT/'report_html_cache').resolve()
+        for row in rows:
+            try:
+                target=base/row['owner_id']/row['id']
+                if target.resolve()==base or not target.resolve().is_relative_to(base):
+                    raise ValueError('Unsafe HTML cache identity')
+                purge(target)
+            except (OSError,ValueError):LOG.warning('Cannot purge derived HTML cache for %s',row['id'])
 
     def freeze_mapping(self,row,env,destination):
         """Freeze the selected primers for this analysis attempt, before stage 5."""
@@ -138,7 +179,7 @@ class Service:
         if len(json.dumps(body))>100000:
             raise HTTPException(400,'配置过大')
         return dict(submission_path=self.upload_path(body.get('submission_id')),
-            primer_path=self.upload_path(body.get('primer_id')),columns=body.get('columns',{}))
+            primer_path=self.upload_path(body.get('primer_id')),columns=dict(body.get('columns',{}),observation_stage='mapping'))
 
     def scan(self,body):
         from analysis.repertoire.sources import discover
@@ -177,8 +218,6 @@ class Service:
         config=self.config(body.config)
         if not config:
             return dict(assignments={},samples=sorted({row['sample_label'] for row in items}))
-        if config['columns'].get('observation_stage','mapping').startswith('raw_') and any(not row['capabilities'].get('upstream_lineage') for row in items):
-            raise HTTPException(400,'所选结果不全具备原始读端追溯；请选择比对输入/最终结果，或仅选择有全流程归档的项')
         try:
             return build_catalog(config['submission_path'],config['primer_path'],config['columns'],sorted({row['sample_label'] for row in items}))
         except (OSError,ValueError,KeyError) as error:
@@ -316,6 +355,10 @@ class Service:
             work=self.app.STATE_ROOT/'report_work'/row['id']
             work.mkdir(parents=True,exist_ok=True)
             request=dict(source,items=items,primer=json.loads(row['config_json']) or None,run_id=row['id'],progress_path=str(work/'progress.json'))
+            request['performance_path']=str(work/'performance.json')
+            request['task_name']=parent['dataset'] if row['parent_job_id'] else source.get('task_name') or Path(source['input_root']).name
+            # Trusted server configuration, never a browser-supplied file allowlist.
+            request['allowed_input_roots']=[str(p) for p in self.app.configured_roots('SCIGBLAST_ALLOWED_INPUT_ROOTS','/colddata/SCigblast/data')]
             write_json(work/'request.json',request)
             from mapping.pipeline.resources import detect_resources
             available=detect_resources()['memory_available_bytes']
@@ -327,6 +370,14 @@ class Service:
             env.update(PYTHONPATH=str(self.app.PIPELINE_ROOT),PYTHONDONTWRITEBYTECODE='1',PYTHONUNBUFFERED='1',
                 PYTHONIOENCODING='utf-8',MPLCONFIGDIR=str(work/'matplotlib'),
                 SCIGBLAST_WEB_PROCESS_TOKEN=token,OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1',MKL_NUM_THREADS='1')
+            env['SCIGBLAST_REPORT_MEMORY_BUDGET_MB']=str(int(budget/1024**2))
+            workers=os.environ.get('SCIGBLAST_REPORT_FIGURE_WORKERS','auto')
+            env['SCIGBLAST_REPORT_FIGURE_WORKERS']='auto' if workers=='auto' else str(max(1,min(2,int(workers))))
+            env['SCIGBLAST_REPORT_FIGURE_WORKER_MB']=str(max(256,int(os.environ.get('SCIGBLAST_REPORT_FIGURE_WORKER_MB','640'))))
+            compute=os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKERS','1')
+            env['SCIGBLAST_REPORT_COMPUTE_WORKERS']='auto' if compute=='auto' else str(max(1,min(2,int(compute))))
+            env['SCIGBLAST_REPORT_COMPUTE_WORKER_MB']=str(max(256,int(os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKER_MB','640'))))
+            env['SCIGBLAST_REPORT_STATISTICS_CACHE_MB']=str(max(0,int(os.environ.get('SCIGBLAST_REPORT_STATISTICS_CACHE_MB','0'))))
             with (work/'analysis.log').open('ab') as log:
                 process=subprocess.Popen([sys.executable,'-m','analysis.repertoire.run','--request',str(work/'request.json'),'--output',str(folder)],
                     cwd=self.app.PIPELINE_ROOT,env=env,stdout=log,stderr=log,start_new_session=True,
@@ -334,6 +385,7 @@ class Service:
             with self.app.db() as conn:
                 conn.execute('UPDATE report_runs SET pid=?,process_token=? WHERE id=?',(process.pid,token,row['id']))
             deadline=time.monotonic()+max(60,int(os.environ.get('SCIGBLAST_REPORT_TIMEOUT_SECONDS','14400')))
+            peak_rss=0
             while process.poll() is None:
                 with self.app.db() as conn:
                     current=conn.execute('SELECT status FROM report_runs WHERE id=?',(row['id'],)).fetchone()
@@ -342,8 +394,10 @@ class Service:
                 if time.monotonic()>deadline:raise ValueError('分析超过时长预算，可缩小样本范围重试')
                 if os.name=='posix':
                     from postanalysis import group_rss
-                    if group_rss(process.pid)>budget:raise ValueError('分析超过内存预算，可缩小样本范围重试')
+                    rss=group_rss(process.pid);peak_rss=max(peak_rss,rss)
+                    if rss>budget:raise ValueError('分析超过内存预算，可缩小样本范围重试')
                 self.stopping.wait(.25)
+            write_json(work/'resource_usage.json',dict(peak_process_tree_rss_bytes=peak_rss,memory_budget_bytes=budget))
             if process.returncode or not (folder/'manifest.json').is_file():
                 raise ValueError('分析未完成，请查看分析日志并重试')
             verify(items,source['input_root'])
@@ -416,8 +470,6 @@ def router(service):
         from analysis.repertoire.catalog import workbook
         if config:
             for name in ('submission_path','primer_path'):workbook(config[name])
-            if parent['status']!='SUCCEEDED' and config['columns'].get('observation_stage','mapping').startswith('raw_') and json.loads(parent['env_json']).get('SCIGBLAST_TRACE_MODE','mapping')!='full':
-                raise HTTPException(400,'该任务未启用全流程追溯，请选择比对输入/最终结果，或新建全流程追溯任务')
             preview_plan(job_id,body)
         with service.app.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -461,38 +513,67 @@ def router(service):
     def summary(run_id:str,compact:bool=False):return service.summary(service.owned(run_id),compact=compact)
 
     @router.get('/{run_id}/usage')
-    def usage(run_id:str,group_id:str,primer:str='',segment:str='V',zero_only:bool=False,observed_only:bool=False,observation_state:str='',
-              offset:int=Query(default=0,ge=0),limit:int=Query(default=25,ge=1,le=100),format:str='json'):
+    def usage(run_id:str,group_id:str,primer:str='',segment:str='V',metric:str='expression',aa_field:str='cdr3_aa',zero_only:bool=False,observed_only:bool=False,reference_only:bool=False,observation_state:str='',
+              offset:int=Query(default=0,ge=0),limit:int=Query(default=25,ge=1,le=100),format:str='json',gene_query:str=Query(default='',max_length=120),definite_only:bool=False):
         from analysis.repertoire.io import safe_file
         from analysis.repertoire.usage import connect,rows,USAGE_COLUMNS
         row=service.owned(run_id)
         if row['status']!='succeeded':raise HTTPException(409,'分析尚未完成')
         if segment not in {'V','J','C'} or format not in {'json','csv'}:raise HTTPException(400,'未知基因区或输出格式')
+        if metric not in {'expression','unique_cdr3'} or aa_field not in {'cdr3_aa','junction_aa'}:raise HTTPException(400,'未知基因统计指标或 AA 字段')
+        if metric=='unique_cdr3' and aa_field!='cdr3_aa':raise HTTPException(400,'暂不提供 Unique Junction 指标')
         if observation_state not in {'','zero_observed','ambiguous_only','outside_reference'}:raise HTTPException(400,'未知参考观察状态')
         if observed_only and (zero_only or observation_state):raise HTTPException(400,'已匹配分布与参考观察清单须分别查询')
         index=safe_file(Path(row['output_root'])/'details.sqlite',row['output_root'])
         with closing(connect(index)) as conn:
             if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='gene_usage'").fetchone():raise HTTPException(409,'该历史分析尚无 V/J/C 汇总，请重新生成')
             if not conn.execute('SELECT 1 FROM usage_primers WHERE group_id=? AND primer=?',(group_id,primer)).fetchone():raise HTTPException(404,'当前样本或引物不存在')
-            condition='group_id=? AND primer=? AND segment=?'+(" AND status='zero_observed'" if zero_only else '')+(' AND unique_count>0' if observed_only else '')+(' AND status=?' if observation_state else '')
-            args=(group_id,primer,segment,observation_state) if observation_state else (group_id,primer,segment)
+            modern='metric' in {r[1] for r in conn.execute('PRAGMA table_info(gene_usage)')}
+            if not modern and metric!='expression':raise HTTPException(409,'该历史分析尚无 Unique CDR3 基因统计，请重新生成后续分析')
+            condition='group_id=? AND primer=? AND segment=?'+(" AND status='zero_observed'" if zero_only else '')+(' AND unique_count>0' if observed_only else '')+(' AND reference_catalog=1' if reference_only else '')+(' AND status=?' if observation_state else '')
+            args=[group_id,primer,segment]+([observation_state] if observation_state else [])
+            if definite_only:condition+=" AND (unique_count>0 OR (ambiguous_count=0 AND status='zero_observed'))"
+            if gene_query.strip():condition+=' AND instr(lower(gene),lower(?))>0';args.append(gene_query.strip())
+            if modern:
+                condition+=' AND metric=?';args.append(metric)
+                if metric=='unique_cdr3':condition+=' AND aa_field=?';args.append(aa_field)
             total=conn.execute('SELECT count(*) FROM gene_usage WHERE '+condition,args).fetchone()[0]
-            summary={r[0]:r[1] for r in conn.execute('SELECT assignment,sum(count) FROM usage_counts WHERE group_id=? AND primer=? AND segment=? AND assignment<>\'ambiguous\' GROUP BY assignment',(group_id,primer,segment))}
-            # Ambiguous rows carry multiple candidates; count records once for coverage.
-            summary['ambiguous']=conn.execute('''SELECT count(DISTINCT r.id) FROM usage_records r JOIN usage_calls c ON c.record_id=r.id
-                WHERE r.group_id=? AND r.eligible=1 AND c.segment=? AND c.assignment='ambiguous' '''+(' AND r.primer=?' if primer else ''),
-                (group_id,segment,primer) if primer else (group_id,segment)).fetchone()[0]
+            from analysis.repertoire.api_summary import summary as query_summary
+            summary=query_summary(row['owner_id'],index,group_id,primer,segment,metric,aa_field,modern)
             if format=='json':
-                result=list(rows(conn,group_id=group_id,primer=primer,segment=segment,zero_only=zero_only,observed_only=observed_only,observation_state=observation_state,offset=offset,limit=limit))
+                result=list(rows(conn,group_id=group_id,primer=primer,segment=segment,metric=metric,aa_field=aa_field,zero_only=zero_only,observed_only=observed_only,reference_only=reference_only,definite_only=definite_only,observation_state=observation_state,gene_query=gene_query,offset=offset,limit=limit))
                 return dict(rows=result,total=total,offset=offset,limit=limit,has_more=offset+len(result)<total,summary=summary)
         def stream():
             buffer=io.StringIO();writer=csv.DictWriter(buffer,fieldnames=USAGE_COLUMNS,lineterminator='\n')
             writer.writeheader();yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
             with closing(connect(index)) as conn:
-                for record in rows(conn,group_id=group_id,primer=primer,segment=segment,zero_only=zero_only,observed_only=observed_only,observation_state=observation_state):
+                for record in rows(conn,group_id=group_id,primer=primer,segment=segment,metric=metric,aa_field=aa_field,zero_only=zero_only,observed_only=observed_only,reference_only=reference_only,definite_only=definite_only,observation_state=observation_state,gene_query=gene_query):
                     writer.writerow({k:"'"+v if isinstance(v,str) and v.startswith(('=','+','-','@')) else v for k,v in record.items()})
                     yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
-        return StreamingResponse(stream(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="gene_usage_{segment}.csv"'})
+        filename=f"gene_usage_{segment}_{metric}"+('_'+aa_field if metric=='unique_cdr3' else '')+'.csv'
+        return StreamingResponse(stream(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="{filename}"'})
+
+    @router.get('/{run_id}/gene-candidates')
+    def gene_candidates(run_id:str,group_id:str,primer:str='',segment:str='',
+                        offset:int=Query(default=0,ge=0),limit:int=Query(default=25,ge=1,le=100)):
+        from analysis.repertoire.io import safe_file
+        from analysis.repertoire.usage import connect
+        row=service.owned(run_id)
+        if row['status']!='succeeded':raise HTTPException(409,'分析尚未完成')
+        if segment not in {'','V','D','J','C'}:raise HTTPException(400,'未知基因区')
+        index=safe_file(Path(row['output_root'])/'details.sqlite',row['output_root'])
+        with closing(connect(index)) as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='candidate_gene_summary'").fetchone():
+                raise HTTPException(409,'该历史报告未整理候选基因，请重新生成分析；旧 mapping 不能补回第二候选')
+            if not conn.execute('SELECT 1 FROM usage_groups WHERE id=?',(group_id,)).fetchone():raise HTTPException(404,'样本不存在')
+            conditions=['group_id=?'];args=[group_id]
+            if primer:conditions.append('primer=?');args.append(primer)
+            if segment:conditions.append('segment=?');args.append(segment)
+            where=' AND '.join(conditions)
+            total=conn.execute('SELECT count(*) FROM candidate_gene_summary WHERE '+where,args).fetchone()[0]
+            result=[dict(r) for r in conn.execute('SELECT * FROM candidate_gene_summary WHERE '+where+
+                ' ORDER BY segment,count DESC,primer,call LIMIT ? OFFSET ?',[*args,limit,offset])]
+        return dict(rows=result,total=total,offset=offset,limit=limit,has_more=offset+len(result)<total)
 
     @router.post('/{run_id}/cancel')
     def cancel(run_id:str):
@@ -564,10 +645,10 @@ def router(service):
         row=service.owned(run_id)
         if name=='analysis.log':
             path=safe_file(service.app.STATE_ROOT/'report_work'/run_id/'analysis.log',service.app.STATE_ROOT/'report_work'/run_id)
-            return FileResponse(path,media_type='text/plain',filename='analysis.log')
+            return file_response(path,filename='analysis.log')
         data=service.summary(row,compact=True)
         from analysis.repertoire import TABLE_PATHS
-        allowed={'report.xlsx','stage_summary.csv','sample_summary.csv','primer_counts.csv','primer_gene_counts.csv','gene_coverage.csv','matching_summary.csv','sequence_family_matching.csv','filter_summary.csv','primer_preparation_summary.csv','manifest.json'}
+        allowed={'report.html','report.xlsx','stage_summary.csv','sample_summary.csv','primer_counts.csv','primer_gene_counts.csv','gene_coverage.csv','matching_summary.csv','sequence_family_matching.csv','filter_summary.csv','primer_preparation_summary.csv','manifest.json'}
         allowed.update(TABLE_PATHS.values())
         allowed.update(data.get('exports',{}).values())
         allowed.update(name+'.csv' for name in TABLE_PATHS)
@@ -575,7 +656,55 @@ def router(service):
         if name not in allowed:raise HTTPException(404,'文件不存在')
         name=data.get('exports',{}).get(Path(name).stem,name) if '/' not in name and name.endswith('.csv') else name
         path=service.artifact(row,name)
-        return FileResponse(path,filename=path.name if download else None)
+        response=file_response(path,download=download)
+        if name=='report.html':
+            from analysis.repertoire.report_html import response_headers
+            response.headers.update(response_headers(download=download))
+        return response
+
+    @router.get('/{run_id}/report.html')
+    def html_report(run_id:str,download:bool=True):
+        from analysis.repertoire import report_html
+        from analysis.repertoire.io import safe_file
+        row=service.owned(run_id)
+        data=service.summary(row,compact=True)
+        root=Path(row['output_root'])
+        try:
+            manifest=json.loads(safe_file(root/'manifest.json',root).read_text(encoding='utf-8'))
+            files=set(manifest['files'])
+            if (data.get('html_report',{}).get('version')==report_html.VERSION
+                and data.get('html_report',{}).get('viewer_signature')==report_html.viewer_signature() and 'report.html' in files):
+                response=file_response(service.artifact(row,'report.html'),filename='SCIGBLAST_report.html',download=download)
+                response.headers.update(report_html.response_headers(download=download))
+                return response
+            def resolve(name):
+                if name not in files:raise ValueError('报告引用了未登记的文件')
+                return service.artifact(row,name)
+            assets=report_html.prepare(data,root,resolve=resolve)
+        except (OSError,ValueError,KeyError) as error:
+            raise HTTPException(409,'HTML 报告材料不可用，请恢复归档或重新生成分析') from error
+        # Old reports are exported from their existing counts, without modifying
+        # the report directory, manifest or private SQLite index.
+        def stream():
+            from analysis.repertoire import html_cache
+            with service.read_lease(row):
+                cache=service.app.STATE_ROOT/'report_html_cache'/row['owner_id']/row['id']
+                yield from html_cache.stream(data,manifest,resolve,cache,run_id=run_id,
+                    budget_mb=int(os.environ.get('SCIGBLAST_REPORT_HTML_CACHE_MB','128')),assets=assets)
+        incoming=stream()
+        try:first=next(incoming)
+        except (OSError,ValueError,KeyError,StopIteration) as error:
+            incoming.close()
+            raise HTTPException(409,'HTML 报告材料不可用，请恢复归档或重新生成分析') from error
+        def body():
+            try:
+                yield first
+                yield from incoming
+            finally:incoming.close()
+        # Start/validate the source lease before headers; close even if a client
+        # disconnects before consuming the first body chunk.
+        return StreamingResponse(body(),media_type='text/html',
+            headers=report_html.response_headers(download=download),background=BackgroundTask(incoming.close))
 
     @router.get('/{run_id}/download')
     def download(run_id:str,images_only:bool=False):
@@ -584,7 +713,8 @@ def router(service):
         manifest=json.loads(safe_file(Path(row['output_root'])/'manifest.json',row['output_root']).read_text(encoding='utf-8'))
         names=[name for name in manifest['files'] if name.endswith('.png')] if images_only else [*manifest['files'],'manifest.json']
         files=[(service.artifact(row,name),name) for name in names]
-        return StreamingResponse(stream_zip(files),media_type='application/zip',headers={'Content-Disposition':f'attachment; filename="report_{run_id}.zip"'})
+        filename=f"report_{run_id}"+('_png' if images_only else '')+'.zip'
+        return StreamingResponse(stream_zip(files),media_type='application/zip',headers={'Content-Disposition':f'attachment; filename="{filename}"'})
 
     @router.get('/{run_id}/records')
     def records(run_id:str,sample_key:str='',sample:str='',chain:str='',primer:str='',gene:str='',segment:str='C',match_class:str='',reason:str='',trim_state:str='',trim_group:str='',after:int=0,limit:int=50,group_id:str=''):

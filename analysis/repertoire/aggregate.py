@@ -12,6 +12,7 @@ import uuid
 from .catalog import Matcher
 from .matching import summarize_matching
 from .io import digest, safe_file, table, version
+from .batch import tune
 
 BAD = {'', '*', '-', 'NA', 'N/A', 'NONE', 'NULL', 'NO_HIT', 'UNMAPPED', 'NOT_FOUND'}
 
@@ -46,14 +47,20 @@ def mapping_observations(item, root,archive_root=None):
         conn.row_factory = sqlite3.Row
         conn.execute('ATTACH DATABASE ? AS q', (queries.as_uri()+'?mode=ro',))
         try:
+            conn.executescript('''PRAGMA temp_store=FILE;
+                CREATE TEMP TABLE query_counts AS SELECT sequence_id,count(*) AS n FROM q.queries GROUP BY sequence_id;
+                CREATE INDEX temp.query_count_id ON query_counts(sequence_id);
+                CREATE TEMP TABLE annotation_counts AS SELECT sequence_id,count(*) AS n,min(ordinal) AS ordinal
+                    FROM annotations GROUP BY sequence_id;
+                CREATE INDEX temp.annotation_count_id ON annotation_counts(sequence_id);''')
             has_primers=attach_primers(conn,meta,root)
             extra=(',p.names AS assigned_primers,p.families AS assigned_families,p.state AS trim_state,p.trim_length AS trim_length'
                    if has_primers else ',NULL AS assigned_primers,NULL AS assigned_families,NULL AS trim_state,0 AS trim_length')
             sql = '''SELECT q.ordinal AS query_ordinal,q.sequence_id AS query_id,q.offset,
-                (SELECT count(*) FROM q.queries z WHERE z.sequence_id=q.sequence_id) AS query_duplicates,
-                (SELECT count(*) FROM annotations z WHERE z.sequence_id=q.sequence_id) AS annotation_count,
-                a.*'''+extra+''' FROM q.queries q LEFT JOIN annotations a ON a.sequence_id=q.sequence_id
-                AND a.ordinal=(SELECT min(ordinal) FROM annotations z WHERE z.sequence_id=q.sequence_id)'''+(
+                coalesce(qc.n,0) AS query_duplicates,coalesce(ac.n,0) AS annotation_count,
+                a.*'''+extra+''' FROM q.queries q LEFT JOIN query_counts qc ON qc.sequence_id=q.sequence_id
+                LEFT JOIN annotation_counts ac ON ac.sequence_id=q.sequence_id
+                LEFT JOIN annotations a ON a.ordinal=ac.ordinal'''+(
                 ' LEFT JOIN primers.assignments p ON p.ordinal=q.ordinal' if has_primers else '')+' ORDER BY q.ordinal'
             with bgzf.BgzfReader(str(archive), 'rb') as incoming:
                 for record in conn.execute(sql):
@@ -191,6 +198,7 @@ def aggregate(items, root, output, catalog=None, progress=None):
     if any(len(values)>1 for values in datasets.values()):
         raise ValueError('存在跨数据集同名样本，请按数据集分别选择结果后分析，避免混合样本身份')
     conn = sqlite3.connect(output/'details.sqlite')
+    tune(conn)
     conn.execute('''CREATE TABLE observations (
         id INTEGER PRIMARY KEY, sample_key TEXT,sample TEXT,pair TEXT,chain TEXT,scope TEXT,
         sequence_id TEXT,match_class TEXT,primers TEXT,families INTEGER,filter_reason TEXT,
@@ -202,6 +210,7 @@ def aggregate(items, root, output, catalog=None, progress=None):
     trim_counts=Counter()
     primer_state_counts=Counter()
     summaries, genes_seen = [], {}
+    pending = []
     try:
         for number, item in enumerate(items, 1):
             sample, chain = item['sample_label'], item['chain']
@@ -263,15 +272,18 @@ def aggregate(items, root, output, catalog=None, progress=None):
                         # Reference coverage is query-based, including ambiguous candidates.
                         for gene in gene_set:
                             coverage[key+(subset, segment, gene, 'unique' if len(gene_set)==1 else 'ambiguous')] += 1
-                conn.execute('INSERT INTO observations VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                    (item['sample_key'], sample, item['pair'], chain, scope, row.get('sequence_id',''), category,
+                pending.append((item['sample_key'], sample, item['pair'], chain, scope, row.get('sequence_id',''), category,
                      json.dumps(names,ensure_ascii=False), len(families), reason, row.get('v_call'), row.get('j_call'), row.get('c_call'), seq,
                       json.dumps(frozen_names,ensure_ascii=False) if frozen_names is not None else None,row.get('trim_state'),row.get('trim_length',0),
                       row['matching_source'],row['matching_ordinal'],row['matching_unit'],row.get('mapping_sequence_id',row.get('sequence_id'))))
                 if count % 10000 == 0:
+                    conn.executemany('INSERT INTO observations VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',pending)
+                    pending.clear()
                     conn.commit()
                     if progress:
                         progress(number-1, len(items), f'{sample} / {chain}：已统计 {count:,} 条')
+            conn.executemany('INSERT INTO observations VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',pending)
+            pending.clear()
             conn.commit()
             if catalog:
                 key=(sample,item['sample_key'],chain,scope)
@@ -292,6 +304,7 @@ def aggregate(items, root, output, catalog=None, progress=None):
             summaries[-1]['mapping_preparation']={key:refs['primer_preparation'].get(key) for key in ('version','catalog_version','counts','unassigned_policy')} if refs and refs.get('primer_preparation') else None
             if progress:
                 progress(number, len(items), f'{sample} / {chain} 完成')
+        if progress:progress(len(items),len(items),'正在建立逐记录索引与跨链去重汇总')
         conn.execute('CREATE INDEX observations_view ON observations(sample_key,chain,match_class,filter_reason,id)')
         conn.execute('CREATE INDEX observations_mapping_id ON observations(sample_key,chain,mapping_sequence_id)')
         conn.commit()

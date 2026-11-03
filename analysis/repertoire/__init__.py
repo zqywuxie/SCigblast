@@ -1,12 +1,26 @@
 """Versioned QC and primer analyses for existing and newly generated AIRR results."""
-VERSION = 'repertoire-evidence-v11-vjc-isotype-workspace'
-FIGURE_VERSION = 'repertoire-figures-v18-semantic-palette'
+VERSION = 'repertoire-evidence-v28-suspected-primer-scenarios'
+FIGURE_VERSION = 'repertoire-figures-v40-suspected-primer-scenarios'
 
 TABLE_PATHS = {
+    'scenario_matching_summary': '03_primer_genes/suspected/matching_summary.csv',
+    'scenario_primer_mapping_summary': '03_primer_genes/suspected/primer_mapping_summary.csv',
+    'scenario_primer_gene_usage': '03_primer_genes/suspected/primer_gene_usage.csv',
+    'scenario_primer_reference_gene_observation': '03_primer_genes/suspected/primer_reference_gene_observation.csv',
+    'isotype_distribution': '02_sample_metrics/isotype_distribution.csv',
+    'diversity_summary': '02_sample_metrics/diversity_summary.csv',
+    'bcell_metrics': '02_sample_metrics/bcell_metrics.csv',
+    'primer_reference_gene_observation': '03_primer_genes/primer_reference_gene_observation.csv',
+    'sample_output_summary': '01_overview/sample_output_summary.csv',
+    'primer_mapping_summary': '03_primer_genes/primer_mapping_summary.csv',
+    'dual_matching_summary': '01_overview/primer_matching_by_stage.csv',
+    'primer_stage_availability': '05_details/primer_stage_availability.csv',
     'stage_volume_summary': '04_data_changes/stage_volume_summary.csv',
     'stage_summary': '04_data_changes/stage_summary.csv',
     'matching_summary': '05_details/matching_details.csv',
     'matching_total_summary': '01_overview/primer_matching_summary.csv',
+    'primer_group_comparisons': '01_overview/primer_group_comparisons.csv',
+    'candidate_gene_summary': '02_sample_genes/candidate_gene_summary.csv',
     'isotype_summary': '01_overview/isotype_summary.csv',
     'sample_gene_usage': '02_sample_genes/sample_gene_usage.csv',
     'reference_gene_observation': '02_sample_genes/reference_gene_observation.csv',
@@ -24,11 +38,18 @@ TABLE_PATHS = {
 }
 
 FIGURE_CATEGORIES = {
+    'diversity_comparison': '02_sample_metrics',
+    'bcell_metrics_comparison': '02_sample_metrics',
+    'isotype_distribution': '02_sample_metrics',
+    'diversity': '02_sample_metrics',
+    'bcell_metrics': '02_sample_metrics',
+    'sample_outputs': '01_overview',
     'stages': '04_data_changes',
     'stage_overview': '04_data_changes',
     'matching': '01_overview',
     'isotype': '01_overview',
     'primers': '03_primer_genes',
+    'primer_mapping': '03_primer_genes',
     'genes': '02_sample_genes',
     'sample_genes': '02_sample_genes',
     'primer_genes': '03_primer_genes',

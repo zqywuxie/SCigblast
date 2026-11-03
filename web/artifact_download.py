@@ -1,5 +1,23 @@
 """ZIP downloads with bounded buffers; analysis artifacts are read unchanged."""
 import zipfile
+from pathlib import Path
+
+
+def file_response(path, *, download=True, filename=None):
+    """Explicit export types; Linux MIME registries may not know XLSX."""
+    from fastapi.responses import FileResponse
+    path = Path(path)
+    media_type = {
+        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.xls': 'application/vnd.ms-excel', '.png': 'image/png',
+        '.zip': 'application/zip', '.gz': 'application/gzip',
+        '.csv': 'text/csv', '.tsv': 'text/tab-separated-values',
+        '.json': 'application/json', '.log': 'text/plain', '.txt': 'text/plain',
+        '.html': 'text/html',
+        '.fasta': 'text/plain', '.fa': 'text/plain', '.fq': 'text/plain', '.fastq': 'text/plain',
+    }.get(path.suffix.lower(), 'application/octet-stream')
+    return FileResponse(path, media_type=media_type,
+                        filename=(filename or path.name) if download else None)
 
 
 class _ZipSink:

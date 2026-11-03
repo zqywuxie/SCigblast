@@ -193,7 +193,7 @@
     const defaults = await Submission.api('/api/defaults');
     formDefaults = defaults;
     $('#barcode-hint').textContent = `留空使用默认 Barcode：${defaults.barcode_csv || '由服务器配置'}`;
-    $('#output-hint').textContent = `${defaults.output_base}/姓名_短编号/Pipeline类型/YYYYMMDD_HHMMSS/（北京时间）`;
+    $('#output-hint').textContent = `${defaults.output_base}/姓名_短编号/Pipeline类型/[物种]/YYYYMMDD_HHMMSS/（IgBLAST base 按物种分目录，北京时间）`;
     $('#pipeline').innerHTML = Object.entries(pipelineInfo).map(([key, info]) => `<option value="${esc(key)}">${esc(info.label)}</option>`).join('');
     $('#pipeline').value = 'ir_split';
     $('#help-pipeline').innerHTML = Object.entries(pipelineInfo).filter(([, info])=>info.new_job_visible !== false).map(([key, info])=>`<option value="${esc(key)}">${esc(info.label)}</option>`).join('');

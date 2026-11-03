@@ -646,6 +646,14 @@ def load_checkpoint(key: tuple[str, str], tasks: list[dict[str, str]], fingerpri
             return None
         if payload.get("sources") != [source_fingerprint(Path(task["source"])) for task in tasks]:
             return None
+        if INPUT_LAYOUT=='chains':
+            outputs=payload.get('junction_outputs')
+            if not isinstance(outputs,dict):return None
+            for name,expected in outputs.items():
+                path=Path(name)
+                if expected is None:
+                    if path.exists():return None
+                elif not path.is_file() or source_fingerprint(path)!=expected:return None
         if payload["status"] == "EMPTY":
             return pd.DataFrame(), payload["manifest"]
         result = pd.read_pickle(directory / "metrics.pkl")
@@ -661,7 +669,12 @@ def save_checkpoint(key: tuple[str, str], tasks: list[dict[str, str]], fingerpri
         temporary = directory / f".metrics.{os.getpid()}.{time.time_ns()}.tmp"
         result.to_pickle(temporary)
         os.replace(temporary, directory / "metrics.pkl")
-    atomic_json({"status": status, "runtime_fingerprint": fingerprint, "sources": [source_fingerprint(Path(task["source"])) for task in tasks], "manifest": manifest, "written_at": time.time()}, directory / "sample.DONE.json")
+    outputs={}
+    if INPUT_LAYOUT=='chains':
+        for task in tasks:
+            path=OUTPUT_DIR/'junction_peps'/Path(task['input_root']).name/task['relative_sample']/task['receptor']/(task['chain']+'.csv')
+            outputs[str(path)]=source_fingerprint(path) if path.is_file() else None
+    atomic_json({"status": status, "runtime_fingerprint": fingerprint, "sources": [source_fingerprint(Path(task["source"])) for task in tasks], "manifest": manifest, "junction_outputs": outputs, "written_at": time.time()}, directory / "sample.DONE.json")
 
 
 def main() -> int:
@@ -735,6 +748,9 @@ def main() -> int:
     finally:
         for umi_index in {value for value in umi_indexes.values() if value is not None}:
             umi_index.close()
+    if INPUT_LAYOUT=='chains' and os.environ.get('SCIGBLAST_BASE_PREPROCESSING_WARMUP')=='1':
+        print(f'[BASE preprocessing] warmup samples={len(manifest_rows)} failed={int(failed)}; global outputs deferred',flush=True)
+        return 1 if failed else 0
     output = pd.concat(metrics_rows, ignore_index=True) if metrics_rows else pd.DataFrame(columns=['sample','batch'] if INPUT_LAYOUT=='chains' else [])
     atomic_csv(output, OUTPUT_DIR / "Datapoint.csv")
     manifest_columns = [

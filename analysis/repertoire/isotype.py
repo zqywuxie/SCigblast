@@ -8,6 +8,10 @@ MAIN_ORDER = ('IgM', 'IgD', 'IgA', 'IgG', 'IgE')
 AA = re.compile(r'^[ACDEFGHIKLMNPQRSTVWY]+$')
 
 
+def count_unit(metric, postprocessed=False):
+    return 'distinct_cdr3' if metric == 'unique_cdr3' else 'copy' if postprocessed else 'reads'
+
+
 def classify(call):
     """Return (main class, subtype, state); never select the first candidate."""
     from .aggregate import calls
@@ -30,34 +34,39 @@ def classify(call):
 def summarize(connection):
     """Keep distinct AA sequences on disk, including after subclass merging."""
     connection.row_factory = __import__('sqlite3').Row
+    postprocessed = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE name='composition_records'").fetchone())
+    records = 'composition_records' if postprocessed else 'usage_records'
+    scope = ' AND sample_record=1' if postprocessed else ''
+    weight = 'coalesce(sum(weight),0)' if postprocessed else 'count(*)'
     result = []
     groups = connection.execute("SELECT * FROM usage_groups WHERE chain='IGH' ORDER BY sample,id").fetchall()
     for group in groups:
         base = dict(group_id=group['id'], sample=group['sample'], chain='IGH',
-                    reference_id=group['reference_id'], unit='AIRR rows', subset='retained')
-        total = connection.execute('SELECT count(*) FROM usage_records WHERE group_id=? AND eligible=1', (group['id'],)).fetchone()[0]
-        for level, column in (('main', 'isotype_main'), ('subclass', 'isotype_subclass')):
-            usable = "group_id=? AND eligible=1 AND " + column + "<>''"
-            rows = connection.execute('SELECT '+column+' AS label,count(*) AS count FROM usage_records WHERE '+usable+' GROUP BY '+column, (group['id'],)).fetchall()
-            denominator = sum(row['count'] for row in rows)
+                    reference_id=group['reference_id'], unit=count_unit('abundance', postprocessed), subset='postprocessed' if postprocessed else 'mapped')
+        total = connection.execute(f'SELECT {weight} FROM {records} WHERE group_id=? AND eligible=1'+scope, (group['id'],)).fetchone()[0]
+        for level, column in (('main', 'isotype_main'),):
+            usable = "group_id=? AND eligible=1" + scope + " AND " + column + "<>''"
+            rows = connection.execute(f'SELECT {column} AS label,{weight} AS count FROM {records} WHERE '+usable+' GROUP BY '+column, (group['id'],)).fetchall()
+            annotated = sum(row['count'] for row in rows)
+            denominator = annotated
             for row in rows:
                 result.append(dict(base, level=level, metric='abundance', aa_field='', isotype=row['label'],
                     count=row['count'], denominator=denominator, percent=row['count']*100/denominator if denominator else None,
-                    total_records=total, annotated_records=denominator, excluded_records=total-denominator,
+                    total_records=total, annotated_records=annotated, excluded_records=total-annotated,
                     valid_aa_records=None, global_unique_cdr3=None))
-            fields = connection.execute('SELECT DISTINCT aa_field FROM usage_records WHERE group_id=? AND eligible=1 AND aa_field<>\'\' ORDER BY aa_field', (group['id'],)).fetchall()
+            fields = connection.execute(f"SELECT DISTINCT aa_field FROM {records} WHERE group_id=? AND eligible=1 AND aa_field='cdr3_aa'"+scope, (group['id'],)).fetchall()
             for field in fields:
                 where = usable + " AND aa_field=? AND aa_valid=1"
-                counts = connection.execute('SELECT '+column+' AS label,count(DISTINCT aa_value) AS count FROM usage_records WHERE '+where+' GROUP BY '+column, (group['id'],field[0])).fetchall()
+                counts = connection.execute(f'SELECT {column} AS label,count(DISTINCT aa_value) AS count FROM {records} WHERE '+where+' GROUP BY '+column, (group['id'],field[0])).fetchall()
                 denominator = sum(row['count'] for row in counts)
-                valid, global_unique = connection.execute('SELECT count(*),count(DISTINCT aa_value) FROM usage_records WHERE '+where, (group['id'],field[0])).fetchone()
+                valid, global_unique = connection.execute(f'SELECT {weight},count(DISTINCT aa_value) FROM {records} WHERE '+where, (group['id'],field[0])).fetchone()
                 for row in counts:
-                    result.append(dict(base, level=level, metric='unique_cdr3', aa_field=field[0], isotype=row['label'],
+                    result.append(dict(base, unit=count_unit('unique_cdr3'), level=level, metric='unique_cdr3', aa_field=field[0], isotype=row['label'],
                         count=row['count'], denominator=denominator, percent=row['count']*100/denominator if denominator else None,
                         total_records=total, annotated_records=sum(r['count'] for r in rows), excluded_records=total-valid,
                         valid_aa_records=valid, global_unique_cdr3=global_unique))
                 if not counts:
-                    result.append(dict(base,level=level,metric='unique_cdr3',aa_field=field[0],isotype='',
+                    result.append(dict(base,unit=count_unit('unique_cdr3'),level=level,metric='unique_cdr3',aa_field=field[0],isotype='',
                         count=0,denominator=0,percent=None,total_records=total,annotated_records=sum(r['count'] for r in rows),
                         excluded_records=total,valid_aa_records=0,global_unique_cdr3=0))
     return result

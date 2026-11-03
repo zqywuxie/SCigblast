@@ -24,7 +24,7 @@ import postanalysis
 import repertoire_analysis
 from table_preview import read_preview
 from process_identity import group_state, signal_group
-from artifact_download import stream_zip
+from artifact_download import stream_zip, file_response
 import mapping_results
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -275,12 +275,17 @@ def validate_output(value: str | None) -> Path:
     return resolved
 
 
-def default_job_output(user: dict, pipeline: str) -> Path:
+def default_job_output(user: dict, pipeline: str, species: str = 'human') -> Path:
     name = re.sub(r'[^\w.-]+', '_', user['display_name'].strip(), flags=re.UNICODE).strip('._')[:60] or 'user'
     suffix = re.sub(r'[^a-zA-Z0-9]', '', user['id'])[:8]
     name = f'{name}_{suffix}'
     stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
-    return DEFAULT_OUTPUT_ROOT / name / pipeline / stamp
+    folder = DEFAULT_OUTPUT_ROOT / name / pipeline
+    if pipeline == 'igblast_base':
+        species=species.strip().lower()
+        if species not in REFERENCES:raise HTTPException(400,'未知物种')
+        folder=folder/species
+    return folder/stamp
 
 
 BROWSE_SPECS: dict[str, tuple[str, set[str]]] = {
@@ -509,7 +514,7 @@ def build_job(request: CreateJob) -> tuple[dict[str, Any], dict[str, str]]:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     barcode = validate_barcode(request.barcode_csv, bool(config["requires_barcode"]))
-    output_root = validate_output(request.output_root or str(default_job_output(auth.require_user(), request.pipeline)))
+    output_root = validate_output(request.output_root or str(default_job_output(auth.require_user(), request.pipeline, request.species)))
     dataset = safe_dataset(request.dataset_label, input_path)
     if request.operator.strip() == "":
         raise HTTPException(400, "operator is required")
@@ -1688,7 +1693,7 @@ def download_submission(revision: str, filename: str, original: bool = False):
         raise HTTPException(400, str(exc)) from exc
     if filename not in [p.name for p in folder.glob("*.xlsx")]:
         raise HTTPException(404, "Workbook not found")
-    return FileResponse(folder / filename, filename=filename)
+    return file_response(folder / filename, filename=filename)
 
 
 @app.post("/api/jobs/{job_id}/rematch")
@@ -1770,7 +1775,7 @@ def download_result(job_id: str, kind: str = "results"):
         path = stage_summary_file(row, kind)
     if path is None or not is_under(Path(path), [Path(row["output_root"])]):
         raise HTTPException(404, "Summary not available")
-    return FileResponse(path, filename=Path(path).name)
+    return file_response(path)
 
 
 class MappingDownload(BaseModel):
@@ -1966,6 +1971,7 @@ def delete_job(job_id: str, request: dict):
                 raise HTTPException(409, '任务状态已变化，请刷新后重试')
             active = connection.execute("SELECT 1 FROM derived_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (job_id,)).fetchone()
             active_report = connection.execute("SELECT 1 FROM report_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (job_id,)).fetchone()
+            active_report=active_report or connection.execute('SELECT 1 FROM report_read_leases WHERE parent_job_id=? AND expires>? LIMIT 1',(job_id,time.time())).fetchone()
             if active_report:
                 raise HTTPException(409, '后续分析尚未停止，请稍后重试')
             if active:
@@ -1983,11 +1989,13 @@ def delete_job(job_id: str, request: dict):
             import derived_store
             derived_store.delete(connection, [item[0] for item in connection.execute('SELECT id FROM derived_runs WHERE parent_job_id=?', (job_id,))])
             connection.execute('DELETE FROM derived_runs WHERE parent_job_id=?', (job_id,))
+            report_cache_rows=connection.execute('SELECT id,owner_id FROM report_runs WHERE parent_job_id=?',(job_id,)).fetchall()
             connection.execute('DELETE FROM report_runs WHERE parent_job_id=?', (job_id,))
             connection.execute('DELETE FROM report_plans WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM reviews WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM actions WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM jobs WHERE id=?', (job_id,))
+        REPORTS.purge_html_cache(report_cache_rows)
         with PROCESS_LOCK:
             STOP_REQUESTED.discard(job_id)
         return {'deleted': job_id, 'output_root': str(output)}

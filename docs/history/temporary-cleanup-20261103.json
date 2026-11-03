@@ -1,0 +1,239 @@
+{
+    "date":  "2026-11-03",
+    "removed":  [
+                    {
+                        "path":  ".chart-data-1ZDvAN",
+                        "bytes":  3942491
+                    },
+                    {
+                        "path":  ".chart-data-54tE0L",
+                        "bytes":  4053883
+                    },
+                    {
+                        "path":  ".chart-data-7oSlz8",
+                        "bytes":  3939216
+                    },
+                    {
+                        "path":  ".chart-data-8tlmhB",
+                        "bytes":  4081549
+                    },
+                    {
+                        "path":  ".chart-data-9B3ULF",
+                        "bytes":  3942683
+                    },
+                    {
+                        "path":  ".chart-data-CdcAns",
+                        "bytes":  816341
+                    },
+                    {
+                        "path":  ".chart-data-Cg5FoP",
+                        "bytes":  4055402
+                    },
+                    {
+                        "path":  ".chart-data-czLWxt",
+                        "bytes":  4076408
+                    },
+                    {
+                        "path":  ".chart-data-denP4j",
+                        "bytes":  4034720
+                    },
+                    {
+                        "path":  ".chart-data-diVH4q",
+                        "bytes":  4034712
+                    },
+                    {
+                        "path":  ".chart-data-DTWEQT",
+                        "bytes":  3932036
+                    },
+                    {
+                        "path":  ".chart-data-E2YsgP",
+                        "bytes":  null
+                    },
+                    {
+                        "path":  ".chart-data-eBnA8Z",
+                        "bytes":  4037758
+                    },
+                    {
+                        "path":  ".chart-data-hoU0Yc",
+                        "bytes":  4035056
+                    },
+                    {
+                        "path":  ".chart-data-HqKpbp",
+                        "bytes":  4037776
+                    },
+                    {
+                        "path":  ".chart-data-HqYH8K",
+                        "bytes":  816118
+                    },
+                    {
+                        "path":  ".chart-data-iw7FDS",
+                        "bytes":  3937627
+                    },
+                    {
+                        "path":  ".chart-data-jeQPAo",
+                        "bytes":  4053814
+                    },
+                    {
+                        "path":  ".chart-data-kFijiu",
+                        "bytes":  816118
+                    },
+                    {
+                        "path":  ".chart-data-kM0FjV",
+                        "bytes":  890271
+                    },
+                    {
+                        "path":  ".chart-data-l4Ereb",
+                        "bytes":  3939481
+                    },
+                    {
+                        "path":  ".chart-data-NNHH2I",
+                        "bytes":  4035056
+                    },
+                    {
+                        "path":  ".chart-data-NSoWWA",
+                        "bytes":  4055551
+                    },
+                    {
+                        "path":  ".chart-data-OBIgaU",
+                        "bytes":  null
+                    },
+                    {
+                        "path":  ".chart-data-PAlHO7",
+                        "bytes":  4035045
+                    },
+                    {
+                        "path":  ".chart-data-pnwGPK",
+                        "bytes":  3920245
+                    },
+                    {
+                        "path":  ".chart-data-QAU1e3",
+                        "bytes":  4076449
+                    },
+                    {
+                        "path":  ".chart-data-RR5Kua",
+                        "bytes":  4038376
+                    },
+                    {
+                        "path":  ".chart-data-SDPYtM",
+                        "bytes":  4034718
+                    },
+                    {
+                        "path":  ".chart-data-SI9wll",
+                        "bytes":  4055370
+                    },
+                    {
+                        "path":  ".chart-data-sjbwcV",
+                        "bytes":  4037775
+                    },
+                    {
+                        "path":  ".chart-data-tyMhQE",
+                        "bytes":  3942518
+                    },
+                    {
+                        "path":  ".chart-data-VtMfRU",
+                        "bytes":  816318
+                    },
+                    {
+                        "path":  ".chart-data-Vwq9X2",
+                        "bytes":  3941785
+                    },
+                    {
+                        "path":  ".chart-data-xb5AVc",
+                        "bytes":  4035074
+                    },
+                    {
+                        "path":  ".chart-data-XcGfLy",
+                        "bytes":  3937871
+                    },
+                    {
+                        "path":  ".chart-data-xPgc6F",
+                        "bytes":  4034381
+                    },
+                    {
+                        "path":  ".chart-data-YvtryS",
+                        "bytes":  816342
+                    },
+                    {
+                        "path":  ".chart-data-ZJTVqW",
+                        "bytes":  815970
+                    },
+                    {
+                        "path":  ".chart-data-Zv4WaO",
+                        "bytes":  3942670
+                    },
+                    {
+                        "path":  ".chart-data-ZXnzfD",
+                        "bytes":  3935073
+                    },
+                    {
+                        "path":  "__pycache__",
+                        "bytes":  225508
+                    },
+                    {
+                        "path":  "10X_split/__pycache__",
+                        "bytes":  197725
+                    },
+                    {
+                        "path":  "analysis/__pycache__",
+                        "bytes":  212
+                    },
+                    {
+                        "path":  "analysis/repertoire/__pycache__",
+                        "bytes":  366118
+                    },
+                    {
+                        "path":  "Igblast_base/pipeline/__pycache__",
+                        "bytes":  95752
+                    },
+                    {
+                        "path":  "Igblast_base/pipeline/tools/__pycache__",
+                        "bytes":  3786
+                    },
+                    {
+                        "path":  "IR_split/__pycache__",
+                        "bytes":  260552
+                    },
+                    {
+                        "path":  "IR_split/pipeline/models/__pycache__",
+                        "bytes":  25995
+                    },
+                    {
+                        "path":  "mapping/__pycache__",
+                        "bytes":  20413
+                    },
+                    {
+                        "path":  "mapping/pipeline/__pycache__",
+                        "bytes":  35577
+                    },
+                    {
+                        "path":  "pipeline/__pycache__",
+                        "bytes":  183913
+                    },
+                    {
+                        "path":  "pipeline/pipeline/__pycache__",
+                        "bytes":  12026
+                    },
+                    {
+                        "path":  "pipeline/pipeline/models/__pycache__",
+                        "bytes":  48723
+                    },
+                    {
+                        "path":  "tests",
+                        "bytes":  22358
+                    },
+                    {
+                        "path":  "web/__pycache__",
+                        "bytes":  665644
+                    }
+                ],
+    "bytes":  136144349,
+    "preserved":  [
+                      "data",
+                      "reference",
+                      "igblast",
+                      "outputs",
+                      "output",
+                      ".ppt_build_20261029",
+                      "web/runtime"
+                  ]
+}

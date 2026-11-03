@@ -5,6 +5,26 @@ from collections import defaultdict
 from .palette import MATCH_COLORS,STAGE_COLORS,mix
 
 
+def sample_sort_key(sample, chain):
+    import re
+    order={'IGH':0,'IGK':1,'IGL':2,'TRA':3,'TRB':4,'TRD':5,'TRG':6}
+    natural=tuple((1,int(p)) if p.isdigit() else (0,p.casefold()) for p in re.split(r'(\d+)',str(sample)))
+    return order.get(chain,99),natural
+
+
+def sample_rows(samples, catalog=None):
+    """One shared sample-information contract for XLSX, Web and offline HTML."""
+    assignments=(catalog or {}).get('assignments',{})
+    categories={'IGH':'Heavy','IGK':'Light','IGL':'Light',**{c:'TCR' for c in ('TRA','TRB','TRD','TRG')}}
+    result=[]
+    for sample,chain in sorted({(r['sample'],r['chain']) for r in samples},key=lambda item:sample_sort_key(*item)):
+        primers=assignments.get(sample,[])
+        groups=sorted({str(p['group']).strip() for p in primers if p.get('group') and str(p['group']).strip()})
+        result.append(dict(category=categories.get(chain,'—'),sample=sample,chain=chain,
+            primer_groups='、'.join(groups) if groups else '未提供组名' if primers else '未配置'))
+    return result
+
+
 def build_overview(book,exports,*,catalog=None):
     from math import ceil
     from unicodedata import east_asian_width
@@ -33,8 +53,6 @@ def build_overview(book,exports,*,catalog=None):
         c.alignment=Alignment(vertical='center');title.append(c)
     sheet.append(title);sheet.append([]);sheet.append([])
     samples=sorted({(r['sample'],r['chain']) for r in exports.get('sample_summary',[])})
-    assignments=(catalog or {}).get('assignments',{})
-    categories={'IGH':'Heavy','IGK':'Light','IGL':'Light',**{c:'TCR' for c in ('TRA','TRB','TRD','TRG')}}
     headers=[]
     for label in ('类别','完整样本名','链','引物组 / 对应方式'):
         c=WriteOnlyCell(sheet,label);c.fill=PatternFill('solid',fgColor='243E54')
@@ -42,11 +60,9 @@ def build_overview(book,exports,*,catalog=None):
         c.alignment=Alignment(horizontal='center',vertical='center');headers.append(c)
     sheet.append(headers)
     previous=None;block=-1
-    for row_number,(sample,chain) in enumerate(samples,5):
-        primers=assignments.get(sample,[])
-        groups=sorted({str(p['group']).strip() for p in primers if p.get('group') and str(p['group']).strip()})
-        group='、'.join(groups) if groups else '未提供组名' if primers else '未配置'
-        text=[categories.get(chain,'—'),sample,chain,group]
+    for row_number,record in enumerate(sample_rows(exports.get('sample_summary',[]),catalog),5):
+        sample,chain,group=record['sample'],record['chain'],record['primer_groups']
+        text=[record['category'],sample,chain,group]
         # Size wrapped sample/group text before streaming the row to the file.
         units=lambda value:sum(2 if east_asian_width(c) in {'W','F'} else 1 for c in str(value))
         sheet.row_dimensions[row_number].height=max(24,15*max(ceil(units(sample)/45),ceil(units(group)/75))+8)
@@ -69,9 +85,9 @@ def build_overview(book,exports,*,catalog=None):
     if samples:sheet.auto_filter.ref=f'A4:D{4+len(samples)}'
     grouped=defaultdict(lambda:defaultdict(set))
     for row in exports.get('stage_volume_summary',[]):
-        if not row['chain'] and row['stage'] in {'raw','fastp','merged'}:grouped[row['sample']][row['stage']].add(row['count'])
+        if not row['chain'] and row['stage'] in {'raw_r1','raw_r2','fastp_r1','fastp_r2','merged'}:grouped[row['sample']][row['stage']].add(row['count'])
     names=sorted(grouped);preview=names[:12]
-    hint='Raw reads include R1 + R2; each Merged read represents one assembled pair.'
+    hint='Raw and Clean each show R1 and R2 separately; each Merged read represents one assembled pair.'
     if len(names)>12:hint+='  图表预览前12个样本，所有样本均保留在核查表。'
     note=WriteOnlyCell(sheet,hint);note.font=Font(name='Calibri',size=10,color='667888');note.alignment=Alignment(wrap_text=True,vertical='center')
     note_row=5+len(samples);chart_row=note_row+2
@@ -96,20 +112,20 @@ def build_overview(book,exports,*,catalog=None):
             series.graphicalProperties.line.noFill=True
         return chart
 
-    data.append(['Sample','Raw reads (R1+R2)','Clean reads (R1+R2)','Merged reads'])
+    data.append(['Sample','Raw R1 reads','Raw R2 reads','Clean R1 reads','Clean R2 reads','Merged reads'])
     for sample in preview:
         values=[]
-        for stage in ('raw','fastp','merged'):
+        for stage in ('raw_r1','raw_r2','fastp_r1','fastp_r2','merged'):
             observed=grouped[sample][stage];values.append(next(iter(observed)) if len(observed)==1 else None)
         data.append([sample,*values])
     if preview:
         chart=BarChart();chart.type='col';chart.grouping='clustered';chart.title='Read counts';chart.y_axis.numFmt='#,##0'
-        chart.add_data(Reference(data,min_col=2,max_col=4,min_row=1,max_row=len(preview)+1),titles_from_data=True)
+        chart.add_data(Reference(data,min_col=2,max_col=6,min_row=1,max_row=len(preview)+1),titles_from_data=True)
         chart.set_categories(Reference(data,min_col=1,min_row=2,max_row=len(preview)+1))
-        sheet.add_chart(style(chart,[STAGE_COLORS[s].removeprefix('#') for s in ('raw','fastp','merged')]),f'A{chart_row}')
+        sheet.add_chart(style(chart,[STAGE_COLORS[s].removeprefix('#') for s in ('raw_r1','raw_r2','fastp_r1','fastp_r2','merged')]),f'A{chart_row}')
     assessed={}
-    for row in exports.get('matching_total_summary',[]):
-        assessed.setdefault((row['sample'],row['unit']),{})[row['match_class']]=row['percent']
+    for row in (exports.get('dual_matching_summary') or exports.get('matching_total_summary',[])):
+        assessed.setdefault((row['sample'],{'raw_R1':'Raw','mapping':'Mapping reads'}.get(row.get('stage'),row['unit'])),{})[row['match_class']]=row['percent']
     keys=sorted(assessed)[:12]
     # Never mix raw-read matching with merged-read matching in a single sample bar.
     repeats={sample:sum(s==sample for s,_ in assessed) for sample,_ in keys}

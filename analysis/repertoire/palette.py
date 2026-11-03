@@ -5,9 +5,9 @@ import hashlib
 import re
 
 MATCH_COLORS={'unique':'#3979B8','multiple':'#E3A34D','unmatched':'#B3BBC5'}
-STAGE_COLORS={'raw':'#567FB5','fastp':'#419A8B','clean':'#419A8B','merge_input':'#419A8B','merged':'#8A78B5',
+STAGE_COLORS={'raw':'#567FB5','raw_r1':'#567FB5','raw_r2':'#567FB5','fastp':'#419A8B','fastp_r1':'#419A8B','fastp_r2':'#419A8B','clean':'#419A8B','merge_input':'#419A8B','merged':'#8A78B5',
               'mapping_input':'#AD925D','mapping_output':'#CE8351'}
-STAGE_INK={'raw':'#345D8B','fastp':'#276F64','clean':'#276F64','merged':'#66528B',
+STAGE_INK={'raw':'#345D8B','raw_r1':'#345D8B','raw_r2':'#345D8B','fastp':'#276F64','fastp_r1':'#276F64','fastp_r2':'#276F64','clean':'#276F64','merged':'#66528B',
            'mapping_input':'#79653E','mapping_output':'#98582F'}
 ISOTYPE_COLORS={'IgM':'#7A88C4','IgD':'#62A398','IgA':'#D57856','IgG':'#4477AA','IgE':'#D4AA49'}
 GENE_SEGMENT_COLORS={'V':'#C24D51','J':'#4C72B0','C':'#7C6C96'}

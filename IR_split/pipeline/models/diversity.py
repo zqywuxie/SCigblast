@@ -1,5 +1,6 @@
 from skbio.diversity.alpha import shannon,pielou_e,gini_index,simpson,simpson_e
 import pandas as pd
+from .call_resolution import unique_constant_gene
 
 def calculate_diversity_chain(df) -> pd.DataFrame:
     df_diversity = df[["cdr3_aa","locus","umi_counts"]].copy()
@@ -34,6 +35,7 @@ def calculate_diversity_Bcell(df) -> pd.DataFrame:
     """
     from skbio.diversity.alpha import shannon,pielou_e,gini_index,simpson,simpson_e
     df_diversity = df[["cdr3_aa","locus","c_call","umi_counts"]].copy()
+    df_diversity['c_call']=df_diversity['c_call'].map(unique_constant_gene)
     df_diversity = df_diversity[df_diversity["locus"] == "IGH"]
     df_diversity = df_diversity[~df_diversity["c_call"].isna()]
     df_diversity = df_diversity[~df_diversity["cdr3_aa"].isna()]

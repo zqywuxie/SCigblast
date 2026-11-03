@@ -1,4 +1,5 @@
 import pandas as pd
+from .call_resolution import unique_constant_gene
 
 def calculate_expresion(df_list) -> pd.DataFrame:
     df_expression = pd.DataFrame()
@@ -18,6 +19,7 @@ def calculate_expresion(df_list) -> pd.DataFrame:
     
 def calculate_isotype_ratio(df_BCR) -> pd.DataFrame:
     df_isotype_expression = df_BCR[["cdr3_aa","locus","c_call","umi_counts"]].copy()
+    df_isotype_expression['c_call']=df_isotype_expression['c_call'].map(unique_constant_gene)
     df_isotype_expression = df_isotype_expression[df_isotype_expression["locus"]=="IGH"].dropna()
     df_isotype_expression = df_isotype_expression[df_isotype_expression["c_call"].str.contains("IGH")]
     df_isotype_expression["c_call"] = df_isotype_expression["c_call"].str.split("*").str[0]

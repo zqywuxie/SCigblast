@@ -267,6 +267,10 @@ def run(app, dry_run=False, days=14):
                 # not share the Web process's in-memory scheduling lock.
                 has_derived = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='derived_runs'").fetchone()
                 has_reports = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='report_runs'").fetchone()
+                has_readers = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='report_read_leases'").fetchone()
+                if has_readers and connection.execute('SELECT 1 FROM report_read_leases WHERE parent_job_id=? AND expires>? LIMIT 1',(row['id'],__import__('time').time())).fetchone():
+                    print(f"archive deferred: report export {row['id']}",flush=True)
+                    continue
                 if has_reports and connection.execute("SELECT 1 FROM report_runs WHERE parent_job_id=? AND (status IN ('queued','running','cancelling') OR pid IS NOT NULL) LIMIT 1", (row['id'],)).fetchone():
                     print(f"archive deferred: active report {row['id']}", flush=True)
                     continue
@@ -277,6 +281,10 @@ def run(app, dry_run=False, days=14):
                 if not updated.rowcount:
                     continue
             size = package(root, row['id'])
+            if has_reports:
+                with app.db() as connection:
+                    report_cache_rows=connection.execute('SELECT id,owner_id FROM report_runs WHERE parent_job_id=?',(row['id'],)).fetchall()
+                app.REPORTS.purge_html_cache(report_cache_rows)
             with app.db() as connection:
                 connection.execute("UPDATE jobs SET status='ARCHIVED' WHERE id=? AND status='ARCHIVING'", (row['id'],))
                 connection.execute('INSERT INTO actions(job_id,operator,action,details,created_at) VALUES(?,?,?,?,?)',

@@ -1,4 +1,5 @@
 import pandas as pd
+from .call_resolution import unique_constant_gene
 from itertools import combinations as comb
 
 def calculate_csr(df) -> pd.DataFrame:
@@ -6,6 +7,7 @@ def calculate_csr(df) -> pd.DataFrame:
     计算 CSR
     """
     df_sub = df[["locus","cdr3_aa","v_call","j_call","c_call","umi_counts"]].copy()
+    df_sub['c_call']=df_sub['c_call'].map(unique_constant_gene)
     df_sub = df_sub[df_sub["locus"]=="IGH"].copy()
     df_sub = df_sub[~df_sub["c_call"].isna()]
     df_sub = df_sub[df_sub["c_call"].str.contains("IGH")]

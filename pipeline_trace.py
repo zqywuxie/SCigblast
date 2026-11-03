@@ -82,6 +82,11 @@ class Capture:
     def __init__(self, context, chain):
         self.folder = trace_folder(context['output_root'], context['dataset'], context['sample'], context['pair'], context['fasta'])
         self.queries = capture_queries(self.folder, context['fasta'])
+        # Cheap receipts let later reports read R1 without archiving every upstream
+        # sequence during mapping. Reports still enforce their input allowlist.
+        self.read_sources = {key: dict(path=str(Path(path).resolve()), version=version(path))
+                             for key, path in context.get('reads', {}).items()
+                             if path and Path(path).is_file()}
         self.upstream = capture_upstream(self.folder, context.get('reads', {})) if os.environ.get('SCIGBLAST_TRACE_MODE') == 'full' else None
         self.chain, self.context = chain, context
         self.path = self.folder / f'{chain}-{uuid.uuid4().hex}.sqlite'
@@ -131,6 +136,7 @@ class Capture:
             query_files=self.queries['files'],
             annotation=self.path.name, annotation_version=version(self.path), count=self.count,
             upstream=self.upstream,
+            read_sources=self.read_sources,
             annotation_fields=sorted(self.available_fields),
             report=report, reference=reference, dependency=self.context.get('dependency')))
 

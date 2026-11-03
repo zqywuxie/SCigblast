@@ -8,15 +8,23 @@ from .usage import connect,USAGE_COLUMNS
 from .palette import MATCH_COLORS,STAGE_COLORS,GENE_SEGMENT_COLORS,mix,workbook_accent
 
 LABELS={
+ 'isotype_distribution':('样本Isotype分布','按明确C基因展示同种型；Expression按06 copy加权，Unique CDR3在每个C基因内去重，主类合并概览另表保留'),
+ 'diversity_summary':('多样性指标','直接读取已发布的06 Datapoint；除最大克隆比例先合并CDR3aa外，沿用后处理记录的copy分布'),
+ 'bcell_metrics':('B cell Metrics','Mean SHM按copy加权；共享CDR3比例按去重CDR3aa；IgM与IgD合为IgD/M'),
+ 'sample_output_summary':('样本产出比较','Total Reads = Merged；Total Receptor RNA = AIRR 后处理后 umi_counts 总和（copy 按 umi_counts 记录）；唯一 CDR3aa 单独计数；缺失为 N/A'),
+ 'primer_mapping_summary':('引物Mapping率','原始 R1 与合并后匹配；Mapping为有效V且所选locus，productive保留量另列'),
+ 'dual_matching_summary':('双阶段匹配总览','原始 R1 与合并后分别统计；分母为对应阶段全部可评估reads'),
  'sample_summary':('样本与分析范围','输入文件、样本、链与记录口径'),
  'stage_volume_summary':('数据量变化','原始输入、中间阶段数量和变化；单位分别列出'),
  'matching_total_summary':('引物匹配总览','按样本统计唯一、多重、未匹配及未评估记录'),
+ 'primer_group_comparisons':('引物组对照','原组低于阈值时测试其他组；Suspected 为待核查候选，不替换原归属'),
+ 'candidate_gene_summary':('候选基因核查','保留 AIRR 原始候选；多基因候选不强行分配到单一基因或跨类 Isotype'),
  'primer_counts':('引物计数','完整引物名称、统计输入和筛选后保留计数'),
- 'isotype_summary':('Isotype组成','记录丰度和 Unique CDR3；主类与亚类分列'),
- 'sample_gene_usage':('样本已匹配基因','只含唯一归属数量大于0的 V/J/C 基因'),
- 'unobserved_reference_genes':('样本未观察基因','当次或明确选定比较参考中未观察到的基因'),
- 'primer_gene_usage':('引物已匹配基因','逐引物已有明确注释的 V/J/C 组成'),
- 'primer_unobserved_reference_genes':('引物未观察基因','逐引物未观察的参考基因；分母0须结合引物计数判断'),
+ 'isotype_summary':('Isotype组成','Expression 以有可分类 C 注释的丰度权重为分母，06 数据累加 copy/umi_counts；Unique CDR3 在主类内去重'),
+ 'sample_gene_usage':('样本已匹配基因','V/J/C 各自以明确归属的丰度权重为 Expression 分母，06 数据累加 copy/umi_counts；Unique CDR3 单独去重'),
+ 'unobserved_reference_genes':('样本未匹配基因','当次或明确选定比较参考中未观察到的基因'),
+ 'primer_gene_usage':('引物已匹配基因','每条引物的 V/J/C 各自使用明确归属数据；无注释与未唯一归属不计入组成分母'),
+ 'primer_unobserved_reference_genes':('引物未匹配基因','逐引物未观察的参考基因；分母0须结合引物计数判断'),
  'preprocessing_metrics':('原流程样本指标','原流程 AIRR preprocessing 的 Datapoint；保留原选择范围与权重口径'),
  'filter_summary':('注释与筛选状态','各筛选条件与排除原因'),
  'stage_summary':('阶段原始指标','原阶段报告的技术明细'),
@@ -32,24 +40,45 @@ HEADERS={'sample':'样本','sample_id':'样本','chain':'链','primer':'引物�
  'match_class':'匹配类别','count':'数量','unit':'单位','stage':'阶段','label':'阶段名称','previous_count':'前阶段数量',
  'reduction':'减少量','retention_percent':'保留或合并率（%）','source':'来源','level':'Isotype粒度','metric':'指标',
  'isotype':'Isotype','aa_field':'AA字段'}
-ORDER=['sample_summary','stage_volume_summary','matching_total_summary','primer_counts','isotype_summary',
+ORDER=['sample_summary','sample_output_summary','stage_volume_summary','diversity_summary','bcell_metrics','isotype_distribution','dual_matching_summary','primer_mapping_summary','matching_total_summary','primer_group_comparisons','primer_counts','isotype_summary','candidate_gene_summary',
        'sample_gene_usage','unobserved_reference_genes','primer_gene_usage','primer_unobserved_reference_genes',
        'preprocessing_metrics']
-VERSION='experiment-check-workbook-v11-semantic-palette'
+VERSION='experiment-check-workbook-v25-suspected-groups'
 
 FIELDS={
- 'sample_summary':[('sample','样本'),('chain','链'),('pair','数据配对'),('observations','统计数量'),('unit','计数单位')],
+ 'isotype_distribution':[('sample','样本'),('gene','C gene'),('isotype','Isotype'),('metric','Metric'),('count','Count'),('percent','Percentage (%)')],
+ 'diversity_summary':[('sample','样本'),('chain','链'),('metric','指标'),('value','数值'),('unit','单位')],
+ 'bcell_metrics':[('sample','样本'),('isotype','Isotype'),('mean_shm_percent','Mean SHM (%)'),('shared_cdr3_percent','CDR3s observed as other isotype (%)'),('unique_cdr3','Unique CDR3s'),('shared_cdr3','Shared CDR3s')],
+ 'sample_output_summary':[('sample','样本'),('chain','链'),('total_reads','Total Reads'),('total_receptor_rna','Total Receptor RNA'),('total_unique_cdr3s','Total Unique CDR3s')],
+ 'primer_mapping_summary':[('sample','样本'),('chain','链'),('stage','数据阶段'),('primer','引物全名'),('matched_reads','Primer-matched reads'),('match_percent','Primer match (%)'),('mapped_reads','Mapped reads'),('mapping_percent','Mapping rate (%)'),('retained_reads','Retained reads'),('unverified_reads','未确认关联reads')],
+ 'candidate_gene_summary':[('sample','样本'),('chain','链'),('primer','引物全名'),('segment','基因区'),('call','候选基因（原始注释）'),('count','Reads'),('candidate_count','候选数'),('status','状态')],
+ 'primer_group_comparisons':[('sample','样本'),('stage','数据阶段'),('assigned_group','原引物组'),('original_unique_percent','原组唯一匹配率（%）'),('tested_group','测试引物组'),('unique_percent','测试组唯一匹配率（%）'),('multiple_percent','测试组多重匹配率（%）'),('unmatched_percent','测试组未匹配率（%）'),('threshold_percent','阈值（%）'),('denominator','统计数量'),('unit','计数单位'),('status','状态')],
+ 'sample_summary':[('sample','样本'),('chain','链'),('pair','数据配对'),('observations','Input reads'),('mapped_reads','Mapped reads'),('retained_reads','Retained reads'),('unit','计数单位')],
  'stage_volume_summary':[('sample','样本'),('chain','链'),('label','阶段'),('count','数量'),('unit','计数单位'),('reduction','减少量'),('retention_percent','保留或合并率（%）')],
  'primer_counts':[('sample','样本'),('chain','链'),('primer','引物全名'),('subset','数据范围'),('count','数量')],
- 'isotype_summary':[('sample','样本'),('level','分类层级'),('isotype','Isotype'),('metric','统计指标'),('count','Count'),('percent','Percentage (%)')],
- 'sample_gene_usage':[('sample','样本'),('gene','基因'),('unique_count','Reads'),('percent','% Expression'),('chain','链'),('segment','基因区')],
- 'primer_gene_usage':[('sample','样本'),('primer','引物全名'),('gene','基因'),('unique_count','Reads'),('percent','% Expression'),('chain','链'),('segment','基因区')],
+ 'isotype_summary':[('sample','样本'),('isotype','Isotype'),('metric','统计指标'),('count','Count'),('percent','Percentage (%)')],
+ 'sample_gene_usage':[('sample','样本'),('gene','基因'),('metric','Metric'),('unique_count','Count'),('percent','Percentage (%)'),('chain','链'),('segment','基因区')],
+ 'primer_gene_usage':[('sample','样本'),('primer','引物全名'),('gene','基因'),('metric','Metric'),('unique_count','Count'),('percent','Percentage (%)'),('chain','链'),('segment','基因区')],
  'unobserved_reference_genes':[('sample','样本'),('gene','基因'),('_hint','核查提示'),('chain','链'),('segment','基因区')],
  'primer_unobserved_reference_genes':[('sample','样本'),('primer','引物全名'),('gene','基因'),('_hint','核查提示'),('chain','链'),('segment','基因区')],
 }
 UNITS={'queries':'reads','read ends':'reads','read pairs':'read pairs','AIRR rows':'reads'}
-STAGES={'raw':'Raw reads (R1+R2)','fastp':'Clean reads (Fastp)','clean':'Header-cleaned reads',
+STAGES={'raw':'Raw reads (R1+R2)','raw_r1':'Raw R1 reads','raw_r2':'Raw R2 reads','fastp':'Clean reads (Fastp)','fastp_r1':'Clean R1 reads (Fastp)','fastp_r2':'Clean R2 reads (Fastp)','clean':'Header-cleaned reads',
         'merge_input':'Merge input (read pairs)','merged':'Merged reads','mapping_input':'IgBLAST input reads','mapping_output':'Retained reads'}
+
+LABELS.update({
+ 'scenario_matching_summary':('存疑组匹配构成','存疑组独立统计；原组保持不变；复用现有 mapping 结果，不代表重新去引物比对'),
+ 'scenario_primer_mapping_summary':('存疑组引物统计','各存疑组 Raw / Mapping reads 的引物匹配与 Mapping rate'),
+ 'scenario_primer_gene_usage':('存疑组基因组成','各存疑组独立分配 copy 后的 V/J/C 组成；每个区仅用可分类数据作分母'),
+ 'scenario_primer_reference_gene_observation':('存疑组基因匹配','各存疑组引物的参考基因匹配情况'),
+})
+FIELDS.update({
+ 'scenario_matching_summary':[('sample','样本'),('chain','链'),('primer_group','引物组（存疑）'),('stage','数据阶段'),('match_class','匹配类别'),('count','Reads'),('percent','Percentage (%)')],
+ 'scenario_primer_mapping_summary':[('sample','样本'),('chain','链'),('primer_group','引物组（存疑）'),('stage','数据阶段'),('primer','引物全名'),('matched_reads','Primer-matched reads'),('match_percent','Primer match (%)'),('mapped_reads','Mapped reads'),('mapping_percent','Mapping rate (%)')],
+ 'scenario_primer_gene_usage':[('sample','样本'),('chain','链'),('primer_group','引物组（存疑）'),('primer','引物全名'),('segment','基因区'),('gene','基因'),('metric','Metric'),('unique_count','Count'),('percent','Percentage (%)')],
+ 'scenario_primer_reference_gene_observation':[('sample','样本'),('chain','链'),('primer_group','引物组（存疑）'),('primer','引物全名'),('segment','基因区'),('gene','基因'),('status','状态')],
+})
+ORDER.extend(name for name in FIELDS if name not in ORDER)
 
 
 def simple_rows(name,records,*,batches=None):
@@ -57,12 +86,29 @@ def simple_rows(name,records,*,batches=None):
     fields=FIELDS[name]
     for row in records:
         result={label:row.get(key) for key,label in fields}
+        if name.startswith('scenario_'):
+            if '数据阶段' in result:result['数据阶段']={'raw_R1':'Raw','mapping':'Mapping reads'}.get(row.get('stage'),row.get('stage'))
+            if '匹配类别' in result:result['匹配类别']={'unique':'Unique','multiple':'Multiple','unmatched':'Unmatched'}.get(row.get('match_class'),row.get('match_class'))
+            if 'Metric' in result:
+                from .gene_cdr3 import label
+                result['Metric']=label(row.get('metric','expression'),row.get('aa_field',''))
+            if '状态' in result:result['状态']='已匹配' if row.get('unique_count',0)>0 else '未匹配' if row.get('status')=='zero_observed' else '未评估'
+        if name=='sample_output_summary':
+            for key,label in fields:
+                if key.startswith('total_') and result[label] is None:result[label]='N/A'
         if name=='primer_counts':result['数据范围']={'all':'统计输入','retained':'筛选后保留'}.get(row.get('subset'),row.get('subset'))
+        if name in {'primer_mapping_summary','primer_group_comparisons'}:result['数据阶段']={'raw_R1':'Raw','mapping':'Mapping reads'}.get(row.get('stage','mapping'),row.get('stage','mapping'))
+        if name=='candidate_gene_summary':result['状态']={'gene_candidates':'Gene candidates · 基因候选','allele_candidates':'Allele candidates · 等位基因候选'}.get(row.get('status'),row.get('status'))
+        if name=='primer_group_comparisons':
+            result['状态']={'suspected':'Suspected · 存疑','below_threshold':'未达到候选条件'}.get(row.get('status'),row.get('status'))
         if '计数单位' in result:result['计数单位']=UNITS.get(row.get('unit'),row.get('unit'))
         if name=='stage_volume_summary':result['阶段']=STAGES.get(row.get('stage'),row.get('label'))
         if name=='isotype_summary':
             result['分类层级']={'main':'主类','subclass':'亚类'}.get(row.get('level'),row.get('level'))
             result['统计指标']='% Expression' if row.get('metric')=='abundance' else '% uCDR3' if row.get('aa_field')=='cdr3_aa' else '% uJunction' if row.get('aa_field')=='junction_aa' else 'Unique AA (unknown field)'
+        if name in {'sample_gene_usage','primer_gene_usage','isotype_distribution'}:
+            from .gene_cdr3 import label
+            result['Metric']=label(row.get('metric','expression'),row.get('aa_field',''))
         if '_hint' in dict(fields):
             result['核查提示']='暂无有效唯一注释' if not row.get('denominator') else ''
         if row.get('group_id') and batches and (row.get('sample'),row.get('chain')) in batches:
@@ -74,9 +120,10 @@ def simple_rows(name,records,*,batches=None):
 def matching_rows(records):
     grouped={}
     for row in records:
-        key=(row['sample'],row['unit'])
+        key=(row['sample'],row['unit'],row.get('stage',''))
         result=grouped.setdefault(key,{'样本':row['sample'],'计数单位':UNITS.get(row['unit'],row['unit']),
             '统计数量':row['denominator'],'唯一匹配率（%）':None,'多重匹配率（%）':None,'未匹配率（%）':None,'未评估数':row.get('unassessed_count',0)})
+        if row.get('stage'):result['数据阶段']={'raw_R1':'Raw','mapping':'Mapping reads'}.get(row['stage'],row['stage'])
         label={'unique':'唯一匹配率（%）','multiple':'多重匹配率（%）','unmatched':'未匹配率（%）'}.get(row['match_class'])
         if label:result[label]=row['percent']
     yield from grouped.values()
@@ -164,7 +211,7 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
             result.sheet_view.zoomScale=90
             result.sheet_properties.tabColor=accent.removeprefix('#') if not technical else 'BAC2C9'
             for i,key in enumerate(displayed,1):
-                result.column_dimensions[get_column_letter(i)].width=50 if key in {'primer','引物全名'} else 27 if key in {'sample','sample_id','gene','reference_scope','status','样本','基因','指标','核查提示'} else 40 if key in {'note','source','备注'} else 17
+                result.column_dimensions[get_column_letter(i)].width=23 if key.startswith('Total ') else 50 if key in {'primer','引物全名'} else 27 if key in {'sample','sample_id','gene','reference_scope','status','样本','基因','指标','核查提示'} else 40 if key in {'note','source','备注'} else 17
                 if key in {'id','group_id','sample_key'} or key in optional:
                     result.column_dimensions[get_column_letter(i)].hidden=True
             result.row_dimensions[1].height=34
@@ -222,7 +269,9 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
         finish()
     names=[k for k in ORDER if k in exports or k in sql_exports]+[k for k in [*exports,*sql_exports] if k not in ORDER]
     # CSV/legacy inputs may still carry tables that are not part of the workbook.
-    names=[name for name in names if name not in {'ambiguous_gene_observation','reference_gene_observation'}]
+    names=[name for name in names if name not in {'ambiguous_gene_observation','reference_gene_observation','primer_reference_gene_observation','candidate_gene_summary'}]
+    if exports.get('dual_matching_summary'):
+        names=[name for name in names if name!='matching_total_summary']
     with closing(connect(index)) as connection:
         variants={}
         has_groups=bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_groups'").fetchone())
@@ -236,6 +285,7 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
             if name in sql_exports:records=(dict(r) for r in connection.execute(sql_exports[name]));columns=list(USAGE_COLUMNS)
             else:records=exports[name];columns=list(records[0]) if records else ['sample','count']
             if name in FIELDS:
+                if name=='primer_mapping_summary':records=[r for r in records if r.get('stage')=='mapping']
                 if name=='isotype_summary':records=ordered_isotypes(records)
                 columns=[label for _,label in FIELDS[name]]
                 if name in {'unobserved_reference_genes','primer_unobserved_reference_genes'}:
@@ -245,8 +295,9 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
                     if batches:columns.append('结果批次')
                     if comparison and '核查提示' not in columns:columns.append('核查提示')
                 write(name,simple_rows(name,records,batches=batches),columns)
-            elif name=='matching_total_summary':
+            elif name in {'matching_total_summary','dual_matching_summary'}:
                 columns=['样本','计数单位','统计数量','唯一匹配率（%）','多重匹配率（%）','未匹配率（%）']
+                if name=='dual_matching_summary':columns.insert(1,'数据阶段')
                 if any(row.get('unassessed_count') for row in records):columns.append('未评估数')
                 write(name,matching_rows(records),columns)
             elif name=='preprocessing_metrics':

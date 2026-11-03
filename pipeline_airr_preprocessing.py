@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import hashlib
 import json
@@ -11,9 +13,11 @@ from pathlib import Path
 import runpy
 import sys
 import time
+import subprocess
 
 CHAINS=frozenset(('IGH','IGK','IGL','TRA','TRB','TRD','TRG'))
-VERSION='base-airr-preprocessing-v1'
+VERSION='base-airr-preprocessing-v2-sample-overlap'
+WARM_KEYS={'SCIGBLAST_BASE_PREPROCESSING_READY_MANIFEST','SCIGBLAST_BASE_PREPROCESSING_WARMUP'}
 
 
 def discover(roots):
@@ -21,11 +25,18 @@ def discover(roots):
     for configured in roots:
         root=Path(configured).resolve()
         summary=root/'chain_summary.csv'
-        with summary.open(encoding='utf-8-sig',newline='') as handle:
-            reader=csv.DictReader(handle)
-            if not {'sample_id','chain','status','output_path'}.issubset(reader.fieldnames or []):
-                raise ValueError('chain_summary.csv missing required columns')
-            for row in reader:
+        ready=os.environ.get('SCIGBLAST_BASE_PREPROCESSING_READY_MANIFEST','')
+        if ready:
+            payload=json.loads(Path(ready).read_text(encoding='utf-8'))
+            if Path(payload['input_root']).resolve()!=root:raise ValueError('ready sample root mismatch')
+            rows=payload['rows']
+        else:
+            with summary.open(encoding='utf-8-sig',newline='') as handle:
+                reader=csv.DictReader(handle)
+                if not {'sample_id','chain','status','output_path'}.issubset(reader.fieldnames or []):
+                    raise ValueError('chain_summary.csv missing required columns')
+                rows=list(reader)
+        for row in rows:
                 if row['status']!='OK':raise ValueError('mapping tasks are incomplete')
                 chain=row['chain'].strip().upper()
                 if chain not in CHAINS:raise ValueError('unknown mapping chain: '+chain)
@@ -76,8 +87,9 @@ def signature(root,output):
     entry=project/'IR_split/pipeline/08.preprocessing.py'
     implementation=[Path(__file__),entry,*sorted((entry.parent/'models').glob('*.py'))]
     dependencies={str(p.relative_to(project)):hashlib.sha256(p.read_bytes()).hexdigest() for p in implementation}
-    settings={key:value for key,value in os.environ.items() if key.startswith('SCIGBLAST_BASE_PREPROCESSING_')}
-    files=[Path(root)/'chain_summary.csv',*[Path(t['source']) for t in discover([root])]]
+    settings={key:value for key,value in os.environ.items() if key.startswith('SCIGBLAST_BASE_PREPROCESSING_') and key not in WARM_KEYS}
+    manifest=Path(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_READY_MANIFEST','') or Path(root)/'chain_summary.csv')
+    files=[manifest,*[Path(t['source']) for t in discover([root])]]
     inputs=[]
     for path in files:
         stat=path.stat()
@@ -107,19 +119,25 @@ def main():
     parser.add_argument('--input',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--check',action='store_true')
+    parser.add_argument('--ready-manifest',type=Path)
     args=parser.parse_args()
+    if args.ready_manifest and args.check:raise ValueError('warmup does not publish stage completion')
     if args.check:return 0 if ready(args.input,args.output) else 1
+    warmup=args.ready_manifest is not None
+    for key in WARM_KEYS:os.environ.pop(key,None)
+    if warmup:
+        os.environ.update(SCIGBLAST_BASE_PREPROCESSING_READY_MANIFEST=str(args.ready_manifest.resolve()),SCIGBLAST_BASE_PREPROCESSING_WARMUP='1')
     root,output=args.input.resolve(),args.output.resolve()
     if root==output or output.is_relative_to(root):raise ValueError('preprocessing output must be outside mapping inputs')
     before=signature(root,output)
     state=output/'.preprocessing_state';state.mkdir(parents=True,exist_ok=True)
     marker=state/'base_completion.json'
-    try:old=json.loads(marker.read_text(encoding='utf-8'))
+    try:old=json.loads(marker.read_text(encoding='utf-8')) if not warmup else {}
     except (OSError,ValueError):old={}
     old_junctions=[Path(p) for p in old.get('outputs',{}) if Path(p).resolve().is_relative_to(output/'junction_peps')]
     if any(not p.is_file() or [p.stat().st_size,p.stat().st_mtime_ns]!=old['outputs'][str(p)] for p in old_junctions):
         os.environ['SCIGBLAST_IR_PREPROCESSING_FORCE_RERUN']='1'
-    marker.unlink(missing_ok=True)
+    if not warmup:marker.unlink(missing_ok=True)
     project=Path(__file__).resolve().parent
     entry=project/'IR_split/pipeline/08.preprocessing.py'
     # Reuse its orchestration and frozen calculation functions. Base inputs are
@@ -146,6 +164,9 @@ def main():
     except SystemExit as error:status=int(error.code or 0)
     if status:return status
     if signature(root,output)!=before:raise ValueError('mapping results changed during preprocessing')
+    if warmup:
+        print('[BASE preprocessing] ready sample checkpoints complete; final tables deferred',flush=True)
+        return 0
     required=[output/'Datapoint.csv',output/'processing_manifest.csv',state/'run.json']
     if json.loads(required[-1].read_text(encoding='utf-8'))['status']!='DONE':raise ValueError('preprocessing did not complete')
     expected={output/'junction_peps'/root.name/t['relative_sample']/t['receptor']/(t['chain']+'.csv') for t in discover([root])}
@@ -157,6 +178,42 @@ def main():
     os.replace(temporary,marker)
     print('[BASE preprocessing] completed; support counts describe aligned records, not validated molecular UMIs',flush=True)
     return 0
+
+
+class SamplePreprocessing:
+    """One bounded warmup worker; enqueue only after all tasks of a sample succeed."""
+    def __init__(self,root,output,jobs):
+        self.root,self.output=Path(root),Path(output)
+        self.expected=Counter(job[0] for job in jobs)
+        self.completed=defaultdict(list)
+        self.executor=ThreadPoolExecutor(max_workers=1) if os.environ.get('SCIGBLAST_BASE_PIPELINED_PREPROCESSING')=='1' else None
+        self.futures=[]
+
+    def __enter__(self):return self
+
+    def completed_task(self,result):
+        if self.executor is None:return
+        sample=result['sample_id'];self.completed[sample].append(dict(result))
+        rows=self.completed[sample]
+        if len(rows)==self.expected[sample] and all(r['status']=='OK' for r in rows):
+            self.futures.append(self.executor.submit(self._run,sample,rows))
+
+    def _run(self,sample,rows):
+        try:
+            from pipeline_locus_split import atomic_text
+            from pipeline_progress import inherited_resource_fds
+            folder=self.output/'.preprocessing_state'/'ready';folder.mkdir(parents=True,exist_ok=True)
+            manifest=folder/(hashlib.sha256(sample.encode()).hexdigest()[:24]+'.json')
+            payload=dict(input_root=str(self.root.resolve()),rows=[dict(sample_id=sample,chain=r['chain'],status='OK',output_path=str(r.get('path') or r['output_path'])) for r in rows])
+            atomic_text(manifest,lambda handle:json.dump(payload,handle,ensure_ascii=False))
+            print(f'[BASE overlap] sample={sample} start chains={len(rows)}',flush=True)
+            result=subprocess.run([sys.executable,str(Path(__file__).resolve()),'--input',str(self.root),'--output',str(self.output),'--ready-manifest',str(manifest)],pass_fds=inherited_resource_fds())
+            print(f'[BASE overlap] sample={sample} '+('checkpoint ready' if result.returncode==0 else 'warmup failed; final stage will retry'),flush=True)
+        except Exception as error:
+            print(f'[BASE overlap] sample={sample} warmup unavailable: {error}; final stage will retry',flush=True)
+
+    def __exit__(self,kind,value,traceback):
+        if self.executor is not None:self.executor.shutdown(wait=True,cancel_futures=kind is not None)
 
 
 if __name__=='__main__':

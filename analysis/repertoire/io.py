@@ -43,6 +43,22 @@ def table(path):
         yield from csv.DictReader(handle, delimiter='\t' if '.tsv' in Path(path).suffixes else ',')
 
 
+def selected_reader(handle, fields, *, delimiter=','):
+    """Use the same CSV engine, allocating only the columns this pass consumes."""
+    reader=csv.reader(handle,delimiter=delimiter)
+    header=next(reader,[]);fields=set(fields)
+    indices=[(name,i) for i,name in enumerate(header) if name in fields]
+    for values in reader:
+        if values:
+            # As DictReader, later duplicate headers win; short rows yield None.
+            yield {name:values[i] if i<len(values) else None for name,i in indices}
+
+
+def selected_table(path, fields):
+    with open_text(path) as handle:
+        yield from selected_reader(handle,fields,delimiter='\t' if '.tsv' in Path(path).suffixes else ',')
+
+
 def sequences(path, *, normalize=True):
     """Yield original title and full sequence; reject truncated/malformed records."""
     with open_text(path) as handle:

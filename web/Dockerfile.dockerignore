@@ -54,6 +54,9 @@
 !analysis/__init__.py
 !analysis/treemap/*.py
 !analysis/repertoire/*.py
+!analysis/repertoire/assets/*.js
+!analysis/repertoire/assets/*.css
+!analysis/repertoire/assets/*.txt
 !pipeline_trace.py
 !pipeline_primer.py
 !pipeline_stage_metrics.py

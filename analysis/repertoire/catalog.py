@@ -86,6 +86,9 @@ def workbook_preview(book, header_row=1):
 
 
 def build_catalog(submission, primers, config, samples):
+    from .matching import review_settings
+    enabled, threshold = review_settings(config)
+    config = dict(config, try_alternative_groups=enabled, primer_match_threshold=threshold)
     source_versions={name:version(path) for name,path in (('submission',submission),('primers',primers))}
     sub = workbook(submission, config.get('submission_sheet'))
     book = workbook(primers, config.get('primer_sheet'))
@@ -163,7 +166,8 @@ def build_catalog(submission, primers, config, samples):
         with Path(path).open('rb') as incoming:sha=hashlib.file_digest(incoming,'sha256').hexdigest()
         if version(path)!=source_versions[name]:raise ValueError('工作簿在解析期间发生变化，请重新导入')
         evidence[name]=dict(sha256=sha,source_version=source_versions[name],filename=Path(path).name)
-    return dict(assignments=result, config=config, version=digest([result, config]),workbooks=evidence)
+    return dict(assignments=result, groups=grouped, config=config,
+                version=digest([result, grouped, config]), workbooks=evidence)
 
 
 class Matcher:
@@ -175,8 +179,9 @@ class Matcher:
 
     def match(self, sequence):
         names, families = [], []
+        sequence = sequence.upper()
         for sequence_key, aliases, pattern in self.patterns:
-            if pattern.match(sequence.upper()):
+            if pattern.match(sequence):
                 names.extend(aliases)
                 families.append(sequence_key)
         names = sorted(set(names))

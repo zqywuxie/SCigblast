@@ -36,3 +36,10 @@ IR_split/**/.tmp_*/
 Thumbs.db
 *.swp
 *.swo
+
+# Local figure/document builders and browser scratch files
+/.chart-data-*/
+/.ppt_build_*/
+/.playwright-mcp/
+.pytest_cache/
+.ruff_cache/

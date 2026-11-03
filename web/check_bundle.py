@@ -27,9 +27,14 @@ def check_bundle(root=Path('/opt/scigblast'), registry_path=Path('/app/pipeline_
     for filename in ('__init__.py','sources.py','aggregate.py','render.py','run.py','clone_table.py'):
         path = root / 'analysis' / 'treemap' / filename
         ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
-    for filename in ('__init__.py','io.py','sources.py','catalog.py','matching.py','aggregate.py','usage.py','isotype.py','palette.py','render_usage.py','render_stages.py','workbook.py','workbook_overview.py','render.py','run.py'):
+    for filename in ('__init__.py','io.py','sources.py','catalog.py','matching.py','alternatives.py','aggregate.py','primer_metrics.py','output_metrics.py','postprocessed_usage.py','repertoire_metrics.py','render_metrics.py','usage.py','gene_cdr3.py','isotype.py','palette.py','render_usage.py','render_stages.py','render_matching.py','workbook.py','workbook_overview.py','report_html.py','export_html.py','report_rules.py','render.py','run.py','chart_data.py','figure_jobs.py','scenario_analysis.py','batch.py','compute_jobs.py','performance.py','private_cache.py','html_cache.py'):
         path = root / 'analysis' / 'repertoire' / filename
         ast.parse(path.read_text(encoding='utf-8-sig'), filename=str(path))
+    for filename in ('charts.min.js','charts.js','report.js','report.css','ECHARTS-LICENSE.txt'):
+        path=root/'analysis/repertoire/assets'/filename
+        if not path.is_file() or path.stat().st_size==0:raise RuntimeError('Missing report viewer asset: '+str(path))
+    api_summary=root/'analysis/repertoire/api_summary.py'
+    ast.parse(api_summary.read_text(encoding='utf-8-sig'),filename=str(api_summary))
     registry = json.loads(registry_path.read_text(encoding='utf-8'))
     for pipeline in registry.values():
         runner = root / pipeline['runner']
