@@ -30,7 +30,7 @@ def connect(path):
 
 def current_reference(root,species,chain):
     """Explicit present-day comparison, never asserted as the historical DB."""
-    from pipeline_igblast_cache import reference
+    from scigblast.igblast_cache import reference
     version_name,_=reference(species)
     refs,genes={},[]
     for segment in ('V','J','C'):

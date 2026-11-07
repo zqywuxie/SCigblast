@@ -11,7 +11,7 @@ scigblast_acquire_stage_budget() {
     lock_file="${SCIGBLAST_RESOURCE_LOCK_FILE:-/colddata/SCigblast/results/.scigblast-resource.lock}"
     wait_seconds="${SCIGBLAST_RESOURCE_LOCK_WAIT_SECONDS:-86400}"
     [[ "$memory_gb" =~ ^[0-9]+$ && "$wait_seconds" =~ ^[0-9]+$ ]] || { echo "[SCigblast] invalid stage resource estimate" >&2; return 2; }
-    root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     python_bin="${PYTHON_BIN:-python3}"
     [[ -n "${SCIGBLAST_RUNTIME_BIN_DIR:-}" ]] && python_bin="${SCIGBLAST_RUNTIME_BIN_DIR}/python3"
     resources="$("$python_bin" - "$root/mapping/pipeline" <<'PY'

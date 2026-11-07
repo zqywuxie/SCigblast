@@ -192,7 +192,7 @@ import sys
 import os
 from pathlib import Path, PurePosixPath
 sys.path.insert(0, sys.argv[3])
-from pipeline_input_manifest import unified_stage_relative
+from scigblast.input_manifest import unified_stage_relative
 
 summary = Path(sys.argv[1])
 input_root = Path(sys.argv[2]).expanduser().resolve()

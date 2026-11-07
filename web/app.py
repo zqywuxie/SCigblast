@@ -43,9 +43,9 @@ PIPELINE_ROOT = Path(os.environ.get("SCIGBLAST_PIPELINE_ROOT") or APP_DIR.parent
 sys.path.insert(0, str(PIPELINE_ROOT))
 import preflight as runtime_preflight
 import input_manifest
-import pipeline_input_manifest
-from pipeline_igblast_cache import REFERENCES, reference
-import pipeline_progress
+from scigblast import input_manifest as pipeline_input_manifest
+from scigblast.igblast_cache import REFERENCES, reference
+from scigblast import progress as pipeline_progress
 STATE_ROOT = Path(os.environ.get("SCIGBLAST_STATE_DIR", "/var/lib/scigblast-web")).resolve()
 DB_PATH = STATE_ROOT / "scigblast.sqlite3"
 DEFAULT_OUTPUT_ROOT = Path(

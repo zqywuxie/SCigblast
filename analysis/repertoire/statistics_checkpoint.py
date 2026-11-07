@@ -44,7 +44,7 @@ def signature(request, items, root):
         primer.get('columns',{}).pop('figure_primers',None)
     comparison=request.get('comparison_reference')
     if comparison:
-        from pipeline_igblast_cache import reference
+        from scigblast.igblast_cache import reference
         name,_=reference(comparison['species'])
         for chain in {item['chain'] for item in items}:
             folder=Path(comparison['root'])/'database_251117'/name/chain
@@ -54,8 +54,8 @@ def signature(request, items, root):
     code=hashlib.sha256()
     for name in SCIENTIFIC_FILES:
         code.update(Path(__file__).with_name(name).read_bytes())
-    code.update((Path(__file__).parents[2]/'pipeline_stage_metrics.py').read_bytes())
-    code.update((Path(__file__).parents[2]/'pipeline_igblast_cache.py').read_bytes())
+    code.update((Path(__file__).parents[2]/'scigblast'/'stage_metrics.py').read_bytes())
+    code.update((Path(__file__).parents[2]/'scigblast'/'igblast_cache.py').read_bytes())
     return digest([SCHEMA,VERSION,code.hexdigest(),str(root),items,primer,
                    request.get('comparison_reference'),request.get('allowed_input_roots'),
                    request.get('statistics_source'),raw_scopes,receipts]),receipts

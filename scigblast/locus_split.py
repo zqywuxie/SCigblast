@@ -9,6 +9,10 @@ import os
 from pathlib import Path
 import re
 import uuid
+import sys
+
+if __package__ in {None, ''}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 CHAINS = frozenset(('TRA', 'TRB', 'TRD', 'TRG', 'IGH', 'IGK', 'IGL'))
 FIELDS = ('sample_id', 'pair_id', 'sample_key', 'chain', 'input_rows', 'output_rows',
@@ -31,7 +35,7 @@ def filter_mapping_airr(source, target, chain, *, trace_context=None):
     trace_error = None
     if trace_context:
         try:
-            from pipeline_trace import begin
+            from scigblast.trace import begin
             capture = begin(dict(trace_context, output_path=str(Path(target).resolve())), chain)
         except Exception as error:
             trace_error = str(error)

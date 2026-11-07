@@ -230,7 +230,7 @@ Base/Pig 主流程为五阶段，链筛选已合并进 `05.igblastn_out`。每�
 
 Treemap 和 Clone Top 新任务直接使用 05 摘要指向的已筛选单链结果，并明确按 `locus` 核对；未完成新筛选的旧 05 结果不能冒充最终结果。目录扫描优先新 05 摘要，忽略同数据集残留的旧 06，避免重复计数。旧六阶段任务仍可查看其 06 结果及阶段信息，旧图不自动重算；明确续跑才转为新五阶段。reMapping 仍使用 `03.umi_count`，IR 使用 `08.preprocessing/junction_peps`，10X 使用 `08.cluster`。普通独立来源在聚合前核对 `chain`，无此列时使用 `locus`；字段为空、未知或属于其他链的记录不计入目标链，两个字段都没有的明确单链文件才沿用文件身份。已有绘图运行保留原统计策略，避免续跑时混用新旧结果。
 
-历史 05 结果仍可手工离线拆分，不重新比对：在项目根目录运行 `rtk proxy python pipeline_locus_split.py --summary <任务输出>/05.igblastn_out/<数据集>/chain_summary.csv --manifest <任务输出>/01.match/<数据集>/sample_manifest.csv --output <任务输出>/06.locus_split/<数据集>`。这是兼容旧结果的工具，不是新主流程阶段；`--check` 只核验完成状态，`--force` 强制重新拆分，不修改 Web 任务状态。
+历史 05 结果仍可手工离线拆分，不重新比对：在项目根目录运行 `rtk proxy python -m scigblast.locus_split --summary <任务输出>/05.igblastn_out/<数据集>/chain_summary.csv --manifest <任务输出>/01.match/<数据集>/sample_manifest.csv --output <任务输出>/06.locus_split/<数据集>`。这是兼容旧结果的工具，不是新主流程阶段；`--check` 只核验完成状态，`--force` 强制重新拆分，不修改 Web 任务状态。
 
 新生成的记录另输出一份 `clone_top.csv`，可点击“下载 Clone Top CSV”，全量 ZIP 也包含该表。默认保留所有克隆，按每个样本、每条链的有效记录数降序排列，可用 `rank` 筛选 Top 10/50/100；计数相同按 V、J、CDR3 原始文本排序。CSV 使用 UTF-8 BOM，字段为：
 
@@ -325,7 +325,7 @@ docker compose up -d --no-build
 - 同一浏览器标签页刷新或返回任务后，恢复当前用户的任务页签、样本筛选、列表页码、当前文件、表格查询、每页数量和字段选择。表格从第一页读取最新文件；下载勾选需要重新选择。浏览偏好按用户和任务隔离，任务续跑后重置，浏览器存储不可用时仍可正常浏览。
 - Base/Pig/reMapping 使用原 worker 和 IgBLAST 线程配置，有界提交任务（最多 worker × 2）；Base/Pig 同次执行内共用 FASTA 计数。分析阶段、筛选、输出命名、表结构和最终排序不变。
 - `web/mapping_results.py` 以摘要文件版本、执行 attempt 和选择范围构建限额索引，预览/下载只实时核验目标文件。页面调用 `artifacts?include_mapping_files=false` 和分页 `/mapping-results`，避免传输完整文件清单；旧的全量接口仍兼容已有调用。
-- 新增 `pipeline_parallel.py`、`web/artifact_download.py`、`web/mapping_results.py` 和静态组件均由 Docker 白名单打包；发布方式仍是重建镜像。
+- 共享运行包 `scigblast/`、`web/artifact_download.py`、`web/mapping_results.py` 和静态组件均由 Docker 白名单打包；发布方式仍是重建镜像。
 ## 操作连续性与状态处理优化（2026-10-22）
 
 - Base/Pig 目录、reMapping 与 Treemap 重扫失败保留原样本选择、名称和链；扫描完整成功后才替换结果。失败后需重新扫描成功才能提交，不能误用旧来源。未变化条目保留编辑，来源版本变化的条目重新选择；首次扫描与重新 Match 的默认选择规则不变。

@@ -311,7 +311,7 @@ def main() -> int:
     manifest = os.environ.get('SCIGBLAST_INPUT_MANIFEST', '')
     if manifest:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from pipeline_input_manifest import match_rows
+        from scigblast.input_manifest import match_rows
         rows = match_rows(manifest, 'pig_igblast', RAW)
         OUT.mkdir(parents=True, exist_ok=True)
         destinations = {OUT / 'sample_manifest.csv', OUT / 'match_summary.csv'}

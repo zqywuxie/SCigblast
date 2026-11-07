@@ -95,7 +95,7 @@ if (( ${#_inputs[@]} )); then
   done
   exit "$_batch_status"
 fi
-source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
+source "${BRANCH_ROOT}/../scigblast/resource_lock.sh"
 scigblast_acquire_resource_lock || exit $?
 [[ -n "$RAW_INPUT_DIR" && -d "$RAW_INPUT_DIR" ]] || { echo "[BASE] set RAW_INPUT_DIR or SCIGBLAST_DATA_INPUTS in 00.pipeline_config.env" >&2; exit 2; }
 
@@ -249,7 +249,7 @@ hash_file() {
 CONFIG_SHA256="$(hash_file "$CONFIG_FILE" 2>/dev/null || printf unknown)"
 MAPPING_SHA256="unknown"
 stage_script(){ case "$1" in 02.fastp) printf '%s/02.run_fastp.sh\n' "$SCRIPT_DIR";; 03.clean) printf '%s/03.clean_header.sh\n' "$SCRIPT_DIR";; 04.pandaseq) printf '%s/04.work_pandaseq.sh\n' "$SCRIPT_DIR";; 05.igblast) printf '%s/05.work_igblastn.sh\n' "$SCRIPT_DIR";; 06.preprocessing) printf '%s/06.preprocessing.py\n' "$SCRIPT_DIR";; esac; }
-stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; hash_file "${SCRIPT_DIR}/../../pipeline_input_manifest.py"; printf 'layout=%s\n' "${SCIGBLAST_BASE_LAYOUT:-legacy}"; env | LC_ALL=C sort | grep -E '^SCIGBLAST_(FASTP|CLEAN|PANDASEQ)_' || true; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; fi; if [[ "$1" == 02.fastp && "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then "${PYTHON_BIN}" - "$SUMMARY" <<'PY'
+stage_fingerprint(){ local script; script="$(stage_script "$1")"; { hash_file "$script"; hash_file "${SCRIPT_DIR}/tools/pipeline_config.py"; hash_file "${SCRIPT_DIR}/../../scigblast/input_manifest.py"; printf 'layout=%s\n' "${SCIGBLAST_BASE_LAYOUT:-legacy}"; env | LC_ALL=C sort | grep -E '^SCIGBLAST_(FASTP|CLEAN|PANDASEQ)_' || true; if [[ -n "$DIRECTORY_MANIFEST" ]]; then hash_file "$DIRECTORY_MANIFEST"; fi; if [[ "$1" == 02.fastp && "${SCIGBLAST_BASE_LAYOUT:-}" == sample_pair_v1 ]]; then "${PYTHON_BIN}" - "$SUMMARY" <<'PY'
 import csv, sys
 from pathlib import Path
 for row in csv.DictReader(open(sys.argv[1], encoding='utf-8-sig', newline='')):
@@ -451,7 +451,7 @@ fi
 echo "[BASE 5/6] IgBLAST and selected-chain filtering"
 # Resolve the actual tool/reference dependencies once for both the stage DONE
 # check and its child tasks. Other stages keep their existing fingerprints.
-SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${BRANCH_ROOT}/../pipeline_igblast_cache.py" \
+SCIGBLAST_IGBLAST_DEPENDENCIES="$("${PYTHON_BIN}" "${BRANCH_ROOT}/../scigblast/igblast_cache.py" \
   --mode base --manifest "$SUMMARY" \
   --db-root "${SCIGBLAST_IGBLAST_DB_DIR:-/data/scAnalyis/Scigblast/igblast}" \
   --binary "${SCIGBLAST_IGBLAST_BIN:-igblastn}" \

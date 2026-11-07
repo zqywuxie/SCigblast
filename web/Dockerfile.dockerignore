@@ -41,12 +41,6 @@
 !mapping/pipeline/00.pipeline_config.env
 
 !web/archive_results.py
-!pipeline_resource_lock.sh
-!pipeline_igblast_cache.py
-!pipeline_parallel.py
-!pipeline_progress.py
-!pipeline_locus_split.py
-!pipeline_input_manifest.py
 !web/input_manifest.py
 !web/notifications.py
 !web/postanalysis.py
@@ -57,9 +51,7 @@
 !analysis/repertoire/assets/*.js
 !analysis/repertoire/assets/*.css
 !analysis/repertoire/assets/*.txt
-!pipeline_trace.py
-!pipeline_primer.py
-!pipeline_stage_metrics.py
 !web/repertoire_analysis.py
 
-!pipeline_airr_preprocessing.py
+!scigblast/*.py
+!scigblast/*.sh

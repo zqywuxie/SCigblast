@@ -104,7 +104,7 @@ if (( ${#_inputs[@]} )); then
     done
     exit "$_batch_status"
 fi
-source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
+source "${BRANCH_ROOT}/../scigblast/resource_lock.sh"
 scigblast_acquire_resource_lock || exit $?
 mkdir -p "$OUTPUT_ROOT"
 RAW_INPUT_DIR="${SCIGBLAST_RAW_INPUT_DIR:-/colddata/zqy/XYFY_HZJ1}"

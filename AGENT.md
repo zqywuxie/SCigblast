@@ -6,7 +6,7 @@
 - 修改前检查 `rtk git status --short`，保留已有未提交改动，不批量提交或改写数据、数据库、结果与工作簿。
 - 验证脚本和模拟产物放系统临时目录，完成后清理；按用户要求不在项目新增永久测试目录。保留产品教学数据、`check_runtime.py`、`check_bundle.py` 及真实任务/IgBLAST日志。
 - 保留本文件名 `AGENT.md`。历史变更笔记已归档到 [docs/history](docs/history/)，不应作为当前规则覆盖下文。
-- 项目结构见 [README.md](README.md)，当前与历史方案见 [plans/README.md](plans/README.md)。移动运行脚本会影响导入、Docker 和 runner；本轮仅整理文档与确定的临时文件。
+- 项目结构见 [README.md](README.md)，当前与历史方案见 [plans/README.md](plans/README.md)。共享代码归入 `scigblast/`；移动运行脚本必须同步 Python 导入、直接调用、Docker 白名单与打包检查。
 
 ## 项目入口
 
@@ -21,7 +21,7 @@ SCigblast 使用 Python/Bash 执行免疫组库分析，`web/` 为 FastAPI/Jinja
 - reMapping：`mapping/pipeline/run_mapping_pipeline.sh`，Human CSV → FASTA → IgBLAST → UMI count。
 - `pipeline/`、`IR_split_merged/`、`preprocess/` 当前不是注册 Web 流程。
 
-各流程配置位于 `00.pipeline_config.env` 和对应 `tools/pipeline_config.py`。共享处理实现在根目录 `pipeline_*.py`；工具路径可由 `SCIGBLAST_RUNTIME_BIN_DIR` 覆盖，参考库单独挂载。数据库来源以 [reference/DATABASE_SOURCES.md](reference/DATABASE_SOURCES.md) 和实际配置/索引回读为准，不从旧笔记猜测当前库覆盖。
+各流程配置位于 `00.pipeline_config.env` 和对应 `tools/pipeline_config.py`。共享处理实现在 `scigblast/`，资源锁为 `scigblast/resource_lock.sh`；工具路径可由 `SCIGBLAST_RUNTIME_BIN_DIR` 覆盖，参考库单独挂载。数据库来源以 [reference/DATABASE_SOURCES.md](reference/DATABASE_SOURCES.md) 和实际配置/索引回读为准，不从旧笔记猜测当前库覆盖。
 
 ## 流程、资源与结果契约
 
@@ -32,7 +32,7 @@ SCigblast 使用 Python/Bash 执行免疫组库分析，`web/` 为 FastAPI/Jinja
 - 普通主结果筛选与报告的 Mapping 效率口径不同：报告成功 Mapping 为有效 V 且 locus 匹配，不额外要求 productive；保留结果另计。
 - IgBLAST V/D/J/C 当前各输出最高分命中，上限 1；不做候选基因衍生分析，历史多 call 不强取首项、不改写。
 - 缓存依赖工具、参考库、aux、参数、筛选及输入快照；变更参考材料必须使缓存失效。缺 C 库不补造 c_call，缺真实 V/J 或依赖默认 D 时按预检处理，不能把 1-N 占位当真实覆盖。
-- `pipeline_locus_split.atomic_text()` 使用同目录独占临时文件并原子发布，遵循 umask/默认 ACL；不要用 mkstemp 的 0600 发布正式结果，也不要多线程临时改 umask。
+- `scigblast.locus_split.atomic_text()` 使用同目录独占临时文件并原子发布，遵循 umask/默认 ACL；不要用 mkstemp 的 0600 发布正式结果，也不要多线程临时改 umask。
 - 容器按部署用户非 root UID/GID 运行；`deploy.sh` 自动填充空缺 UID/GID，状态迁移保留 ACL 和其他属主。部署脚本会拉取代码/重建服务，不作为常规检查执行。
 
 ## Web 与生命周期

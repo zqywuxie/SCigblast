@@ -39,7 +39,7 @@ mkdir -p "$OUT"; printf 'sample_id,pair_id,input_r1,input_r2,input_pairs,merged_
 JOB_PAYLOAD="$("${PYTHON_BIN:-python3}" - "$MANIFEST" "${SCRIPT_DIR}/../.." "${RAW_INPUT_DIR:-}" "${SCIGBLAST_INPUT_MANIFEST:-}" <<'PY'
 import csv,sys
 sys.path.insert(0,sys.argv[2])
-from pipeline_input_manifest import pig_output_relative
+from scigblast.input_manifest import pig_output_relative
 seen=set()
 for row in csv.DictReader(open(sys.argv[1],encoding='utf-8')):
  k=(row['sample_id'],row['pair_id'],row.get('r1_path',''))

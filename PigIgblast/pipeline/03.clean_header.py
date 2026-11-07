@@ -8,8 +8,8 @@ PIPELINE_DIR=Path(__file__).resolve().parent
 sys.path.insert(0, str(PIPELINE_DIR))
 from tools.pipeline_config import load_config
 sys.path.insert(0,str(PIPELINE_DIR.parents[1]))
-from pipeline_input_manifest import pig_output_relative
-from pipeline_progress import inherited_resource_fds
+from scigblast.input_manifest import pig_output_relative
+from scigblast.progress import inherited_resource_fds
 
 HERE=PIPELINE_DIR
 CFG=load_config(); OUTPUT_ROOT=Path(CFG.get('SCIGBLAST_OUTPUT_ROOT') or CFG.get('OUTPUT_ROOT') or str(PIPELINE_DIR.parent/'output'))

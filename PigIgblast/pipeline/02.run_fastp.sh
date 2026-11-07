@@ -64,7 +64,7 @@ fi
 JOB_PAYLOAD="$("${PYTHON_BIN:-python3}" - "$MANIFEST" "${SCRIPT_DIR}/../.." "${RAW_INPUT_DIR:-}" "${SCIGBLAST_INPUT_MANIFEST:-}" <<'PY'
 import csv,sys
 sys.path.insert(0,sys.argv[2])
-from pipeline_input_manifest import pig_output_relative
+from scigblast.input_manifest import pig_output_relative
 with open(sys.argv[1], newline='', encoding='utf-8') as f:
     for row in csv.DictReader(f):
         if row.get('status','OK') == 'OK':

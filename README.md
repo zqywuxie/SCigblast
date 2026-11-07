@@ -8,6 +8,7 @@
 - 报告生成：[后续分析说明](analysis/repertoire/README.md)。仅更新 HTML 时，不需要重新跑统计。
 - AI 修改项目：[AGENT.md](AGENT.md)。
 - 设计记录：[计划索引](plans/README.md)。当前计划与历史方案已分开。
+- 目录与清理说明：[项目目录](docs/PROJECT_LAYOUT.md)。
 
 ## 模块分类
 
@@ -21,11 +22,11 @@
 | reMapping | `mapping/` | 官方 CSV → FASTA → IgBLAST → UMI count |
 | 统计报告 | `analysis/repertoire/` | 引物、基因、Isotype、指标、PNG、Excel、HTML |
 | 克隆树图 | `analysis/treemap/` | 单链树图、多链合图及 Clone Top |
-| 共享流程实现 | 根目录 `pipeline_*.py`、`pipeline_resource_lock.sh` | 输入清单、缓存、链筛选、追溯、进度与资源锁 |
-| 参考与运维工具 | `reference/`、`tools/` | 来源记录、数据库维护和前端图表构建 |
+| 共享流程实现 | `scigblast/` | 输入清单、缓存、链筛选、追溯、进度与资源锁 |
+| 参考与运维工具 | `reference/`、`tools/reference/`、`tools/frontend/` | 来源记录、数据库维护和前端图表构建 |
 | 设计与历史 | `plans/`、`docs/history/` | 当前计划、分类归档及原始变更笔记 |
 
-实际流程入口与阶段以 [pipeline_registry.json](web/pipeline_registry.json) 为准。根目录共享脚本被 runner、镜像和 Python 导入引用，保持原路径。
+实际流程入口与阶段以 [pipeline_registry.json](web/pipeline_registry.json) 为准。共享代码统一从 `scigblast` 包导入；命令行工具可在项目根目录通过 `python -m scigblast.<模块>` 运行，详见 [共享运行模块](scigblast/README.md)。
 
 ## 数据与本地产物
 

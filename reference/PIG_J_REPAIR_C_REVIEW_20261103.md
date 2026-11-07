@@ -78,4 +78,4 @@
 - [IMGT 猪 IGHC 官方外显子](https://www.imgt.org/genedb/GENElect?query=7.5+IGHC&species=Sus+scrofa)
 - [IMGT 猪 IGHC 已拼接参考](https://www.imgt.org/genedb/GENElect?query=14.1+IGHC&species=Sus+scrofa)
 
-源响应和下载 URL/SHA256 存于证据目录的 `official_sources.json`；J 新旧参数见 `J_repair_audit.json`。复现脚本为 `tools/repair_pig_j_and_review_c.py`，`--apply-j` 仅安装 J 注释，C 只生成候选；本次 C 安装使用 `tools/install_pig_c_expansion.py`。脚本要求新证据目录，保留备份，先验证再替换正式文件。
+源响应和下载 URL/SHA256 存于证据目录的 `official_sources.json`；J 新旧参数见 `J_repair_audit.json`。复现脚本为 `tools/reference/repair_pig_j_and_review_c.py`，`--apply-j` 仅安装 J 注释，C 只生成候选；本次 C 安装使用 `tools/reference/install_pig_c_expansion.py`。脚本要求新证据目录，保留备份，先验证再替换正式文件。

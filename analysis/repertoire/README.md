@@ -119,4 +119,4 @@ rtk proxy python -m analysis.repertoire.storage_audit /path/to/details.sqlite /p
 
 默认只读页数、空闲页和 schema。`--objects` 会读取 dbstat 页面统计各表/索引空间，适合隔离副本或维护时段。阶段回执新增主进程实际磁盘字节计数，copy 分配有独立计时；不把主进程 I/O 或 CPU 当成整个子进程树。
 
-新模块需同步 Docker 白名单和 `web/check_bundle.py`。额外验证使用系统 Temp，不新增项目测试代码。当前优化计划见 [报告性能计划](../../plans/active/20261103_report_performance.md)；历史说明已移至 [docs/history](../../docs/history/)。
+新模块需同步 Docker 白名单和 `web/check_bundle.py`。额外验证使用系统 Temp，不新增项目测试代码。当前优化计划见 [报告性能计划](../../plans/archive/reports/20261103_report_performance.md)；历史说明已移至 [docs/history](../../docs/history/)。

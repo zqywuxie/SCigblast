@@ -69,7 +69,7 @@ def fingerprint(items,catalog,root):
     code=hashlib.sha256()
     for name in ('aggregate.py','catalog.py','matching.py','io.py','compute_jobs.py','batch.py'):
         code.update(Path(__file__).with_name(name).read_bytes())
-    from pipeline_trace import __file__ as trace_file
+    from scigblast.trace import __file__ as trace_file
     code.update(Path(trace_file).read_bytes())
     return digest([str(root),items,dependencies,assignments,config,bool(catalog),code.hexdigest()])
 

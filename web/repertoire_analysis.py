@@ -163,7 +163,7 @@ class Service:
         if not config or not config.get('columns',{}).get('trim_before_mapping',True):return None
         from analysis.repertoire.catalog import build_catalog
         from analysis.repertoire.io import safe_file,table,write_json,digest
-        from pipeline_primer import frozen_payload
+        from scigblast.primer import frozen_payload
         import hashlib
         manifest=safe_file(Path(row['output_root'])/'01.match'/row['dataset']/'sample_manifest.csv',row['output_root'])
         samples=sorted({record['sample_id'] for record in table(manifest) if record.get('status')=='OK'})

@@ -13,7 +13,12 @@ import json
 import os
 from pathlib import Path
 import shutil
-from pipeline_locus_split import MAPPING_FILTER_VERSION
+import sys
+
+if __package__ in {None, ''}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scigblast.locus_split import MAPPING_FILTER_VERSION
 
 
 FILTER_VERSION = MAPPING_FILTER_VERSION
@@ -79,8 +84,8 @@ def dependency_snapshot(*, mode: str, db_root: Path, binary: str, species: str,
         "primer_mapping": os.environ.get('SCIGBLAST_PRIMER_MAPPING_HASH',''),
         "implementation": hashlib.sha256(implementation.read_bytes()).hexdigest(),
         "helper": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "locus_filter": hashlib.sha256(Path(__file__).with_name('pipeline_locus_split.py').read_bytes()).hexdigest(),
-        "trace": hashlib.sha256(Path(__file__).with_name('pipeline_trace.py').read_bytes()).hexdigest(),
+        "locus_filter": hashlib.sha256(Path(__file__).with_name('locus_split.py').read_bytes()).hexdigest(),
+        "trace": hashlib.sha256(Path(__file__).with_name('trace.py').read_bytes()).hexdigest(),
         "igdata": str(Path(os.environ.get("IGDATA") or db_root).resolve()),
     }
     if inherited:

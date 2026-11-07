@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 
-from pipeline_locus_split import atomic_text
+from scigblast.locus_split import atomic_text
 
 csv.field_size_limit(16 * 1024 * 1024)
 CHAINS = ('TRA', 'TRB', 'TRD', 'TRG', 'IGH', 'IGK', 'IGL')

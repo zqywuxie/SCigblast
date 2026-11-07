@@ -15,6 +15,9 @@ import sys
 import time
 import subprocess
 
+if __package__ in {None, ''}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 CHAINS=frozenset(('IGH','IGK','IGL','TRA','TRB','TRD','TRG'))
 VERSION='base-airr-preprocessing-v2-sample-overlap'
 WARM_KEYS={'SCIGBLAST_BASE_PREPROCESSING_READY_MANIFEST','SCIGBLAST_BASE_PREPROCESSING_WARMUP'}
@@ -83,7 +86,7 @@ def read_sample(tasks,filter_and_count):
 
 
 def signature(root,output):
-    project=Path(__file__).resolve().parent
+    project=Path(__file__).resolve().parents[1]
     entry=project/'IR_split/pipeline/08.preprocessing.py'
     implementation=[Path(__file__),entry,*sorted((entry.parent/'models').glob('*.py'))]
     dependencies={str(p.relative_to(project)):hashlib.sha256(p.read_bytes()).hexdigest() for p in implementation}
@@ -138,7 +141,7 @@ def main():
     if any(not p.is_file() or [p.stat().st_size,p.stat().st_mtime_ns]!=old['outputs'][str(p)] for p in old_junctions):
         os.environ['SCIGBLAST_IR_PREPROCESSING_FORCE_RERUN']='1'
     if not warmup:marker.unlink(missing_ok=True)
-    project=Path(__file__).resolve().parent
+    project=Path(__file__).resolve().parents[1]
     entry=project/'IR_split/pipeline/08.preprocessing.py'
     # Reuse its orchestration and frozen calculation functions. Base inputs are
     # aligned query records, rather than UMI representatives.
@@ -200,8 +203,8 @@ class SamplePreprocessing:
 
     def _run(self,sample,rows):
         try:
-            from pipeline_locus_split import atomic_text
-            from pipeline_progress import inherited_resource_fds
+            from scigblast.locus_split import atomic_text
+            from scigblast.progress import inherited_resource_fds
             folder=self.output/'.preprocessing_state'/'ready';folder.mkdir(parents=True,exist_ok=True)
             manifest=folder/(hashlib.sha256(sample.encode()).hexdigest()[:24]+'.json')
             payload=dict(input_root=str(self.root.resolve()),rows=[dict(sample_id=sample,chain=r['chain'],status='OK',output_path=str(r.get('path') or r['output_path'])) for r in rows])

@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import uuid
-from pipeline_input_manifest import digest, verify
+from scigblast.input_manifest import digest, verify
 
 # Private cached objects never escape: callers receive copies of their page or
 # manifest. Budgets include an allowance for Python object/string overhead.

@@ -107,7 +107,7 @@ def stream(data,assets,*,run_id=''):
     yield '</body></html>'
 
 def write(destination,data,root,*,run_id=''):
-    from pipeline_locus_split import atomic_text
+    from scigblast.locus_split import atomic_text
     data.setdefault('report_display_id',secrets.token_hex(4));assets=prepare(data,root)
     def output(handle):
         for chunk in stream(data,assets,run_id=run_id):handle.write(chunk)

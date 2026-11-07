@@ -9,7 +9,7 @@ import shlex
 import shutil
 import subprocess
 from functools import lru_cache
-from pipeline_igblast_cache import reference
+from scigblast.igblast_cache import reference
 
 FOLDERS = {'mapping': 'mapping', 'ir_split': 'IR_split', '10x_split': '10X_split',
            'igblast_base': 'Igblast_base', 'pig_igblast': 'PigIgblast'}

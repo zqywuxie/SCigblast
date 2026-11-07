@@ -15,8 +15,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from pipeline_parallel import bounded_completed
-from pipeline_progress import Progress, run_igblast, verified_estimate
+from scigblast.parallel import bounded_completed
+from scigblast.progress import Progress, run_igblast, verified_estimate
 
 if __package__:
     from ..fasta import convert, select_files

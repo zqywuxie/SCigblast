@@ -219,7 +219,7 @@ PY
     exit "$_batch_status"
 fi
 # Acquire only in the single-dataset worker; batch parents spawn children.
-source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
+source "${BRANCH_ROOT}/../scigblast/resource_lock.sh"
 scigblast_acquire_resource_lock || exit $?
 # Only match and fastp consume raw FASTQ.  All later stages consume the
 # explicit output directory from the preceding stage.  Edit this hardcoded

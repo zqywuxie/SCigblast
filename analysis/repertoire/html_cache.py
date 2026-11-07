@@ -24,7 +24,7 @@ def viewer_signature():
 
 def stream(data, manifest, resolve, cache_root, *, run_id='', budget_mb=128, assets=None):
     """The caller holds a source read lease through completion/disconnection."""
-    from pipeline_locus_split import atomic_text
+    from scigblast.locus_split import atomic_text
     from . import TABLE_PATHS
     names={f['png'] for f in data.get('figures',[])}
     names.update(TABLE_PATHS[key] for key in chart_data.TABLES if key in TABLE_PATHS and TABLE_PATHS[key] in manifest['files'])

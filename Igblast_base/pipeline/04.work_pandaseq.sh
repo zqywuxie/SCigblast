@@ -31,7 +31,7 @@ mapfile -t JOBS < <("$PYTHON_BIN" - "$MANIFEST" "$RAW_INPUT_DIR" "${SCRIPT_DIR}/
 import csv,re,sys,os
 from pathlib import Path, PurePosixPath
 sys.path.insert(0, sys.argv[3])
-from pipeline_input_manifest import unified_stage_relative
+from scigblast.input_manifest import unified_stage_relative
 manifest,raw=Path(sys.argv[1]),Path(sys.argv[2]).resolve() if sys.argv[2] else None; seen=set()
 def safe(v): return re.sub(r'[^A-Za-z0-9._-]+','_',str(v)).strip('_') or 'unnamed'
 def stage_path(rel, pair_id, sample):

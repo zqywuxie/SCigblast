@@ -83,7 +83,7 @@ def mapping_observations(item, root,archive_root=None):
         finally:
             conn.close()
     elif item.get('merged') and archive_root is not None:
-        from pipeline_trace import capture_queries
+        from scigblast.trace import capture_queries
         from Bio import bgzf
         folder=Path(archive_root)/digest(item['merged'])[:24]
         query_meta=capture_queries(folder,item['merged']['path'])

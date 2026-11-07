@@ -4,8 +4,7 @@
 
 ## 当前工作
 
-- [报告计算与生成性能优化](active/20261103_report_performance.md)
-- [多链样本、基因 CSV 与科研报告优化](active/4e9d2c31-6d5f-4d45-85b3-99f8c03e7a21_plan.md)
+当前没有单独维护的待执行计划。已完成的实现与验证记录归入下方历史设计；新任务需要方案时再添加到 `active/`。
 
 ## 历史设计
 
@@ -46,6 +45,9 @@
 - [Web 操作流程优化方案](archive/web/web_workflow_optimization_plan.md)
 
 ### 后分析与报告
+
+- [报告计算与生成性能优化](archive/reports/20261103_report_performance.md)
+- [多链样本、基因 CSV 与科研报告优化](archive/reports/20261103_multichain_report_and_gene_export.md)
 
 - [Pipeline 数据变化汇总与引物—基因追溯实施方案](archive/reports/20261031_pipeline_trace_primer_7d2e59c4_plan.md)
 - [后续分析与汇报图完善方案](archive/reports/20261101_8cb19d64_report_workspace_plan.md)

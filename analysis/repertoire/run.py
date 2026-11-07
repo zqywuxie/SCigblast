@@ -15,7 +15,7 @@ from .catalog import build_catalog
 from .io import digest, version, write_json, write_table
 from .render import render
 from .sources import discover, verify
-from pipeline_stage_metrics import collect, summarize_volume
+from scigblast.stage_metrics import collect, summarize_volume
 from .usage import build as build_usage, connect as usage_connection
 from .performance import Performance
 

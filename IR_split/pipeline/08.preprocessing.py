@@ -349,7 +349,7 @@ def source_fingerprint(path: Path) -> dict[str, str | int]:
 
 def discover_inputs(roots: list[Path]) -> list[dict[str, str]]:
     if INPUT_LAYOUT=='chains':
-        from pipeline_airr_preprocessing import discover
+        from scigblast.airr_preprocessing import discover
         return discover(roots)
     tasks: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -518,7 +518,7 @@ def read_one(task: dict[str, str], umi_index: RepresentativeIndex | None, umi_mo
 
 def read_sample(sample_tasks: list[dict[str, str]], umi_index: RepresentativeIndex | None, umi_mode: str) -> tuple[dict[str, tuple[dict[str, str], pd.DataFrame]], list[str], list[dict[str, int | str]]]:
     if INPUT_LAYOUT=='chains':
-        from pipeline_airr_preprocessing import read_sample as read_chains
+        from scigblast.airr_preprocessing import read_sample as read_chains
         return read_chains(sample_tasks,filter_and_count)
     # Keep Future results and the final loop frame out of main(): once items
     # is released, no reader references should retain this sample's tables.

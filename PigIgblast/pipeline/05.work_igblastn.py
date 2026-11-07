@@ -9,12 +9,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from tools.pipeline_config import load_config
 sys.path.insert(0, str(HERE.parents[1]))
-from pipeline_input_manifest import pig_output_relative
-from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
-from pipeline_parallel import FastaCountCache, bounded_completed
-from pipeline_progress import Progress, run_igblast, verified_estimate
-from pipeline_locus_split import atomic_text, filter_mapping_airr
-from pipeline_primer import prepare as prepare_primers
+from scigblast.input_manifest import pig_output_relative
+from scigblast.igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint
+from scigblast.parallel import FastaCountCache, bounded_completed
+from scigblast.progress import Progress, run_igblast, verified_estimate
+from scigblast.locus_split import atomic_text, filter_mapping_airr
+from scigblast.primer import prepare as prepare_primers
 
 def safe(value): return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
 

@@ -5,7 +5,7 @@ BRANCH_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 if [[ -z "${SCIGBLAST_RESOURCE_LOCK_FILE:-}" && -f "${SCRIPT_DIR}/00.pipeline_config.env" ]]; then
   SCIGBLAST_RESOURCE_LOCK_FILE="$(bash -c '. "$1"; printf "%s" "${SCIGBLAST_RESOURCE_LOCK_FILE:-}"' _ "${SCRIPT_DIR}/00.pipeline_config.env")"
 fi
-source "${BRANCH_ROOT}/../pipeline_resource_lock.sh"
+source "${BRANCH_ROOT}/../scigblast/resource_lock.sh"
 scigblast_acquire_resource_lock || exit $?
 # The CSV/IgBLAST phases have independent budgets; until their separate
 # reservations are measured, reserve the gate exclusively for the invocation.

@@ -33,13 +33,13 @@ from pathlib import Path
 
 PIPELINE = Path(os.environ["SCIGBLAST_BASE_PIPELINE_DIR"])
 sys.path.insert(0, str(PIPELINE.parents[1]))
-from pipeline_igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint, reference
-from pipeline_input_manifest import unified_stage_relative
-from pipeline_parallel import FastaCountCache, bounded_completed
-from pipeline_progress import Progress, run_igblast, verified_estimate
-from pipeline_locus_split import filter_mapping_airr
-from pipeline_primer import prepare as prepare_primers
-from pipeline_airr_preprocessing import SamplePreprocessing
+from scigblast.igblast_cache import dependency_snapshot, resolve_binary, task_fingerprint, reference
+from scigblast.input_manifest import unified_stage_relative
+from scigblast.parallel import FastaCountCache, bounded_completed
+from scigblast.progress import Progress, run_igblast, verified_estimate
+from scigblast.locus_split import filter_mapping_airr
+from scigblast.primer import prepare as prepare_primers
+from scigblast.airr_preprocessing import SamplePreprocessing
 ROOT = Path(os.environ["OUTPUT_ROOT"])
 RAW_ROOT = Path(os.environ["RAW_INPUT_DIR"]).resolve() if os.environ.get("RAW_INPUT_DIR") else None
 DATASET_LABEL = os.environ.get("SCIGBLAST_DATASET_LABEL", "").strip()
