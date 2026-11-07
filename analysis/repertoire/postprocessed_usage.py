@@ -13,6 +13,7 @@ from .io import digest, open_text, safe_file, table, version, selected_reader, s
 from .isotype import AA, classify
 from .output_metrics import count, published
 from .batch import lookup_rows
+from .performance import detail
 
 LINEAGE_FIELDS=('sequence_id','sequence','locus','v_call','j_call','c_call','cdr3_aa')
 
@@ -176,22 +177,25 @@ def build(connection, items, root, progress=None,*,lineage_samples=None):
         # Exact accounting only: never spread a collapsed copy count by guessed
         # percentages, and never copy the entire weight into every primer.
         connection.execute('DROP TABLE IF EXISTS temp.composition_allocations')
-        connection.execute('''CREATE TEMP TABLE composition_allocations AS
-            SELECT r.id,l.primer,l.n FROM composition_records r JOIN composition_lineage l
-              ON l.identity_key=r.identity_key
-            WHERE r.group_id=? AND r.sample_record=1 AND l.primer<>''
-              AND r.weight=(SELECT sum(z.n) FROM composition_lineage z WHERE z.identity_key=r.identity_key)
-              AND 1=(SELECT count(*) FROM composition_records z WHERE z.group_id=r.group_id
-                     AND z.identity_key=r.identity_key AND z.sample_record=1)''', (gid,))
-        allocated = 0
-        for record_id, primer, weight in connection.execute('SELECT * FROM composition_allocations'):
-            cursor = connection.execute('''INSERT INTO composition_records
-                SELECT NULL,group_id,source_item,sequence_id,?,0,?,eligible,cdr3_aa,junction_aa,
-                  aa_field,aa_value,aa_valid,isotype_main,isotype_subclass,isotype_state,identity_key
-                FROM composition_records WHERE id=?''', (primer, weight, record_id))
-            connection.execute('INSERT INTO composition_calls SELECT ?,segment,gene,assignment FROM composition_calls WHERE record_id=?',
-                               (cursor.lastrowid, record_id))
-            allocated += weight
+        with detail('copy_allocation_sql',group_id=gid):
+            offset=connection.execute('SELECT coalesce(max(id),0) FROM composition_records').fetchone()[0]
+            connection.execute('''CREATE TEMP TABLE composition_allocations AS
+                WITH totals AS (SELECT identity_key,sum(n) AS n FROM composition_lineage GROUP BY identity_key)
+                SELECT r.id,l.primer,l.n,?+row_number() OVER(ORDER BY r.id,l.primer) AS allocated_id
+                FROM composition_records r JOIN composition_lineage l ON l.identity_key=r.identity_key
+                  JOIN totals t ON t.identity_key=r.identity_key
+                WHERE r.group_id=? AND r.sample_record=1 AND l.primer<>'' AND r.weight=t.n
+                  AND 1=(SELECT count(*) FROM composition_records z WHERE z.group_id=r.group_id
+                         AND z.identity_key=r.identity_key AND z.sample_record=1)''', (offset,gid))
+            connection.execute('''INSERT INTO composition_records
+                SELECT a.allocated_id,r.group_id,r.source_item,r.sequence_id,a.primer,0,a.n,
+                  r.eligible,r.cdr3_aa,r.junction_aa,r.aa_field,r.aa_value,r.aa_valid,
+                  r.isotype_main,r.isotype_subclass,r.isotype_state,r.identity_key
+                FROM composition_allocations a JOIN composition_records r ON r.id=a.id ORDER BY a.allocated_id''')
+            connection.execute('''INSERT INTO composition_calls
+                SELECT a.allocated_id,c.segment,c.gene,c.assignment FROM composition_allocations a
+                  JOIN composition_calls c ON c.record_id=a.id''')
+            allocated=connection.execute('SELECT coalesce(sum(n),0) FROM composition_allocations').fetchone()[0]
         connection.execute('UPDATE composition_sources SET records=?,copies=?,primer_copies=?,unresolved_copies=? WHERE group_id=?',
                            (records, copies, allocated, copies-allocated, gid))
         connection.commit()

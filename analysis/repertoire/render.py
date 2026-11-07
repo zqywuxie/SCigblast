@@ -115,7 +115,8 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None,ca
 
     with plt.rc_context(theme):
         from .output_metrics import render as render_outputs
-        render_outputs(data.get('sample_output_summary',[]),pyplot=plt,save=save)
+        from .presentation import shared_inputs
+        render_outputs(data.get('sample_output_summary',[]),pyplot=plt,save=save,inputs=shared_inputs(data))
         from pipeline_stage_metrics import summarize_volume
         volumes = data.get('stage_volumes') or summarize_volume(data['stages'], data.get('samples', []))
         from .render_stages import render_overview

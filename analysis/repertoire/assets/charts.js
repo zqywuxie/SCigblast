@@ -96,8 +96,17 @@ window.ReportCharts=(()=>{
   function outputs(f){
     const rows=scope(table('sample_output_summary'),f),metrics=[['total_reads','Total Reads','#567FB5','reads'],['total_receptor_rna','Total Receptor RNA','#419A8B','copy'],['total_unique_cdr3s','Total Unique CDR3s','#CE8351','distinct_cdr3']].filter(([key])=>!f.outputMetric||f.outputMetric===key);
     const order=new Map(data.samples.map((r,i)=>[r.sample+' / '+r.chain,i]));rows.sort((a,b)=>(order.get(a.sample+' / '+a.chain)??999)-(order.get(b.sample+' / '+b.chain)??999)||natural(a.sample,b.sample)||natural(a.chain,b.chain));
+    const names=unique(rows.map(r=>r.sample)),multi=!f.chain&&names.some(name=>rows.filter(r=>r.sample===name).length>1);
+    if(multi){
+      const batchNames=names.slice((f.page-1)*12,f.page*12),batch=rows.filter(r=>batchNames.includes(r.sample)),chains=unique(batch.map(r=>r.chain));
+      const colors=['#315D8B','#419A8B','#CE8351','#8675A9','#A09552','#598CA7','#9B667D'];
+      return metrics.map(([key,title,color,unit])=>{
+        const series=key==='total_reads'?[{name:title,color,data:batchNames.map(sample=>({...point((data.sample_inputs||[]).find(r=>r.sample===sample)?.total_reads,{unit}),sample,chain:'',countScope:'sample_shared'}))}]:chains.map((chain,i)=>({name:chain,color:colors[i%colors.length],data:batchNames.map(sample=>({...point(batch.find(r=>r.sample===sample&&r.chain===chain)?.[key],{unit}),sample,chain,countScope:'sample_chain'}))}));
+        return {...bars(batchNames,series,title),outputComparison:true};
+      });
+    }
     const batch=f.chain?rows:rows.slice((f.page-1)*12,f.page*12);
-    return batch.length?[{...bars(batch.map(r=>r.sample+(f.chain?'':'\n'+r.chain)),metrics.map(([key,name,color,unit])=>({name,color,data:batch.map(r=>point(r[key],{unit}))})),(f.outputMetric?metrics[0][1]:'Sample output comparison')+' · '+(f.chain|| (f.samples?'Selected samples':'All samples'))),outputComparison:true}]:[];
+    return batch.length?[{...bars(batch.map(r=>r.sample+(f.chain?'':'\n'+r.chain)),metrics.map(([key,name,color,unit])=>({name,color,data:batch.map(r=>({...point(r[key],{unit}),sample:r.sample,chain:r.chain,countScope:key==='total_reads'?'sample_shared':'sample_chain'}))})),(f.outputMetric?metrics[0][1]:'Sample output comparison')+' · '+(f.chain|| (f.samples?'Selected samples':'All samples'))),outputComparison:true}]:[];
   }
   function stages(f){
     const all=table('stage_volume_summary'),rows=scope(all,f),samples=unique(rows.map(r=>r.sample)).sort(natural).slice((f.page-1)*12,f.page*12);
@@ -122,7 +131,7 @@ window.ReportCharts=(()=>{
     if(f.kind==='isotype_distribution'){
       let fixedHeight;
       if(f.overviewFocus){const counts=new Map();for(const row of table('isotype_distribution')){if(!f.focusOptions.includes(row.sample)||f.chain&&row.chain!==f.chain)continue;if(!counts.has(row.sample))counts.set(row.sample,new Set());counts.get(row.sample).add(row.isotype);}fixedHeight=Math.max(310,...[...counts.values()].map(names=>names.size*40+130));}
-      return ['expression','unique_cdr3'].map(metric=>{const rows=scope(table('isotype_distribution'),f).filter(r=>r.metric===metric);return {...bars(rows.map(r=>r.isotype),[{name:metricName(metric),color:'#DD8452',data:rows.map(r=>({...point(r.percent,{...r,unit:compositionUnit(metric),denominatorMeaning:metric==='expression'?'Copy count with classifiable C annotation':'Sum of distinct CDR3 counts within classifiable Isotypes'}),itemStyle:{color:['IgM','IgD'].includes(r.isotype)?'#4C72B0':'#DD8452'}}))}],metricName(metric),{horizontal:true,percent:true}),fixedHeight};}).filter(s=>s.labels.length);
+      return ['expression','unique_cdr3'].map(metric=>{const rows=scope(table('isotype_distribution'),f).filter(r=>r.metric===metric);return {...bars(rows.map(r=>r.isotype),[{name:metricName(metric),color:'#DD8452',data:rows.map(r=>({...point(r.percent,{...r,unit:compositionUnit(metric),denominatorMeaning:metric==='expression'?'Copy count with classifiable C annotation':'Sum of distinct CDR3 counts within classifiable Isotypes'}),itemStyle:{color:data.colors.isotype[r.isotype.slice(0,3)]||'#8193A5'}}))}],metricName(metric),{horizontal:true,percent:true}),fixedHeight};}).filter(s=>s.labels.length);
     }
     if(f.kind.startsWith('diversity')){
       let rows=scope(table('diversity_summary'),f);
@@ -190,7 +199,7 @@ window.ReportCharts=(()=>{
     if(spec.outputComparison){host.classList.add('chart-scroll');node.style.minWidth=Math.max(280,spec.labels.length*100+100)+'px';}
     if(spec.primerComposition){host.classList.add('chart-scroll');node.style.minWidth=Math.max(280,spec.labels.length*82+100)+'px';}
     const legend=document.createElement('div');legend.className='chart-legend';legend.setAttribute('aria-label','选择显示的类别');
-    if(spec.type==='bars'&&spec.series.length>1){for(const series of spec.series){const button=document.createElement('button'),color=document.createElement('i'),label=document.createTextNode(series.name);color.style.background=series.color;button.append(color,label);button.dataset.series=series.name;button.type='button';button.setAttribute('aria-pressed',String((selected.get(key)||{})[series.name]!==false));button.onclick=()=>chart.dispatchAction({type:'legendToggleSelect',name:series.name});legend.append(button);}host.append(legend);}
+    if(spec.type==='bars'&&(spec.series.length>1||spec.outputComparison)){for(const series of spec.series){const button=document.createElement('button'),color=document.createElement('i'),label=document.createTextNode(series.name);color.style.background=series.color;button.append(color,label);button.dataset.series=series.name;button.type='button';button.setAttribute('aria-pressed',String((selected.get(key)||{})[series.name]!==false));button.onclick=()=>chart.dispatchAction({type:'legendToggleSelect',name:series.name});legend.append(button);}host.append(legend);}
     if(spec.matching&&spec.suspected.some(Boolean)){const note=document.createElement('span');note.className='suspected-key';note.textContent='* Suspected group';legend.append(note);}
     const hint=document.createElement('div');hint.className='overflow-hint';hint.hidden=true;host.append(hint,node);
     const scroll=()=>{const overflow=host.scrollWidth>host.clientWidth+2;hint.hidden=!overflow;hint.textContent=host.scrollLeft<2?'向右滑动查看 →':host.scrollLeft+host.clientWidth>=host.scrollWidth-2?'← 向左滑动查看':'← 左右滑动查看 →';};host.addEventListener('scroll',scroll,{passive:true});
@@ -212,9 +221,16 @@ window.ReportCharts=(()=>{
     const samples=f.sample?[f.sample]:f.samples;
     const group=data.groups.find(g=>g.group_id===f.group_id),duplicate=group&&data.groups.filter(g=>g.sample===group.sample&&g.chain===group.chain).length>1;
     return [data.task_name||'SCIGBLAST',Array.isArray(samples)?'Sample'+(samples.length===1?'':'s')+': '+(samples.length?samples.join(', '):'None'):'All applicable samples',
-      [f.chain&&'Chain: '+f.chain,f.primer&&'Primer: '+f.primer,f.primer_group&&'Suspected group: '+f.primer_group,f.stage&&'Stage: '+(f.stage==='raw_R1'?'Raw':f.stage),duplicate&&'Result: '+f.group_id.slice(0,8), 'Page: '+(f.page||1)].filter(Boolean).join(' | '),f.alignment&&'Aligned with: '+(f.samples||[]).filter(s=>s!==f.sample).join(', ')].filter(Boolean);
+      [f.chain&&'Chain: '+f.chain,f.primer&&'Primer: '+f.primer,f.primer_group&&'Suspected group: '+f.primer_group,f.stage&&'Stage: '+(f.stage==='raw_R1'?'Raw':f.stage),duplicate&&'Result: '+f.group_id.slice(0,8), 'Page: '+(f.page||1)].filter(Boolean).join(' | '),f.alignment&&'Aligned with: '+(f.samples||[]).filter(s=>s!==f.sample).join(', '),...(f.coverage||[])].filter(Boolean);
   }
   function download(blob,filename){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  function exportRows(records,filename,columns){
+    if(!records.length)return false;
+    columns=columns||unique(records.flatMap(Object.keys));
+    const cell=value=>'"'+(typeof value==='string'?value.replace(/^[\s\uFEFF]*[=+@-]/u,match=>"'"+match):String(value??'')).replace(/"/g,'""')+'"';
+    const csv='\uFEFF'+[columns.map(cell).join(','),...records.map(row=>columns.map(key=>cell(row[key])).join(','))].join('\r\n');
+    download(new Blob([csv],{type:'text/csv;charset=utf-8'}),filename);return true;
+  }
   async function exportPNG(charts,figure){
     if(!charts.length)return false;
     const canvases=charts.map(chart=>{const current=[...live.values()].find(item=>item.chart===chart),original=chart.getOption(),legend=original.legend?.[0]?.selected;
@@ -223,7 +239,7 @@ window.ReportCharts=(()=>{
         const image=new Image();image.src=chart.getDataURL({type:'png',pixelRatio:2,backgroundColor:'#FFFFFF'});return image;
       }finally{if(current){const restore=preserve(themed(current.spec));if(restore.legend)restore.legend.selected=legend;chart.setOption(restore,{notMerge:true});}}});
     await Promise.all(canvases.map(img=>img.decode()));
-    const canvas=document.createElement('canvas'),paired=canvases.length===2;canvas.width=Math.max(640,paired?canvases.reduce((n,i)=>n+i.width,0):Math.max(...canvases.map(i=>i.width)));
+    const canvas=document.createElement('canvas'),paired=canvases.length===2||figure.kind==='sample_outputs'&&canvases.length===3;canvas.width=Math.max(640,paired?canvases.reduce((n,i)=>n+i.width,0):Math.max(...canvases.map(i=>i.width)));
     const context=canvas.getContext('2d'),font=24,lineHeight=34,padding=32,lines=[];context.font=font+'px Segoe UI, sans-serif';
     for(const text of contextLines(figure)){let line='';for(const char of text){if(context.measureText(line+char).width>canvas.width-padding*2&&line){lines.push(line);line='';}line+=char;}if(line)lines.push(line);}
     const header=padding*2+lines.length*lineHeight;canvas.height=header+(paired?Math.max(...canvases.map(i=>i.height)):canvases.reduce((n,i)=>n+i.height,0));
@@ -236,18 +252,17 @@ window.ReportCharts=(()=>{
     const records=[],selectedSamples=figure.sample||figure.samples?.join('; ')||'All applicable samples';
     for(const chart of charts){const item=[...live.values()].find(item=>item.chart===chart);if(!item)continue;const spec=item.spec,options=chart.getOption(),legend=options.legend?.[0]?.selected||{};
       const zoom=options.dataZoom?.[0],indexes=labels=>labels.map((_,i)=>i).filter(i=>!zoom||(i>=(zoom.startValue??Math.floor((zoom.start||0)*(labels.length-1)/100))&&i<=(zoom.endValue??Math.ceil((zoom.end??100)*(labels.length-1)/100))));
-      const add=(panel,label,series,p,extra={})=>records.push({task:data.task_name||'',sample:p.sample||((spec.outputComparison||figure.kind==='isotype')?String(label).split('\n')[0]:selectedSamples),chain:figure.chain||'',primer:figure.primer||'',primer_group:p.primerGroup||figure.primer_group||'',analysis:figure.scenario_id||p.suspected?'Suspected':'Original',segment:figure.segment||'',stage:figure.stage||'',chart:panel.title,label,series,value:p.value,unit:panel.percent?'percent':units[p.unit]||p.unit||'',count:p.count,denominator:p.denominator,count_unit:units[p.unit]||p.unit||'',denominator_definition:p.denominatorMeaning||'',...extra});
+      const add=(panel,label,series,p,extra={})=>records.push({task:data.task_name||'',report_id:data.report_id||'',sample:p.sample||((spec.outputComparison||figure.kind==='isotype')?String(label).split('\n')[0]:selectedSamples),chain:p.chain??figure.chain??'',count_scope:p.countScope||'',primer:figure.primer||'',primer_group:p.primerGroup||figure.primer_group||'',analysis:figure.scenario_id||p.suspected?'Suspected':'Original',segment:figure.segment||'',stage:figure.stage||'',chart:panel.title,label,series,value:p.value,unit:panel.percent?'percent':units[p.unit]||p.unit||'',count:p.count,denominator:p.denominator,count_unit:units[p.unit]||p.unit||'',denominator_definition:p.denominatorMeaning||'',...extra});
       for(const panel of spec.type==='dashboard'?spec.panels:spec.type==='bars'?[spec]:[]){for(const series of panel.series){if(legend[series.name]===false)continue;for(const i of indexes(panel.labels))add(panel,panel.labels[i],series.name,series.data[i]);}}
       if(spec.type==='matrix')for(const p of spec.points){const [x,y,value]=p.value,range=options.visualMap?.[0]?.range;if(range&&(value<range[0]||value>range[1]))continue;add(spec,spec.labels[x],spec.rows[y],{...p,value:p.count,unit:spec.unit||'reads'},{sample:figure.kind==='stage_overview'?spec.rows[y]:spec.labels[x],change:p.change||'',value:p.count});}
     }
     if(!records.length)return false;
-    const columns=unique(records.flatMap(Object.keys)),cell=value=>'"'+(typeof value==='string'?value.replace(/^[\s\uFEFF]*[=+@-]/u,match=>"'"+match):String(value??'')).replace(/"/g,'""')+'"';
-    const csv='\uFEFF'+[columns.map(cell).join(','),...records.map(row=>columns.map(key=>cell(row[key])).join(','))].join('\r\n');download(new Blob([csv],{type:'text/csv;charset=utf-8'}),exportName(figure,'csv'));return true;
+    return exportRows(records,exportName(figure,'csv'));
   }
   function resetSelections(module){
     const matches=key=>module===undefined||JSON.parse(key)[0]===module;
     for(const key of selected.keys())if(matches(key))selected.delete(key);for(const key of views.keys())if(matches(key))views.delete(key);
     for(const item of live.values())if(matches(item.key)){item.chart.setOption(themed(item.spec),{notMerge:true});for(const button of item.legend.querySelectorAll('button'))button.setAttribute('aria-pressed','true');}
   }
-  return {table,specs,mount,dispose,exportPNG,exportCSV,alignGenes,exportName,activeCount:()=>live.size,resetSelections};
+  return {table,specs,mount,dispose,exportPNG,exportCSV,exportRows,download,alignGenes,exportName,activeCount:()=>live.size,resetSelections};
 })();

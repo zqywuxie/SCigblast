@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import csv
 
-VERSION = 'public-report-charts-v2-context-units'
+VERSION = 'public-report-charts-v3-multichain-coverage'
 # Explicit allowlist: no paths, sequence IDs, primer sequences or private settings.
 FIELDS = frozenset('group_id reference_catalog sample chain primer stage category match_class segment gene isotype level metric aa_field count unique_count ambiguous_count denominator percent matched_reads total_reads match_percent mapped_reads mapping_percent retained_reads unverified_reads label unit previous_count reduction retention_percent status assigned_group tested_group original_unique_percent unique_percent multiple_percent unmatched_percent threshold_percent value mean_shm_percent shared_cdr3_percent total_receptor_rna total_unique_cdr3s'.split())
 TABLES = {
@@ -17,6 +17,9 @@ TABLES = {
 NUMERIC = frozenset('reference_catalog count unique_count ambiguous_count denominator percent matched_reads total_reads match_percent mapped_reads mapping_percent retained_reads unverified_reads previous_count reduction retention_percent original_unique_percent unique_percent multiple_percent unmatched_percent threshold_percent value mean_shm_percent shared_cdr3_percent total_receptor_rna total_unique_cdr3s'.split())
 FIELDS=FIELDS|{'multiple_count','unmatched_count'}
 FIELDS=FIELDS|{'scenario_id','base_group_id','primer_group'}
+FIELDS=FIELDS|{'total_records','annotated_records','total_count','classified_count','coverage_percent','reference_id'}
+NUMERIC=NUMERIC|{'total_records','annotated_records','total_count','classified_count','coverage_percent'}
+TABLES=TABLES|{'annotation_coverage'}
 TABLES=TABLES|{'scenario_matching_summary','scenario_primer_mapping_summary','scenario_primer_gene_usage','scenario_primer_reference_gene_observation'}
 NUMERIC=NUMERIC|{'multiple_count','unmatched_count'}
 
@@ -81,7 +84,8 @@ def rows(source):
 def public_metadata(data):
     from .palette import MATCH_COLORS,ISOTYPE_COLORS,GENE_SEGMENT_COLORS,STAGE_COLORS
     groups=data.get('usage',{}).get('groups',[])
-    return dict(schema=VERSION,statistics_version=data.get('version',''),
+    from .presentation import shared_inputs
+    return dict(schema=VERSION,statistics_version=data.get('version',''),sample_inputs=shared_inputs(data),
         figure_version=data.get('figure_version',''),
         groups=[dict({k:g.get(k) for k in ('group_id','sample','chain','primers','aa_fields','reference_scope')},
                      reference_id=g.get('reference_id',''),

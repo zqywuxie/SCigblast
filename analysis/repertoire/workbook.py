@@ -43,13 +43,14 @@ HEADERS={'sample':'样本','sample_id':'样本','chain':'链','primer':'引物�
 ORDER=['sample_summary','sample_output_summary','stage_volume_summary','diversity_summary','bcell_metrics','isotype_distribution','dual_matching_summary','primer_mapping_summary','matching_total_summary','primer_group_comparisons','primer_counts','isotype_summary','candidate_gene_summary',
        'sample_gene_usage','unobserved_reference_genes','primer_gene_usage','primer_unobserved_reference_genes',
        'preprocessing_metrics']
-VERSION='experiment-check-workbook-v25-suspected-groups'
+VERSION='experiment-check-workbook-v26-shared-inputs'
 
 FIELDS={
+  'sample_input_summary':[('sample','样本'),('total_reads','Total Reads')],
  'isotype_distribution':[('sample','样本'),('gene','C gene'),('isotype','Isotype'),('metric','Metric'),('count','Count'),('percent','Percentage (%)')],
  'diversity_summary':[('sample','样本'),('chain','链'),('metric','指标'),('value','数值'),('unit','单位')],
  'bcell_metrics':[('sample','样本'),('isotype','Isotype'),('mean_shm_percent','Mean SHM (%)'),('shared_cdr3_percent','CDR3s observed as other isotype (%)'),('unique_cdr3','Unique CDR3s'),('shared_cdr3','Shared CDR3s')],
- 'sample_output_summary':[('sample','样本'),('chain','链'),('total_reads','Total Reads'),('total_receptor_rna','Total Receptor RNA'),('total_unique_cdr3s','Total Unique CDR3s')],
+ 'sample_output_summary':[('sample','样本'),('chain','链'),('total_receptor_rna','Total Receptor RNA'),('total_unique_cdr3s','Total Unique CDR3s')],
  'primer_mapping_summary':[('sample','样本'),('chain','链'),('stage','数据阶段'),('primer','引物全名'),('matched_reads','Primer-matched reads'),('match_percent','Primer match (%)'),('mapped_reads','Mapped reads'),('mapping_percent','Mapping rate (%)'),('retained_reads','Retained reads'),('unverified_reads','未确认关联reads')],
  'candidate_gene_summary':[('sample','样本'),('chain','链'),('primer','引物全名'),('segment','基因区'),('call','候选基因（原始注释）'),('count','Reads'),('candidate_count','候选数'),('status','状态')],
  'primer_group_comparisons':[('sample','样本'),('stage','数据阶段'),('assigned_group','原引物组'),('original_unique_percent','原组唯一匹配率（%）'),('tested_group','测试引物组'),('unique_percent','测试组唯一匹配率（%）'),('multiple_percent','测试组多重匹配率（%）'),('unmatched_percent','测试组未匹配率（%）'),('threshold_percent','阈值（%）'),('denominator','统计数量'),('unit','计数单位'),('status','状态')],
@@ -93,7 +94,7 @@ def simple_rows(name,records,*,batches=None):
                 from .gene_cdr3 import label
                 result['Metric']=label(row.get('metric','expression'),row.get('aa_field',''))
             if '状态' in result:result['状态']='已匹配' if row.get('unique_count',0)>0 else '未匹配' if row.get('status')=='zero_observed' else '未评估'
-        if name=='sample_output_summary':
+        if name in {'sample_output_summary','sample_input_summary'}:
             for key,label in fields:
                 if key.startswith('total_') and result[label] is None:result[label]='N/A'
         if name=='primer_counts':result['数据范围']={'all':'统计输入','retained':'筛选后保留'}.get(row.get('subset'),row.get('subset'))
@@ -174,6 +175,7 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
     from openpyxl.worksheet.datavalidation import DataValidation
     from openpyxl.utils import get_column_letter
     from .workbook_overview import build_overview
+    LABELS['sample_input_summary']=('样本输入量','Total Reads = Merged；共享输入每个样本只列一次，不按链累加')
     book=openpyxl.Workbook(write_only=True)
     overview=build_overview(book,exports,catalog=catalog)
     navigation=book.create_sheet('核查目录')
@@ -267,7 +269,8 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
             sheet.append(values)
             count+=1;page_rows+=1
         finish()
-    names=[k for k in ORDER if k in exports or k in sql_exports]+[k for k in [*exports,*sql_exports] if k not in ORDER]
+    order=['sample_input_summary',*ORDER]
+    names=[k for k in order if k in exports or k in sql_exports]+[k for k in [*exports,*sql_exports] if k not in order]
     # CSV/legacy inputs may still carry tables that are not part of the workbook.
     names=[name for name in names if name not in {'ambiguous_gene_observation','reference_gene_observation','primer_reference_gene_observation','candidate_gene_summary'}]
     if exports.get('dual_matching_summary'):

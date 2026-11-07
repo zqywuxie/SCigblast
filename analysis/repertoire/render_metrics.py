@@ -6,7 +6,7 @@ import math
 import textwrap
 
 from .io import label_name
-from .palette import text_on
+from .palette import text_on, ISOTYPE_COLORS
 
 CHAIN_ORDER = ('IGH','IGK','IGL','TRA','TRB','TRD','TRG')
 CHAIN_COLORS = {'IGH':'#315D8B','IGK':'#4F8F91','IGL':'#4F8F91'}
@@ -118,7 +118,7 @@ def render_comparisons(data, *, pyplot, save):
 
 
 def render_isotype_distribution(data, *, pyplot, save):
-    """Migrate single_chain._isotype_bars: IgM/D blue, other isotypes orange.
+    """Keep Isotype colors consistent with the overview.
 
     Values come from the platform's verified 06 copy/CDR3 summaries rather than
     recalculating the old PDF's input selection or silently taking a first call.
@@ -133,7 +133,7 @@ def render_isotype_distribution(data, *, pyplot, save):
         for ax,metric,title in zip(axes,('expression','unique_cdr3'),('% Expression','% Unique CDR3')):
             lookup={r['isotype']:r['percent'] for r in rows if r['metric']==metric}
             values=[lookup.get(label) for label in labels]
-            colors=['#4C72B0' if label in {'IgM','IgD'} else '#DD8452' for label in labels]
+            colors=[ISOTYPE_COLORS.get(label[:3], '#8193A5') for label in labels]
             ax.set_facecolor('#EAEAF2')
             ax.barh(range(len(labels)),[value or 0 for value in values],color=colors,height=.8)
             ax.set_yticks(range(len(labels)),labels,fontsize=10);ax.invert_yaxis()

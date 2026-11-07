@@ -44,13 +44,20 @@ class _ZipSink:
 
 def stream_zip(files, chunk_size=128 * 1024):
     """Yield a standards-compliant ZIP without a full archive in RAM or on disk."""
+    def chunks(path):
+        with path.open('rb') as source:
+            while chunk:=source.read(chunk_size):yield chunk
+    yield from stream_zip_members((name,chunks(path)) for path,name in files)
+
+
+def stream_zip_members(members):
+    """Members may be streamed HTML or file chunks; no temporary ZIP needed."""
     sink = _ZipSink()
     with zipfile.ZipFile(sink, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
-        for path, name in files:
-            # Preserve the source basename and relative directory inside the ZIP.
-            with path.open('rb') as source, archive.open(name, 'w', force_zip64=True) as target:
+        for name,chunks in members:
+            with archive.open(name, 'w', force_zip64=True) as target:
                 yield from sink.drain()
-                while chunk := source.read(chunk_size):
+                for chunk in chunks:
                     target.write(chunk)
                     yield from sink.drain()
             yield from sink.drain()

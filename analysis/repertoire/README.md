@@ -101,4 +101,22 @@ rtk proxy python -m analysis.repertoire.run --request /path/to/request.json --ou
 
 完整统计持有现有报告资源门锁，不改变全局 2 个 pipeline / 每 pipeline 4 个 IgBLAST 任务。计算 worker 默认 1、最多 2（仅独立完整样本的 aggregate）；绘图最多 2。可选统计缓存默认 0 MiB，HTML 衍生缓存默认 128 MiB。私有阶段计时与 RSS 回执不作为实验报表内容。
 
+## 多链、下载与恢复
+
+同一样本目录多个链结果共用样本选择，组成和 RNA/CDR3 指标仍按链分别统计。全部链产出图在多链样本出现时分为三个面板：共享 Merged/Total Reads 每样本一次，其余两个指标按链分组；单链选择沿用三柱比较。XLSX 的共享输入与链产出分 Sheet，不能将链内的 Unique CDR3 相加当作跨链去重数。
+
+基因匹配只提供“下载基因匹配总表 CSV”，包含全部样本、链、引物、基因和状态，不受页面筛选或分页影响；存疑组单独标记，多个参考结果必要时保留结果标识。优先输出逐引物记录，未提供可用逐引物结果的样本/链使用“全部引物”样本汇总，不补造未知的匹配状态。主页样本信息默认全部列出，在固定高度区域通过滚轮、滚动条、鼠标拖动或触摸滑动查看。HTML 本身可离线重新下载和导出当前图的 PNG/CSV。Web 另有“实验核查包”，仅包含最新界面的 HTML 与 Excel；完整材料仍包含全部 PNG/CSV。
+
+Isotype 及具有可靠证据的基因图显示分类覆盖比例，不改变图内可分类分母。新增 `02_sample_genes/annotation_coverage.csv` 记录 copy 覆盖；旧报告仅使用已有证据，不猜算逐引物覆盖。颜色在总览和单样本 Isotype 之间一致。
+
+完整统计校验后先保存私有检查点，再生成 Excel/PNG/HTML。Web 检查点位于报告输出父目录的 `.report_checkpoints/<report-id>/statistics/`，CLI 默认使用同一隐藏父目录。与结果放在同一文件系统，以支持原子移动，不依赖状态目录与结果目录位于同一 Docker 挂载。重试同一报告可复用一致的统计；来源、配置或科学代码变化会失效。检查点不进入公开包，成功发布时移动为完成报告，不另复制一套大库。每个报告只保留一个完整检查点；归档/删除会清理该私有检查点，保留分析日志。不要手动删除正在运行的锁文件。
+
+存储盘点命令（只读，不执行 VACUUM）：
+
+```bash
+rtk proxy python -m analysis.repertoire.storage_audit /path/to/details.sqlite /path/to/scenario_details.sqlite
+```
+
+默认只读页数、空闲页和 schema。`--objects` 会读取 dbstat 页面统计各表/索引空间，适合隔离副本或维护时段。阶段回执新增主进程实际磁盘字节计数，copy 分配有独立计时；不把主进程 I/O 或 CPU 当成整个子进程树。
+
 新模块需同步 Docker 白名单和 `web/check_bundle.py`。额外验证使用系统 Temp，不新增项目测试代码。当前优化计划见 [报告性能计划](../../plans/active/20261103_report_performance.md)；历史说明已移至 [docs/history](../../docs/history/)。

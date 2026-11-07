@@ -137,6 +137,19 @@ class Service:
                     raise ValueError('Unsafe HTML cache identity')
                 purge(target)
             except (OSError,ValueError):LOG.warning('Cannot purge derived HTML cache for %s',row['id'])
+            try:
+                # Invoked after archive/delete has checked active reports/read leases.
+                # Keep analysis.log and all other report_work diagnostics.
+                from analysis.repertoire.private_cache import locked
+                from analysis.repertoire.statistics_checkpoint import Checkpoint
+                work=(Path(row['output_root']).parent/'.report_checkpoints').resolve()
+                checkpoint=work/row['id']
+                if (checkpoint.resolve()==work or not checkpoint.resolve().is_relative_to(work)
+                    or not self.app.is_under(checkpoint,[self.app.DEFAULT_OUTPUT_ROOT])):
+                    raise ValueError('Unsafe statistics checkpoint identity')
+                if checkpoint.is_dir():
+                    with locked(checkpoint) as owned:Checkpoint(owned,'',{}).clear()
+            except (OSError,ValueError):LOG.warning('Cannot purge report statistics checkpoint for %s',row['id'])
 
     def freeze_mapping(self,row,env,destination):
         """Freeze the selected primers for this analysis attempt, before stage 5."""
@@ -356,6 +369,9 @@ class Service:
             work.mkdir(parents=True,exist_ok=True)
             request=dict(source,items=items,primer=json.loads(row['config_json']) or None,run_id=row['id'],progress_path=str(work/'progress.json'))
             request['performance_path']=str(work/'performance.json')
+            # Keep rename-based checkpoints on the result filesystem. STATE_ROOT
+            # may be a different Docker bind mount and cannot be atomically renamed.
+            request['checkpoint_root']=str(folder.parent/'.report_checkpoints'/row['id'])
             request['task_name']=parent['dataset'] if row['parent_job_id'] else source.get('task_name') or Path(source['input_root']).name
             # Trusted server configuration, never a browser-supplied file allowlist.
             request['allowed_input_roots']=[str(p) for p in self.app.configured_roots('SCIGBLAST_ALLOWED_INPUT_ROOTS','/colddata/SCigblast/data')]
@@ -707,10 +723,43 @@ def router(service):
             headers=report_html.response_headers(download=download),background=BackgroundTask(incoming.close))
 
     @router.get('/{run_id}/download')
-    def download(run_id:str,images_only:bool=False):
+    def download(run_id:str,images_only:bool=False,package:str='full'):
         from analysis.repertoire.io import safe_file
         row=service.owned(run_id);data=service.summary(row,compact=True)
         manifest=json.loads(safe_file(Path(row['output_root'])/'manifest.json',row['output_root']).read_text(encoding='utf-8'))
+        if package not in {'full','check'}:raise HTTPException(400,'不支持的下载类型')
+        if package=='check':
+            from analysis.repertoire import report_html,html_cache
+            from artifact_download import stream_zip_members
+            root=Path(row['output_root']);listed=set(manifest['files'])
+            def resolve(name):
+                if name not in listed:raise ValueError('报告引用了未登记的文件')
+                return service.artifact(row,name)
+            try:
+                assets=report_html.prepare(data,root,resolve=resolve)
+                workbook=resolve('report.xlsx')
+            except (OSError,ValueError,KeyError) as error:raise HTTPException(409,'报告材料不可用') from error
+            def check_stream():
+                with service.read_lease(row):
+                    incoming=html_cache.stream(data,manifest,resolve,service.app.STATE_ROOT/'report_html_cache'/row['owner_id']/row['id'],
+                        run_id=run_id,budget_mb=int(os.environ.get('SCIGBLAST_REPORT_HTML_CACHE_MB','128')),assets=assets)
+                    try:
+                        first=next(incoming)
+                        def html():
+                            yield first;yield from incoming
+                        def excel():
+                            with workbook.open('rb') as handle:
+                                while block:=handle.read(128*1024):yield block
+                        yield from stream_zip_members([('report.html',html()),('report.xlsx',excel())])
+                    finally:incoming.close()
+            incoming=check_stream()
+            try:first=next(incoming)
+            except (OSError,ValueError,KeyError,StopIteration) as error:
+                incoming.close();raise HTTPException(409,'无法生成实验核查包') from error
+            def body():
+                try:yield first;yield from incoming
+                finally:incoming.close()
+            return StreamingResponse(body(),media_type='application/zip',headers={'Content-Disposition':f'attachment; filename="report_{run_id}_check.zip"'},background=BackgroundTask(incoming.close))
         names=[name for name in manifest['files'] if name.endswith('.png')] if images_only else [*manifest['files'],'manifest.json']
         files=[(service.artifact(row,name),name) for name in names]
         filename=f"report_{run_id}"+('_png' if images_only else '')+'.zip'

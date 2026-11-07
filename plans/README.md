@@ -5,6 +5,7 @@
 ## 当前工作
 
 - [报告计算与生成性能优化](active/20261103_report_performance.md)
+- [多链样本、基因 CSV 与科研报告优化](active/4e9d2c31-6d5f-4d45-85b3-99f8c03e7a21_plan.md)
 
 ## 历史设计
 

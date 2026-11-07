@@ -1989,7 +1989,7 @@ def delete_job(job_id: str, request: dict):
             import derived_store
             derived_store.delete(connection, [item[0] for item in connection.execute('SELECT id FROM derived_runs WHERE parent_job_id=?', (job_id,))])
             connection.execute('DELETE FROM derived_runs WHERE parent_job_id=?', (job_id,))
-            report_cache_rows=connection.execute('SELECT id,owner_id FROM report_runs WHERE parent_job_id=?',(job_id,)).fetchall()
+            report_cache_rows=connection.execute('SELECT id,owner_id,output_root FROM report_runs WHERE parent_job_id=?',(job_id,)).fetchall()
             connection.execute('DELETE FROM report_runs WHERE parent_job_id=?', (job_id,))
             connection.execute('DELETE FROM report_plans WHERE job_id=?', (job_id,))
             connection.execute('DELETE FROM reviews WHERE job_id=?', (job_id,))

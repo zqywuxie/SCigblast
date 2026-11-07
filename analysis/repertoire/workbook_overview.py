@@ -17,7 +17,12 @@ def sample_rows(samples, catalog=None):
     assignments=(catalog or {}).get('assignments',{})
     categories={'IGH':'Heavy','IGK':'Light','IGL':'Light',**{c:'TCR' for c in ('TRA','TRB','TRD','TRG')}}
     result=[]
-    for sample,chain in sorted({(r['sample'],r['chain']) for r in samples},key=lambda item:sample_sort_key(*item)):
+    pairs={(r['sample'],r['chain']) for r in samples}
+    anchors={}
+    for sample,chain in pairs:
+        key=sample_sort_key(sample,chain)
+        anchors[sample]=min(anchors.get(sample,key),key)
+    for sample,chain in sorted(pairs,key=lambda item:(anchors[item[0]],sample_sort_key(*item))):
         primers=assignments.get(sample,[])
         groups=sorted({str(p['group']).strip() for p in primers if p.get('group') and str(p['group']).strip()})
         result.append(dict(category=categories.get(chain,'—'),sample=sample,chain=chain,

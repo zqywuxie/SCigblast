@@ -15,8 +15,11 @@ def render(data, *, pyplot, save, stage='', target_sample=''):
     if not any(r['count'] for values in grouped.values() for r in values.values()):
         return
     order = {sample: i for i, sample in enumerate(data.get('matching_sample_order') or [])}
-    chains={r['sample']:r['chain'] for r in data.get('samples',[])}
-    keys = sorted(grouped, key=lambda key: (order.get(key[0], len(order)),sample_sort_key(key[0],chains.get(key[0],'')),key))
+    anchors={}
+    for row in data.get('samples',[]):
+        key=sample_sort_key(row['sample'],row['chain'])
+        anchors[row['sample']]=min(anchors.get(row['sample'],key),key)
+    keys = sorted(grouped, key=lambda key: (order.get(key[0], len(order)),anchors.get(key[0],sample_sort_key(key[0],'')),key))
     repeated = Counter(sample for sample, _ in keys)
     alternatives = defaultdict(list)
     for row in data.get('primer_group_comparisons', []):

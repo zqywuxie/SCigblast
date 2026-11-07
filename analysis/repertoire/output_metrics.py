@@ -111,16 +111,20 @@ def build(data, items, root):
     return result
 
 
-def render(rows, *, pyplot, save):
+def render(rows, *, pyplot, save, inputs=()):
     """All sample/chain contexts together, followed by the per-chain views."""
     from matplotlib.ticker import FuncFormatter, MaxNLocator
     from .workbook_overview import sample_sort_key
     import textwrap
     ordered=sorted(rows,key=lambda r:sample_sort_key(r['sample'],r['chain']))
+    names=list(dict.fromkeys(r['sample'] for r in ordered))
+    multi=any(sum(r['sample']==sample for r in ordered)>1 for sample in names)
     pages=(len(ordered)+11)//12
     batches=[('',ordered[start:start+12],start//12+1,pages) for start in range(0,len(ordered),12)]
     batches.extend((chain,[r for r in ordered if r['chain']==chain],1,1) for chain in sorted({r['chain'] for r in rows}))
     for chain,batch,page,total in batches:
+        if not chain and multi:
+            continue
         width = max(9, len(batch)*1.75+1.5)
         fig, ax = pyplot.subplots(figsize=(width, 5.3))
         fig.subplots_adjust(left=.85/width, right=1-.3/width, bottom=.24, top=.83)
@@ -148,3 +152,30 @@ def render(rows, *, pyplot, save):
         fig.text(.5, .96, title, ha='center', va='top', fontsize=12, fontweight='bold')
         name=(chain or 'all_samples')+'__sample_output_comparison'+(f'_{page}' if total>1 else '')
         save(fig, name, title, chain=chain, kind='sample_outputs')
+    if multi:
+        colors=['#315D8B','#419A8B','#CE8351','#8675A9','#A09552','#598CA7','#9B667D']
+        chains=sorted({r['chain'] for r in ordered},key=lambda c:sample_sort_key('',c))
+        shared={r['sample']:r.get('total_reads') for r in inputs}
+        for start in range(0,len(names),12):
+            selected=names[start:start+12]
+            fig,axes=pyplot.subplots(1,3,figsize=(max(13,len(selected)*2.3),5.8))
+            fig.subplots_adjust(left=.06,right=.98,top=.78,bottom=.27,wspace=.38)
+            for ax,(key,title,base) in zip(axes,METRICS):
+                series=[('',base)] if key=='total_reads' else list(zip(chains,colors))
+                width=.75/len(series)
+                for i,(chain,color) in enumerate(series):
+                    values=[shared.get(sample) if key=='total_reads' else next((r[key] for r in ordered if r['sample']==sample and r['chain']==chain),None) for sample in selected]
+                    positions=[j+(i-(len(series)-1)/2)*width for j in range(len(selected))]
+                    ax.bar(positions,[v or 0 for v in values],width=width*.9,color=color,label=chain or 'Shared input')
+                    for sample_index,(x,value) in enumerate(zip(positions,values)):
+                        if value is not None:ax.annotate(f'{value:,}',(x,value),xytext=(0,4),textcoords='offset points',ha='center',fontsize=7)
+                        elif key=='total_reads' or any(r['sample']==selected[sample_index] and r['chain']==chain for r in ordered):
+                            ax.annotate('N/A',(x,0),xytext=(0,4),textcoords='offset points',ha='center',fontsize=7,color='#647586')
+                ax.set_title(title,fontsize=11,pad=14);ax.set_xticks(range(len(selected)),['\n'.join(textwrap.wrap(s,18,break_on_hyphens=False)) for s in selected],fontsize=8)
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda n,_:f'{n:,.0f}'));ax.yaxis.set_major_locator(MaxNLocator(integer=True,nbins=5))
+                ax.set_ylim(top=max(ax.get_ylim()[1]*1.15,1));ax.grid(axis='y',color='#E7EBEF',linewidth=.65);ax.set_axisbelow(True);ax.spines[['top','right']].set_visible(False)
+                ax.legend(loc='lower center',bbox_to_anchor=(.5,1.10),ncol=min(4,len(series)),fontsize=8,frameon=False)
+            page=start//12+1;pages=(len(names)+11)//12
+            title='Sample output comparison · All samples'+(f' · {page}/{pages}' if pages>1 else '')
+            fig.suptitle(title,fontsize=13,fontweight='bold',y=.98)
+            save(fig,'all_samples__sample_output_comparison'+(f'_{page}' if pages>1 else ''),title,chain='',kind='sample_outputs')

@@ -283,7 +283,7 @@ def run(app, dry_run=False, days=14):
             size = package(root, row['id'])
             if has_reports:
                 with app.db() as connection:
-                    report_cache_rows=connection.execute('SELECT id,owner_id FROM report_runs WHERE parent_job_id=?',(row['id'],)).fetchall()
+                    report_cache_rows=connection.execute('SELECT id,owner_id,output_root FROM report_runs WHERE parent_job_id=?',(row['id'],)).fetchall()
                 app.REPORTS.purge_html_cache(report_cache_rows)
             with app.db() as connection:
                 connection.execute("UPDATE jobs SET status='ARCHIVED' WHERE id=? AND status='ARCHIVING'", (row['id'],))

@@ -14,13 +14,24 @@ from . import TABLE_PATHS, VERSION, FIGURE_VERSION
 from .catalog import build_catalog
 from .io import digest, version, write_json, write_table
 from .render import render
-from .sources import discover, files_under, verify
+from .sources import discover, verify
 from pipeline_stage_metrics import collect, summarize_volume
 from .usage import build as build_usage, connect as usage_connection
 from .performance import Performance
 
 
 def execute(request, output):
+    from .statistics_checkpoint import checkpoint_for
+    root=Path(request['input_root']).resolve()
+    items=request.get('items') or discover(root)
+    if not items:raise ValueError('未发现可用的单链 AIRR 结果')
+    verify(items,root)
+    if Path(output).exists():raise ValueError('派生分析输出目录已存在；请使用新的版本目录')
+    with checkpoint_for(request,output,items,root) as checkpoint:
+        return _execute(dict(request,items=items),output,checkpoint)
+
+
+def _execute(request, output, checkpoint):
     output = Path(output)
     if output.exists():
         raise ValueError('派生分析输出目录已存在；请使用新的版本目录')
@@ -39,8 +50,18 @@ def execute(request, output):
             write_json(request['progress_path'],dict(done=done,total=total,message=message,phase=phase))
         print(f'[REPORT] {done}/{total} {message}',flush=True)
     try:
+        recovered=checkpoint.load()
         cached = request.get('statistics_source')
-        if cached:
+        if recovered is not None:
+            staging.rmdir();staging=checkpoint.folder
+            checkpoint.prepare_retry()
+            data=recovered;catalog=data.get('catalog');folder=staging
+            cached={'root':str(folder)}
+            data['figure_primers']=request.get('figure_primers',[])
+            data['figure_groups']=request.get('figure_groups',[])
+            performance.data['statistics_checkpoint_reused']=True
+            progress(len(items),len(items),'已复用完整统计，继续生成报告',phase='figures')
+        elif cached:
             from .io import safe_file
             folder = Path(cached['root']).resolve()
             summary_path = safe_file(folder/'summary.json',folder)
@@ -80,14 +101,7 @@ def execute(request, output):
                 catalog=json.loads(json.dumps(catalog))
                 catalog['config']['figure_primers']=request['figure_primers']
                 catalog['version']=digest([catalog['assignments'],catalog.get('groups',{}),catalog['config']])
-            receipts={str(path):version(path) for path in files_under(root) if path.name in {'fastp_summary.csv','clean_summary.csv','clean_counts.csv','pandaseq_summary.csv','processing_manifest.csv'} or path.suffix=='.json' or path.name=='Datapoint.csv'}
-            for item in items:
-                parent=Path(item.get('summary_path', '')).parent
-                folder=(parent.parent.parent/'06.preprocessing'/parent.name if parent.parent.name=='05.igblastn_out' else parent.parent/'06.preprocessing' if parent.name=='05.igblastn_out' else None)
-                if folder:
-                    for name in ('run.json','base_completion.json'):
-                        path=folder/'.preprocessing_state'/name
-                        if path.is_file():receipts[str(path)]=version(path)
+            receipts=dict(checkpoint.receipts)
             # Gene lineage always uses mapping inputs. Raw is assessed in a
             # separate table, so selecting raw matching cannot change gene ownership.
             if catalog:
@@ -171,6 +185,8 @@ def execute(request, output):
             from .output_metrics import build as output_metrics
             data['sample_output_summary']=output_metrics(data,items,root)
         exports['sample_output_summary']=data.get('sample_output_summary',[])
+        from .presentation import shared_inputs
+        exports['sample_input_summary']=shared_inputs(data)
         if not cached:
             from .repertoire_metrics import build as build_repertoire_metrics
             data.update(performance.call('repertoire_metrics',build_repertoire_metrics,data, staging/'details.sqlite', root))
@@ -180,6 +196,10 @@ def execute(request, output):
         from .isotype import count_unit
         data['usage']['isotypes']=[dict(row,unit=count_unit(row.get('metric'),row.get('subset')=='postprocessed')) for row in data['usage']['isotypes']]
         exports['isotype_summary']=data['usage']['isotypes']
+        from .presentation import annotation_coverage
+        with closing(usage_connection(staging/'details.sqlite')) as connection:
+            data['annotation_coverage']=performance.call('annotation_coverage',annotation_coverage,connection)
+        exports['annotation_coverage']=data['annotation_coverage']
         exports['sequence_family_matching']=data['family_counts']
         exports['primer_preparation_summary']=data['trim_counts']
         for name,rows in exports.items():
@@ -207,6 +227,20 @@ def execute(request, output):
         data['exports']={name:TABLE_PATHS[name] for name in exports}
         from .workbook_overview import sample_rows
         data['sample_overview']=sample_rows(data['samples'],data.get('catalog'))
+        if not cached:
+            from datetime import datetime,timezone
+            data['statistics_created_at']=datetime.now(timezone.utc).isoformat()
+        if recovered is None:
+            verify(items,root)
+            from .storage_audit import inspect as inspect_storage
+            performance.data['statistics_storage']=[inspect_storage(staging/name) for name in
+                ('details.sqlite','scenario_details.sqlite') if (staging/name).is_file()]
+            with performance.phase('statistics_checkpoint'):
+                staging=checkpoint.seal(staging,data)
+                if not request.get('performance_path'):performance.path=staging/'.performance.json'
+            folder=staging if not cached else folder
+        # Keep the private phase receipt attached to the moved work directory.
+        if not request.get('performance_path'):performance.path=staging/'.performance.json'
         from .workbook import write_workbook
         data['workbook']=performance.call('workbook',write_workbook,staging/'report.xlsx',exports,sql_exports,staging/'details.sqlite',catalog=data.get('catalog'))
         progress(len(items),len(items),'正在生成汇报图片')
@@ -218,6 +252,8 @@ def execute(request, output):
             from .scenario_analysis import render as render_scenarios
             data['figures'].extend(performance.call('suspected_figures',render_scenarios,data,staging,cache_root=folder if cached else None))
         verify(items,root)
+        if any(version(path)!=expected for path,expected in checkpoint.receipts.items()):
+            raise ValueError('报告来源在生成期间发生变化，请重新扫描')
         if not cached and any(version(path)!=signature for path,signature in receipts.items()):
             raise ValueError('阶段或 preprocessing 指标在统计期间变化，请重新生成')
         data['exports'].update({name:TABLE_PATHS[name] for name in sql_exports if name in TABLE_PATHS})
@@ -240,14 +276,17 @@ def execute(request, output):
             manifest['scenario_statistics_version']=version(staging/'scenario_details.sqlite')
         write_json(staging/'manifest.json',manifest)
         performance.finish('succeeded')
+        # Completion receipts are private; never list them in public downloads.
         os.replace(staging,output)
+        (output/'.checkpoint.json').unlink(missing_ok=True)
+        (output/'.statistics.json').unlink(missing_ok=True)
         progress(len(items),len(items),'汇总与图片生成完成')
         return dict(figures=len(data['figures']),samples=len(data['samples']))
     except BaseException:
         performance.finish('failed')
         raise
     finally:
-        if staging.exists():
+        if staging.exists() and not checkpoint.retained(staging):
             if staging.is_symlink() or staging.resolve().parent!=output.parent.resolve():
                 raise ValueError('Unsafe report staging directory')
             shutil.rmtree(staging)

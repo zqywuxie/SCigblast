@@ -1,8 +1,10 @@
 """Versioned QC and primer analyses for existing and newly generated AIRR results."""
 VERSION = 'repertoire-evidence-v28-suspected-primer-scenarios'
-FIGURE_VERSION = 'repertoire-figures-v40-suspected-primer-scenarios'
+FIGURE_VERSION = 'repertoire-figures-v41-multichain-isotype-colors'
 
 TABLE_PATHS = {
+    'annotation_coverage': '02_sample_genes/annotation_coverage.csv',
+    'sample_input_summary': '01_overview/sample_input_summary.csv',
     'scenario_matching_summary': '03_primer_genes/suspected/matching_summary.csv',
     'scenario_primer_mapping_summary': '03_primer_genes/suspected/primer_mapping_summary.csv',
     'scenario_primer_gene_usage': '03_primer_genes/suspected/primer_gene_usage.csv',

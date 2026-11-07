@@ -59,10 +59,13 @@ SMTP 凭据仅保存在服务器私有设置，不回显、不写日志/任务�
 - Total Reads 使用 Merged；Total Receptor RNA 使用 AIRR 后处理总 copy/umi_counts；Total Unique CDR3s 使用对应范围的唯一有效 CDR3。Raw R1/R2、Clean R1/R2 分别取真实计数，不对半拆总数。
 - 多样性读取对应 06 Datapoint，B cell 指标使用可追溯的后处理数据，不为 UI 修改统计值。
 - 仅更新 HTML 时使用 `python -m analysis.repertoire.export_html`，读取已完成公共表和 PNG；不要调用全量 `run` 重扫 reads。新数据/引物/规则变化仍需重新统计；不能只改分母文案冒充新规则。
+- 完整统计后保留私有校验检查点，展示失败重试可复用；Web 位于报告输出父目录 `.report_checkpoints/<id>/`，与结果在同一文件系统；成功原子发布时消费，归档/删除清理，分析日志保留。检查点不进入公开包；不绕过来源/配置/代码指纹核验。
 
 ## 报告与 Treemap 展示
 
 平台操作及报告筛选为中文，图题和专业指标为英文；仅输出 PNG，不生成 PDF/SVG。HTML 离线可导出当前 PNG/CSV，最多 7 张活动图；顶部 Tab 顺序为总体概览→样本比较→引物分析→样本分析→基因匹配，各模块独立筛选，总览默认全部样本。单样本 Isotype 默认可见，按钮切换保留阅读位置；逐引物基因组成为单样本。Expression 左、Unique CDR3 右；不加底部重复明细和技术版本尾注。基因匹配按家族分组，默认 10 个基因，可调整。
+
+多链样本共享输入只计一次，链级组成/RNA/CDR3 不混合；基因匹配只提供一份全部样本/引物的总表 CSV，不随界面筛选或分页变化，保留链及必要的存疑组/参考身份。分类覆盖仅从可靠 copy 证据取得，不改变组成分母。主页样本信息默认展开并列出全部行，在固定高度区域滚动/拖动查看；HTML 轻量分享与 HTML＋Excel 核查包不包含私有追溯库。
 
 Treemap 使用用户 QR 绘图逻辑，按有效记录数聚合 V/J/CDR3，不自行改成 copy 权重。单链 PNG 平铺 `individual_treemaps/样本__CHAIN.png`；至少两条可用链才生成多链图，位于 `multi_chain_treemaps/`。合图链区面积不代表链间丰度。Clone Top 频率使用各样本链内有效记录数。新旧输出按存储版本兼容，不推算旧路径或自动重画。
 

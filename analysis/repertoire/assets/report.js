@@ -179,7 +179,8 @@
      finally{control.disabled=false;control.textContent=failed?'重试 '+label:(label==='CSV'?'数据 CSV':figure.interactive?'导出 PNG':'下载 PNG');}
    }
    if(figure.interactive){
-     const specs=ReportCharts.specs(figure),charts=[],content=document.createElement('div');content.className=specs.length===2?'metric-pair':'chart-stack';frame.append(content);
+    const specs=ReportCharts.specs(figure),charts=[],content=document.createElement('div');content.className=specs.length===2?'metric-pair':figure.kind==='sample_outputs'&&specs.length===3?'output-panels':'chart-stack';
+    const coverage=coverageNode(figure);if(coverage){figure.coverage=Array.from(coverage.children,n=>n.textContent);frame.append(coverage);}frame.append(content);
      if(!specs.length){const empty=document.createElement('p');empty.className='empty';empty.textContent='当前范围无可用统计数据。';content.append(empty);button.disabled=true;}
      for(const spec of specs){const host=document.createElement('div');host.className='chart-host';content.append(host);pendingCharts.push(()=>charts.push(ReportCharts.mount(host,spec,figure)));}
      button.onclick=()=>runExport(button,'PNG',()=>ReportCharts.exportPNG(charts,figure));
@@ -187,35 +188,103 @@
    }else{
      const img=document.getElementById(figure.id).content.firstElementChild.cloneNode(true);img.loading='lazy';frame.append(img);
      button.onclick=()=>runExport(button,'PNG',()=>{const a=document.createElement('a');a.href=img.src;a.download=figure.filename;a.click();return true;});
-   }figureFrames.set(frameKey,frame);return frame;
+   }
+   if(figure.sample&&['isotype','isotype_distribution','primer_genes','composition','primers','primer_mapping'].includes(figure.kind)){
+     const inspect=document.createElement('button');inspect.type='button';inspect.className='inspect-context';inspect.textContent=['isotype','isotype_distribution'].includes(figure.kind)?'查看该样本引物分析 →':figure.kind==='primer_mapping'?'查看该样本基因组成 →':'查看该样本 Mapping 效率 →';
+     inspect.onclick=()=>openContext(figure,['isotype','isotype_distribution'].includes(figure.kind)?'matching':figure.kind==='primer_mapping'?'sample':'mapping');frame.append(inspect);
+   }
+   figureFrames.set(frameKey,frame);return frame;
+ }
+ function openContext(figure,target){
+   openModule(()=>{state.main=target==='sample'?'sample':'primer';state.view=state.main;if(target!=='sample')state.category=target;});
+   sampleMode='single';selectedSamples=[];$('#sample').value=figure.sample;scopeFilters();$('#chain').value=figure.chain||'';scenarioOptions();
+   if(figure.scenario_id)$('#scenario').value=figure.scenario_id;else $('#scenario').value='';
+   state.page=0;render();locate($('#view-title'));
+ }
+ function coverageNode(figure){
+   if(figure.kind==='sample_outputs'){
+     const host=document.createElement('div');host.className='coverage-strip';const keys=figure.outputMetric?[figure.outputMetric]:['total_reads','total_receptor_rna','total_unique_cdr3s'];
+     for(const row of ReportCharts.table('sample_output_summary').filter(r=>(!figure.sample||r.sample===figure.sample)&&(!figure.samples||figure.samples.includes(r.sample))&&(!figure.chain||r.chain===figure.chain))){
+       const missing=keys.filter(key=>(key==='total_reads'&&!figure.chain?(data.sample_inputs||[]).find(r=>r.sample===row.sample)?.total_reads:row[key])==null);
+       if(missing.length){const note=document.createElement('span');note.className='coverage-badge';note.textContent=row.sample+' / '+row.chain+' · N/A: '+missing.map(k=>({total_reads:'Total Reads',total_receptor_rna:'Total Receptor RNA',total_unique_cdr3s:'Total Unique CDR3s'})[k]).join(', ');host.append(note);}
+     }
+     return host.children.length?host:null;
+   }
+   const isotype=['isotype','isotype_distribution'].includes(figure.kind),genes=['sample_genes','primer_genes','composition'].includes(figure.kind);
+   if(!isotype&&!genes)return null;
+   const host=document.createElement('div');host.className='coverage-strip';
+   const groups=data.groups.filter(g=>(!figure.group_id||g.group_id===figure.group_id)&&(!figure.sample||g.sample===figure.sample)&&(!figure.chain||g.chain===figure.chain)&&(!figure.samples||figure.samples.includes(g.sample))&&(!isotype||g.chain==='IGH'));
+   for(const group of groups){
+     const segment=isotype||figure.kind==='composition'?'C':figure.segment;
+     let total,classified,unit='copy';
+     if(isotype){const row=ReportCharts.table('isotype_summary').find(r=>r.group_id===group.group_id&&r.metric==='abundance'&&r.level==='main');total=row?.total_records;classified=row?.annotated_records;unit=row?.unit||data.composition_weight||'reads';}
+     else if(!figure.scenario_id){const coverage=ReportCharts.table('annotation_coverage').find(r=>r.group_id===group.group_id&&(r.primer||'')===(figure.primer||'')&&r.segment===segment);total=coverage?.total_count;classified=coverage?.classified_count;
+       if(!figure.primer&&figure.kind!=='composition'&&total==null){const source=(data.composition_sources||[]).find(r=>r.group_id===group.group_id&&r.status==='complete');const row=ReportCharts.table('reference_gene_observation').find(r=>r.group_id===group.group_id&&r.segment===segment&&r.metric==='expression');total=source?.copies;classified=row?.denominator;}
+     }
+     if(total==null||classified==null||total<0||classified<0||classified>total)continue;
+     const badge=document.createElement('span');badge.className='coverage-badge';badge.dataset.sample=group.sample;
+     badge.textContent=group.sample+' / '+group.chain+' · '+segment+' classified '+(total?((classified/total)*100).toFixed(1)+'%':'N/A')+' ('+Number(classified).toLocaleString('en-US')+' / '+Number(total).toLocaleString('en-US')+' '+unit+')';host.append(badge);
+   }
+   return host.children.length?host:null;
  }
 
- function comparisonUnits(rows){const units=[],groups=new Map(),paired=new Set(['sample_genes','primer_genes','genes','composition','heatmap']);for(const figure of rows){if(figure.kind==='matching'&&['raw_R1','mapping'].includes(figure.stage)){const key=JSON.stringify(['matching',figure.sample,figure.chain,figure.group_id,figure.page]);if(!groups.has(key)){const group={matching:true,figures:[]};groups.set(key,group);units.push(group);}groups.get(key).figures.push(figure);continue;}if(!paired.has(figure.kind)||!['expression','unique_cdr3'].includes(figure.metric)){units.push({single:figure,cost:['isotype','isotype_distribution','bcell_metrics_comparison'].includes(figure.kind)&&figure.interactive?2:1});continue;}const key=JSON.stringify([figure.view,figure.kind,figure.group_id,figure.sample,figure.chain,figure.primer,figure.segment,figure.preparation,figure.page]);if(!groups.has(key)){const group={figures:[]};groups.set(key,group);units.push(group);}groups.get(key).figures.push(figure);}return units.flatMap(unit=>{if(unit.single)return [unit];if(unit.matching){const left=unit.figures.find(f=>f.stage==='raw_R1'),right=unit.figures.find(f=>f.stage==='mapping');return [{left,right,matching:true,cost:Number(Boolean(left))+Number(Boolean(right))}];}const expressions=unit.figures.filter(f=>f.metric==='expression'),unique=unit.figures.filter(f=>f.metric==='unique_cdr3');if(expressions.length>1)return unit.figures.map(f=>({left:f.metric==='expression'?f:null,right:f.metric==='unique_cdr3'?f:null,cost:1}));return (unique.length?unique:[null]).map(right=>({left:expressions[0]||null,right,cost:Number(Boolean(expressions[0]))+Number(Boolean(right))}));});}
+ function comparisonUnits(rows){const units=[],groups=new Map(),paired=new Set(['sample_genes','primer_genes','genes','composition','heatmap']);for(const figure of rows){if(figure.kind==='matching'&&['raw_R1','mapping'].includes(figure.stage)){const key=JSON.stringify(['matching',figure.sample,figure.chain,figure.group_id,figure.page]);if(!groups.has(key)){const group={matching:true,figures:[]};groups.set(key,group);units.push(group);}groups.get(key).figures.push(figure);continue;}if(!paired.has(figure.kind)||!['expression','unique_cdr3'].includes(figure.metric)){units.push({single:figure,cost:figure.kind==='sample_outputs'&&figure.interactive?Math.max(1,ReportCharts.specs(figure).length):['isotype','isotype_distribution','bcell_metrics_comparison'].includes(figure.kind)&&figure.interactive?2:1});continue;}const key=JSON.stringify([figure.view,figure.kind,figure.group_id,figure.sample,figure.chain,figure.primer,figure.segment,figure.preparation,figure.page]);if(!groups.has(key)){const group={figures:[]};groups.set(key,group);units.push(group);}groups.get(key).figures.push(figure);}return units.flatMap(unit=>{if(unit.single)return [unit];if(unit.matching){const left=unit.figures.find(f=>f.stage==='raw_R1'),right=unit.figures.find(f=>f.stage==='mapping');return [{left,right,matching:true,cost:Number(Boolean(left))+Number(Boolean(right))}];}const expressions=unit.figures.filter(f=>f.metric==='expression'),unique=unit.figures.filter(f=>f.metric==='unique_cdr3');if(expressions.length>1)return unit.figures.map(f=>({left:f.metric==='expression'?f:null,right:f.metric==='unique_cdr3'?f:null,cost:1}));return (unique.length?unique:[null]).map(right=>({left:expressions[0]||null,right,cost:Number(Boolean(expressions[0]))+Number(Boolean(right))}));});}
  function comparisonNode(unit){if(unit.single){if(!unit.single.overviewFocus)return figureNode(unit.single);const section=document.createElement('section'),head=document.createElement('div'),title=document.createElement('h3'),choices=document.createElement('div');section.className='overview-isotype';section.id='overview-isotype';head.className='overview-isotype-head';title.textContent='单样本 Isotype';choices.className='isotype-samples';choices.setAttribute('role','group');choices.setAttribute('aria-label','选择 Isotype 样本');for(const sample of unit.single.focusOptions){const button=document.createElement('button');button.type='button';button.textContent=sample;button.dataset.isotypeSample=sample;button.setAttribute('aria-pressed',String(sample===unit.single.sample));button.onclick=()=>{const top=section.getBoundingClientRect().top,left=window.scrollX;overviewIsotypeSample=sample;figures();const active=document.querySelector('[data-isotype-sample="'+CSS.escape(sample)+'"]');active?.focus({preventScroll:true});const restore=()=>{const card=$('#overview-isotype');if(card)window.scrollTo({left,top:window.scrollY+card.getBoundingClientRect().top-top,behavior:'instant'});};restore();requestAnimationFrame(restore);};choices.append(button);}head.append(title,choices);section.append(head,figureNode(unit.single,'Isotype'));return section;}const source=unit.left||unit.right,section=document.createElement('section'),heading=document.createElement('h3'),pair=document.createElement('div');section.className='comparison';pair.className='metric-pair';heading.textContent=[source.sample,source.chain,source.primer_group?source.primer_group+'（存疑）':'',source.primer,unit.matching?'引物匹配构成':source.segment+(source.kind==='composition'?' · 引物间对比':' 基因组成'),source.page>1?'第 '+source.page+' 页':''].filter(Boolean).join(' / ');section.append(heading);for(const [figure,label] of [[unit.left,unit.matching?'Raw':'% Expression'],[unit.right,unit.matching?'Mapping reads':'% Unique CDR3']]){if(figure)pair.append(figureNode(figure,label));else{const empty=document.createElement('div');empty.className='metric-missing';const title=document.createElement('strong'),text=document.createElement('p');title.textContent=label;text.textContent='当前范围没有可用的对应指标数据。';empty.append(title,text);pair.append(empty);}}section.append(pair);return section;}
  function geneFamily(gene,segment){const name=String(gene||'').split('*')[0].toUpperCase();let m;if(segment==='C')m=name.match(/^(IGH[AMDEG]|IGKC|IGLC|TR[ABDG]C)/);else if(segment==='V')m=name.match(/^((?:IGH|IGK|IGL|TRA|TRB|TRD|TRG)V\d+)/);else if(segment==='J')m=name.match(/^((?:IGH|IGK|IGL|TRA|TRB|TRD|TRG)J\d+)-/)||name.match(/^((?:IGH|IGK|IGL|TRA|TRB|TRD|TRG)J)/);return m?m[1]:name;}
  function geneState(row){return Number(row.unique_count)>0?['matched','已匹配']:Number(row.ambiguous_count)>0?['unresolved','未唯一归属']:row.status==='zero_observed'?['unmatched','未匹配']:['unknown','未评估'];}
  function referenceEmpty(message,reset=false){const box=document.createElement('div'),text=document.createElement('p');box.className='reference-empty';text.textContent=message;box.append(text);if(reset){const button=document.createElement('button');button.type='button';button.textContent='清除基因筛选';button.onclick=()=>{$('#reference-query').value='';$('#reference-state').value='';state.referencePages={};references();};box.append(button);}return box;}
- function references(){
-  const host=$('#reference-list');host.replaceChildren();host.hidden=state.view!=='reference';$('#reference-tools').hidden=host.hidden;if(host.hidden)return;
+ function referenceRows(){
   const primer=$('#reference-scope').value==='primer',id=primer?'primer_reference_gene_observation':'reference_gene_observation';
   const source=document.getElementById('table-'+id),fallback=[primer?'primer_gene_usage':'sample_gene_usage',primer?'primer_unobserved_reference_genes':'unobserved_reference_genes'];
   const records=source?(primer?scenarioTable(id):ReportCharts.table(id)):fallback.flatMap(id=>ReportCharts.table(id));
+  const query=$('#reference-query').value.trim().toLowerCase(),status=$('#reference-state').value;
+  const scoped=records.filter(r=>Number(r.reference_catalog)===1&&include(r)&&(!primer||matchesScenario(r))),seen=new Set();
+  const rows=scoped.filter(r=>{if(!['matched','unmatched'].includes(geneState(r)[0])||query&&!r.gene.toLowerCase().includes(query)||status&&geneState(r)[0]!==status)return false;
+    const key=JSON.stringify([r.sample,r.chain,r.group_id||r.reference_id,r.primer||'',r.scenario_id||'',r.segment,r.gene]);if(seen.has(key))return false;seen.add(key);return true;});
+  const natural=(a,b)=>String(a||'').localeCompare(String(b||''),'en',{numeric:true});
+  rows.sort((a,b)=>samples.indexOf(a.sample)-samples.indexOf(b.sample)||natural(a.chain,b.chain)||natural(a.group_id||a.reference_id,b.group_id||b.reference_id)||natural(a.primer,b.primer)||['V','J','C'].indexOf(a.segment)-['V','J','C'].indexOf(b.segment)||natural(geneFamily(a.gene,a.segment),geneFamily(b.gene,b.segment))||natural(a.gene,b.gene));
+  return {primer,source,records,scoped,rows};
+ }
+ let geneMatchingTotal=null;
+ function totalGeneMatching(){
+  if(geneMatchingTotal)return geneMatchingTotal;
+  const load=(id,fallback)=>document.getElementById('table-'+id)?ReportCharts.table(id):fallback.flatMap(id=>ReportCharts.table(id));
+  const primers=load('primer_reference_gene_observation',['primer_gene_usage','primer_unobserved_reference_genes']).concat(load('scenario_primer_reference_gene_observation',['scenario_primer_gene_usage']));
+  const eligible=r=>Number(r.reference_catalog)===1&&['matched','unmatched'].includes(geneState(r)[0])&&(!r.metric||r.metric==='expression');
+  const covered=new Set(primers.filter(eligible).map(r=>JSON.stringify([r.sample,r.chain,r.group_id||r.reference_id])));
+  const fallbackSamples=load('reference_gene_observation',['sample_gene_usage','unobserved_reference_genes']).filter(r=>!covered.has(JSON.stringify([r.sample,r.chain,r.group_id||r.reference_id])));
+  const seen=new Set(),rows=primers.concat(fallbackSamples).filter(r=>{if(!eligible(r))return false;const key=JSON.stringify([r.sample,r.chain,r.group_id||r.reference_id,r.primer||'',r.scenario_id||'',r.segment,r.gene]);if(seen.has(key))return false;seen.add(key);return true;});
+  const natural=(a,b)=>String(a||'').localeCompare(String(b||''),'en',{numeric:true});
+  rows.sort((a,b)=>samplesOrder(a.sample)-samplesOrder(b.sample)||natural(a.chain,b.chain)||natural(a.scenario_id,b.scenario_id)||natural(a.primer,b.primer)||['V','J','C'].indexOf(a.segment)-['V','J','C'].indexOf(b.segment)||natural(geneFamily(a.gene,a.segment),geneFamily(b.gene,b.segment))||natural(a.gene,b.gene)||natural(a.group_id||a.reference_id,b.group_id||b.reference_id));
+  const variants=new Map();for(const r of rows){const key=JSON.stringify([r.sample,r.chain,r.primer||'',r.scenario_id||'']);if(!variants.has(key))variants.set(key,new Set());variants.get(key).add(r.group_id||r.reference_id||'');}
+  const scenarios=rows.some(r=>r.scenario_id),multiple=[...variants.values()].some(set=>set.size>1);
+  geneMatchingTotal=rows.map(r=>({'样本':r.sample,'链':r.chain,'引物':r.primer||'全部引物','基因':r.gene,'状态':geneState(r)[1],...(scenarios?{'分析组':r.scenario_id?'存疑 · '+(r.primer_group||r.scenario_id):'原组'}:{}),...(multiple?{'结果标识':r.group_id||r.reference_id||''}:{})}));
+  return geneMatchingTotal;
+ }
+ function samplesOrder(sample){const index=samples.indexOf(sample);return index<0?samples.length:index;}
+ function references(){
+  const host=$('#reference-list');host.replaceChildren();host.hidden=state.view!=='reference';$('#reference-tools').hidden=host.hidden;if(host.hidden)return;
+  const {primer,source,records,scoped,rows}=referenceRows();
   const pageSize=state.referencePageSize;
   const query=$('#reference-query').value.trim().toLowerCase(),status=$('#reference-state').value;
-  const scoped=records.filter(r=>Number(r.reference_catalog)===1&&include(r)&&(!primer||matchesScenario(r)));
-  const rows=scoped.filter(r=>['matched','unmatched'].includes(geneState(r)[0])&&(!query||r.gene.toLowerCase().includes(query))&&(!status||geneState(r)[0]===status)),groups=new Map();
+  const groups=new Map(),download=$('#reference-download'),total=totalGeneMatching();download.disabled=!total.length;
+  $('#reference-export-status').textContent=total.length?'全部样本与引物 · '+total.length+' 条记录':'';
+  download.onclick=()=>{
+    const filename=ReportCharts.exportName({kind:'gene_matching_total',samples:null},'csv').replace(/__p1\.csv$/,'.csv');
+    try{ReportCharts.exportRows(total,filename);$('#reference-export-status').textContent='已导出基因匹配总表 · '+total.length+' 条记录';}catch{$('#reference-export-status').textContent='下载失败，请重试';}
+  };
   if(!source&&records.length){const note=document.createElement('p');note.className='caption';note.textContent='当前为历史报告的可用基因清单；重新生成分析可补全数据库匹配状态。';host.append(note);}
-  for(const row of rows){const key=JSON.stringify([row.sample,row.chain,row.group_id||row.reference_id]);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(row);}
+  for(const row of rows){const key=JSON.stringify([row.sample,row.chain,row.group_id||row.reference_id,row.primer||'',row.scenario_id||'']);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(row);}
   if(!rows.length){host.append(referenceEmpty(selection()?.length===0?'请选择要查看的样本':scoped.length?'暂无符合条件的基因':'暂无可用的参考基因清单',Boolean(query||status)));return;}
   const contexts=new Map();for(const records of groups.values()){const key=JSON.stringify([records[0].sample,records[0].chain]);contexts.set(key,(contexts.get(key)||0)+1);}const positions=new Map();
   for(const records of groups.values()){
    const context=JSON.stringify([records[0].sample,records[0].chain]),position=(positions.get(context)||0)+1;positions.set(context,position);
-   const section=document.createElement('section'),heading=document.createElement('h3'),grid=document.createElement('div');section.className='reference-group';grid.className='reference-grid'+($('#segment').value?' single-segment':'');heading.textContent=[records[0].sample,records[0].chain,primer?$('#primer').value:'',contexts.get(context)>1?'结果 '+position:''].filter(Boolean).join(' / ');section.append(heading);
+   const section=document.createElement('section'),heading=document.createElement('h3'),grid=document.createElement('div');section.className='reference-group';grid.className='reference-grid'+($('#segment').value?' single-segment':'');heading.textContent=[records[0].sample,records[0].chain,primer?records[0].primer:'',records[0].primer_group?records[0].primer_group+'（存疑）':'',contexts.get(context)>1?'结果 '+position:''].filter(Boolean).join(' / ');section.append(heading);
    for(const segment of ['V','J','C']){
     if($('#segment').value&&$('#segment').value!==segment)continue;
     const genes=new Map();for(const row of records.filter(r=>r.segment===segment)){if(!genes.has(row.gene))genes.set(row.gene,row);}
     const ordered=[...genes.values()].sort((a,b)=>geneFamily(a.gene,segment).localeCompare(geneFamily(b.gene,segment),'en',{numeric:true})||a.gene.localeCompare(b.gene,'en',{numeric:true}));
-    const key=JSON.stringify([records[0].sample,records[0].chain,records[0].group_id||records[0].reference_id,primer?$('#primer').value:'',segment]);
+    const key=JSON.stringify([records[0].sample,records[0].chain,records[0].group_id||records[0].reference_id,records[0].primer||'',records[0].scenario_id||'',segment]);
     const page=Math.max(0,Math.min(state.referencePages[key]||0,Math.ceil(ordered.length/pageSize)-1));state.referencePages[key]=page;
     const card=document.createElement('section'),title=document.createElement('h4');card.className='reference-card';title.textContent=({V:'V · 可变区',J:'J · 连接区',C:'C · 恒定区'})[segment];
     if(!ordered.length){const known=scoped.some(r=>r.sample===records[0].sample&&r.chain===records[0].chain&&(r.group_id||r.reference_id)===(records[0].group_id||records[0].reference_id)&&r.segment===segment);card.append(title,referenceEmpty(known?'暂无符合条件的 '+segment+' 基因':'暂无 '+segment+' 区参考基因',known&&Boolean(query||status)));grid.append(card);continue;}
@@ -298,7 +367,19 @@
  $('#return-filters').onclick=()=>{locate($('#view-title'));$('#view-title').focus({preventScroll:true});};
  document.addEventListener('keydown',event=>{const list=event.target.closest('[role=tablist]');if(!list||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;const buttons=Array.from(list.querySelectorAll('[role=tab]')).filter(b=>!b.disabled),index=buttons.indexOf(event.target);if(index<0)return;event.preventDefault();const next=buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length];next.focus({preventScroll:true});next.click();const box=next.getBoundingClientRect(),area=list.getBoundingClientRect();if(box.left<area.left)list.scrollLeft-=area.left-box.left;if(box.right>area.right)list.scrollLeft+=box.right-area.right;});
  $('#theme').onclick=()=>{document.documentElement.classList.toggle('dark');figures();};
+ $('#share-html').onclick=()=>{
+   const copy=document.documentElement.cloneNode(true),picker=copy.querySelector('#sample-picker');
+   if(picker){const label=document.createElement('label'),select=picker.querySelector('#sample');label.textContent='样本';select.hidden=false;select.disabled=false;label.append(select);picker.replaceWith(label);}
+   copy.querySelector('#gallery').replaceChildren();copy.querySelector('#figure-dialog-content').replaceChildren();copy.querySelector('#figure-dialog').removeAttribute('open');copy.classList.remove('figure-open');
+   copy.querySelectorAll('[data-search-for],.interactive-chart,.chart-legend,.overflow-hint').forEach(node=>node.remove());
+   const name=String(data.task_name||'SCIGBLAST').replace(/[\\/:*?"<>|]+/g,'_')+'__'+(data.report_id||'report')+'.html';
+   ReportCharts.download(new Blob(['<!doctype html>\n'+copy.outerHTML],{type:'text/html;charset=utf-8'}),name);
+ };
+ const sampleScroll=$('#sample-info .table-wrap');let drag=null;
+ sampleScroll.addEventListener('pointerdown',event=>{if(event.pointerType!=='mouse'||event.button!==0||event.altKey||event.target.closest('button,a,input,select'))return;const box=sampleScroll.getBoundingClientRect();if(event.clientX>=box.left+sampleScroll.clientWidth||event.clientY>=box.top+sampleScroll.clientHeight)return;drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:sampleScroll.scrollLeft,top:sampleScroll.scrollTop,active:false};sampleScroll.setPointerCapture(event.pointerId);});
+ sampleScroll.addEventListener('pointermove',event=>{if(!drag||drag.id!==event.pointerId)return;const dx=event.clientX-drag.x,dy=event.clientY-drag.y;if(!drag.active&&Math.hypot(dx,dy)<5)return;if(!drag.active){drag.active=true;sampleScroll.classList.add('is-dragging');const selection=window.getSelection();if(selection?.anchorNode&&sampleScroll.contains(selection.anchorNode))selection.removeAllRanges();}event.preventDefault();sampleScroll.scrollLeft=drag.left-dx;sampleScroll.scrollTop=drag.top-dy;});
+ const stopDrag=()=>{drag=null;sampleScroll.classList.remove('is-dragging');};sampleScroll.addEventListener('pointerup',stopDrag);sampleScroll.addEventListener('pointercancel',stopDrag);sampleScroll.addEventListener('lostpointercapture',stopDrag);
  window.addEventListener('pagehide',()=>ReportCharts.dispose());
- $('#sample-info details').open=!window.matchMedia('(max-width:680px)').matches;
+ $('#sample-info details').open=true;
  primers();render();
 })();
