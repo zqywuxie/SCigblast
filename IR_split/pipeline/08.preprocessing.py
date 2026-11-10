@@ -14,7 +14,6 @@ import gc
 import gzip
 import hashlib
 import json
-import multiprocessing as mp
 import os
 import re
 import shutil
@@ -233,13 +232,21 @@ def filter_and_count(frame: pd.DataFrame, *, sample_id: str, representative_inde
 
 
 def calculate_shm_result_budgeted(frame: pd.DataFrame, workers: int) -> pd.DataFrame:
-    workers = max(1, int(workers))
-    original = mp.cpu_count
-    mp.cpu_count = lambda: workers + 1  # type: ignore[assignment]
-    try:
-        return calculate_shm_result(frame)
-    finally:
-        mp.cpu_count = original  # type: ignore[assignment]
+    return calculate_shm_result(frame, workers=max(1, int(workers)), progress=shm_progress)
+
+
+def preprocessing_event(sample, phase, completed=None, total=None, error=''):
+    if os.environ.get('SCIGBLAST_BASE_PREPROCESSING_PROGRESS') != '1':
+        return
+    from scigblast.progress import preprocessing_event as record
+    record(sample, phase, completed, total, error)
+
+
+def shm_progress(completed, total):
+    preprocessing_event(CURRENT_SAMPLE, 'shm', completed, total)
+
+
+CURRENT_SAMPLE = ''
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -312,7 +319,16 @@ def available_memory_gb() -> float | None:
 
 def memory_ok() -> tuple[bool, float | None]:
     value = available_memory_gb()
-    return value is None or value >= MIN_AVAILABLE_GB, value
+    if INPUT_LAYOUT == 'chains':
+        from mapping.pipeline.resources import detect_resources
+        available = detect_resources()['memory_available_bytes']
+        if available is not None:
+            container_available = available / 1024 ** 3
+            value = container_available if value is None else min(value, container_available)
+    required = MIN_AVAILABLE_GB
+    if INPUT_LAYOUT == 'chains':
+        required += float(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_SAMPLE_MEMORY_GB', '32'))
+    return value is None or value >= required, value
 
 
 def atomic_json(payload: dict, destination: Path) -> None:
@@ -577,13 +593,17 @@ def compute_sample(items: dict[str, tuple[dict[str, str], pd.DataFrame]], sample
     if bcr and not bcr[1].empty:
         extra: list[pd.DataFrame] = [base]
         for label, function in (("isotype", calculate_isotype_ratio), ("CSR", calculate_csr), ("SHM", calculate_shm_result), ("B-cell diversity", calculate_diversity_Bcell)):
+            started = time.monotonic()
             try:
+                preprocessing_event(sample, 'shm' if label == 'SHM' else 'metrics', 0, len(bcr[1]))
                 if label == "SHM":
                     extra.append(calculate_shm_result_budgeted(bcr[1], min(SHM_WORKERS, PROCESS_BUDGET)))
                 else:
                     extra.append(function(bcr[1]))
             except Exception as exc:
                 errors.append(f"{label}: {type(exc).__name__}: {exc}")
+            finally:
+                print(f'[preprocessing timing] sample={sample} metric={label} seconds={time.monotonic()-started:.3f}', flush=True)
         return combine_metrics(extra, sample, batch), errors
     return base, errors
 
@@ -678,6 +698,7 @@ def save_checkpoint(key: tuple[str, str], tasks: list[dict[str, str]], fingerpri
 
 
 def main() -> int:
+    global CURRENT_SAMPLE
     try:
         tasks = discover_inputs(INPUT_DIRS)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -698,14 +719,18 @@ def main() -> int:
     manifest_rows: list[dict] = []
     failed = False
     group_items = list(groups.items())
+    for key, _ in group_items:
+        preprocessing_event(sample_and_batch(key)[0], 'queued')
     try:
         for start in range(0, len(group_items), SAMPLES_PER_WINDOW):
             window = group_items[start:start + SAMPLES_PER_WINDOW]
             for offset, (key, sample_tasks) in enumerate(window, 1):
                 sample, batch = sample_and_batch(key)
+                CURRENT_SAMPLE = sample
                 sample_umi_mode = umi_modes.get(key[0], umi_mode)
                 checkpoint = load_checkpoint(key, sample_tasks, fingerprint)
                 if checkpoint is not None:
+                    preprocessing_event(sample, 'cached')
                     result, manifest = checkpoint
                     manifest_rows.append(manifest)
                     if not result.empty:
@@ -720,10 +745,13 @@ def main() -> int:
                     print(f"[IR preprocessing] memory_paused sample={sample} available={available:.1f}GB", file=sys.stderr, flush=True)
                     break
                 print(f"[IR preprocessing] read sample={sample} files={len(sample_tasks)}", flush=True)
+                preprocessing_event(sample, 'reading', 0, 0)
                 items, errors, sample_stats = read_sample(sample_tasks, umi_indexes.get(key[0]), umi_modes.get(key[0], "row_contract"))
+                preprocessing_event(sample, 'metrics')
                 result, model_errors = compute_sample(items, sample, batch)
                 errors.extend(model_errors)
                 try:
+                    preprocessing_event(sample, 'writing')
                     write_junctions(items, OUTPUT_DIR, labels)
                 except Exception as exc:
                     errors.append(f"junction output: {type(exc).__name__}: {exc}")
@@ -736,7 +764,9 @@ def main() -> int:
                     metrics_rows.append(result)
                 if manifest["status"] in {"OK", "EMPTY"}:
                     save_checkpoint(key, sample_tasks, fingerprint, result, manifest, manifest["status"])
+                    preprocessing_event(sample, 'ready')
                 else:
+                    preprocessing_event(sample, 'failed', error=manifest['error'])
                     failed = True
                 print(f"[IR preprocessing] sample={start + offset}/{len(group_items)} sample={sample} batch={batch} receptors={manifest['available_receptors'] or '-'} status={manifest['status']}", flush=True)
                 for error in errors:

@@ -14,7 +14,7 @@ def sample_sort_key(sample, chain):
 
 def sample_rows(samples, catalog=None):
     """One shared sample-information contract for XLSX, Web and offline HTML."""
-    assignments=(catalog or {}).get('assignments',{})
+    from .catalog import assigned_primers
     categories={'IGH':'Heavy','IGK':'Light','IGL':'Light',**{c:'TCR' for c in ('TRA','TRB','TRD','TRG')}}
     result=[]
     pairs={(r['sample'],r['chain']) for r in samples}
@@ -23,7 +23,7 @@ def sample_rows(samples, catalog=None):
         key=sample_sort_key(sample,chain)
         anchors[sample]=min(anchors.get(sample,key),key)
     for sample,chain in sorted(pairs,key=lambda item:(anchors[item[0]],sample_sort_key(*item))):
-        primers=assignments.get(sample,[])
+        primers=assigned_primers(catalog,sample,chain)
         groups=sorted({str(p['group']).strip() for p in primers if p.get('group') and str(p['group']).strip()})
         result.append(dict(category=categories.get(chain,'—'),sample=sample,chain=chain,
             primer_groups='、'.join(groups) if groups else '未提供组名' if primers else '未配置'))

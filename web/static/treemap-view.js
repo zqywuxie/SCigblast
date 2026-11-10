@@ -4,7 +4,7 @@ window.TreemapView = (() => {
   const labels = {PENDING:'等待生成',QUEUED:'等待生成',RUNNING:'正在生成',SUCCEEDED:'已完成',PARTIAL:'部分完成',FAILED:'生成失败',INTERRUPTED:'已中断',CANCELLED:'已取消',CANCELED:'已取消',CANCELLING:'正在取消',CANCELING:'正在取消',EMPTY:'无有效记录',STALE:'来源已更新',ARCHIVED:'已归档',SKIPPED:'已跳过'};
   const state = run => String(run.status||'').toUpperCase();
   const active = run => ['PENDING','QUEUED','RUNNING','CANCELLING','CANCELING'].includes(state(run));
-  const status = run => `<span class="tm-status" data-state="${esc(state(run))}">${esc(labels[state(run)] || run.status || '未知状态')}</span>`;
+  const status = run => `<span class="tm-status" data-state="${esc(run.waiting_resources?'QUEUED':state(run))}">${esc(run.waiting_resources?'等待绘图资源':labels[state(run)] || run.status || '未知状态')}</span>`;
   const date = value => { if(!value)return '—';const d=new Date(value);return Number.isNaN(d.getTime())?'—':d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); };
   const url = (run, file, download=false) => `/api/treemap/runs/${encodeURIComponent(run.id)}/files/${encodeURIComponent(file.id)}${download?'?download=1':''}`;
   const IMAGE_PAGE_SIZE = 7;
@@ -66,7 +66,7 @@ window.TreemapView = (() => {
       replace(metaNode,`${embedded&&run.name&&run.name!==parentLabel?`<span>${esc(run.name)}</span>`:''}${status(run)}${total&&!active(run)?`<span>已处理 ${done} / ${total} 项</span>`:''}<span>创建于 ${esc(date(run.created_at))}</span>${run.parent_job_id&&!embedded?`<a href="/jobs/${encodeURIComponent(run.parent_job_id)}#treemap">来源任务 ↗</a>`:''}`);
       $('[data-progress]').hidden=!total||!active(run);
       $('[data-progress] progress').max=Math.max(total,1);$('[data-progress] progress').value=Math.min(done,total);
-      $('[data-progress] span').textContent=`已处理 ${done} / ${total} 项`;
+      $('[data-progress] span').textContent=run.waiting_resources?`已处理 ${done} / ${total} 项 · 等待资源或下一批次调度`:`已处理 ${done} / ${total} 项`;
       $('[data-note]').textContent='按有效记录数展示克隆占比，不按 copy 或 UMI count 加权。合图的链区采用固定排版，不表示链间丰度。';
       $('[data-error]').textContent=run.error||'';
       const actions=active(run)&&!['CANCELLING','CANCELING'].includes(run.status)?['cancel']:['FAILED','PARTIAL','EMPTY','INTERRUPTED','CANCELLED','CANCELED'].includes(run.status)?['retry']:[];
@@ -103,7 +103,7 @@ window.TreemapView = (() => {
         const runs=data.runs||[];
         const archived=['ARCHIVED','ARCHIVING'].includes(context.status),running=runs.some(active);
         const current=runs.find(run=>run.attempt_no===context.attempt_no&&!['stale','archived'].includes(String(run.status).toLowerCase()));
-        const history=runs.filter(run=>run.id!==current?.id),signature=JSON.stringify(history.map(run=>[run.id,run.name,run.status,run.created_at]));
+        const history=runs.filter(run=>run.id!==current?.id),signature=JSON.stringify(history.map(run=>[run.id,run.name,run.status,run.created_at,run.waiting_resources]));
         if(signature!==lastSignature){lastSignature=signature;$('[data-tm-job-runs]').innerHTML=history.slice(0,6).map(run=>`<a href="/treemap?run=${encodeURIComponent(run.id)}"><strong>${esc(run.name||'克隆树图')}</strong>${status(run)}<span>${esc(date(run.created_at))}</span><span aria-hidden="true">↗</span></a>`).join('');}
         $('[data-tm-history]').hidden=archived||runs.length<2;
         $('[data-tm-history] summary').textContent=`其他生成记录 · ${history.length}`;
@@ -114,7 +114,7 @@ window.TreemapView = (() => {
         const container=$('[data-tm-job-preview]');
         if(container){
           container.hidden=!current||archived;
-          const nextPreview=JSON.stringify(current?[current.id,current.status,current.progress]:null);
+          const nextPreview=JSON.stringify(current?[current.id,current.status,current.progress,current.waiting_resources]:null);
           if(current&&!archived&&(force||nextPreview!==previewSignature)){
             const detail=await Submission.api(`/api/treemap/runs/${encodeURIComponent(current.id)}`);
             if(token!==generation||attempt!==context.attempt_no||document.hidden||!root.getClientRects().length)return;

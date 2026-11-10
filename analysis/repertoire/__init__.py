@@ -1,5 +1,5 @@
 """Versioned QC and primer analyses for existing and newly generated AIRR results."""
-VERSION = 'repertoire-evidence-v28-suspected-primer-scenarios'
+VERSION = 'repertoire-evidence-v29-raw-primer-precheck'
 FIGURE_VERSION = 'repertoire-figures-v41-multichain-isotype-colors'
 
 TABLE_PATHS = {

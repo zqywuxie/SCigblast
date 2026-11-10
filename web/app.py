@@ -462,7 +462,7 @@ class CreateJob(BaseModel):
     mapping_chains: list[str] = []
     mapping_samples: list[str] | None = None
     generate_treemap: bool = False
-    generate_report: bool = True
+    generate_report: bool = False
     primer_analysis: dict | None = None
     trace_mode: str = 'mapping'
 
@@ -2097,6 +2097,7 @@ def get_job(job_id: str) -> dict[str, Any]:
     token = execution_metadata(row).get('process_token', '')
     if re.fullmatch(r'[0-9a-f]{32}', token):
         detail['igblast_progress'] = pipeline_progress.read_progress(STATE_ROOT / 'jobs' / job_id / f'progress-{token}.sqlite3')
+        detail['preprocessing_progress'] = pipeline_progress.read_preprocessing_progress(STATE_ROOT / 'jobs' / job_id / f'progress-{token}.sqlite3')
     detail['input_assignments'] = options.get('input_assignments', [])
     return {"job": detail, "options": options, "actions": actions_for(job_id),
             "match_summary": files, "match_summary_signature": summary_file_signature(files)}

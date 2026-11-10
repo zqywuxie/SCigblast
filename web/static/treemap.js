@@ -106,7 +106,7 @@
   };
   function renderRuns(){
     runPage=Math.max(0,Math.min(runPage,Math.ceil(runs.length/8)-1));const visible=runs.slice(runPage*8,runPage*8+8);
-    const signature=JSON.stringify([visible.map(run=>[run.id,run.name,run.status,run.created_at]),currentId]);
+    const signature=JSON.stringify([visible.map(run=>[run.id,run.name,run.status,run.created_at,run.waiting_resources]),currentId]);
     if(signature!==runListSignature){const focused=$('#tm-runs').contains(document.activeElement)?document.activeElement.dataset.run:null;runListSignature=signature;$('#tm-runs').innerHTML=visible.map(run=>`<button class="tm-run-choice" data-run="${esc(run.id)}" aria-current="${run.id===currentId}"><strong>${esc(run.name||'克隆树图')}</strong>${status(run)}<small>${esc(date(run.created_at))}</small></button>`).join('')||'<div class="tm-empty"><strong>暂无生成记录</strong><span>完成上方两步后，结果将显示在这里。</span></div>';if(focused)([...$('#tm-runs').querySelectorAll('[data-run]')].find(node=>node.dataset.run===focused)||$('#tm-refresh')).focus({preventScroll:true});}
     $('#tm-runs-page').textContent=`${runPage+1} / ${Math.max(1,Math.ceil(runs.length/8))}`;$('#tm-runs-prev').disabled=runPage===0;$('#tm-runs-next').disabled=(runPage+1)*8>=runs.length;
   }

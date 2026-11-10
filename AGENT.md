@@ -56,6 +56,8 @@ SMTP 凭据仅保存在服务器私有设置，不回显、不写日志/任务�
 - Pig/Base 的组成以已发布且回执一致的 06 junction_peps 为依据。Expression 累加 copy/umi_counts，不能声称是真实 UMI 分子计数；缺 06 时不假装有后处理组成。
 - V/J/C 分别用可明确分类到该区基因的数据作组成分母；Unique CDR3 按基因内有效 AA 去重，跨基因分别计数，不混用全局 distinct。Isotype 主类合并后重新去重，以可分类 C 数据为分母。零分母为 N/A，不伪造 0。
 - 引物匹配率和 Mapping rate 逐 read 计算。低于阈值时的其他组测试及存疑分析独立保存，不自动替换原组，不重新 mapping。
+- 新报告的引物匹配统计只读取最初始 Raw R1（_j），分母为样本全部原始 reads，使用 `primer_metrics.build_raw`。MIX 总览以各链引物并集匹配并去重共享来源，分链比例也以样本 Raw 为分母。新报告标记 `primer_matching_source=raw_R1`，Mapping rate 与存疑组的后续 Mapping 关联分析待补充；历史报告保留原统计范围。
+- Web 手动报告配置引物时，先运行 `primer_check`，核对后再提交完整报告。预检查复用报告队列、资源锁和属主校验，输出位于 `analysis/primer_checks/`。确认绑定样本、链、引物配置、代码和 Raw 来源版本，变更后重查；完整报告复用已校验的 Raw 统计。预检查私有回执不进入下载清单。
 - Total Reads 使用 Merged；Total Receptor RNA 使用 AIRR 后处理总 copy/umi_counts；Total Unique CDR3s 使用对应范围的唯一有效 CDR3。Raw R1/R2、Clean R1/R2 分别取真实计数，不对半拆总数。
 - 多样性读取对应 06 Datapoint，B cell 指标使用可追溯的后处理数据，不为 UI 修改统计值。
 - 仅更新 HTML 时使用 `python -m analysis.repertoire.export_html`，读取已完成公共表和 PNG；不要调用全量 `run` 重扫 reads。新数据/引物/规则变化仍需重新统计；不能只改分母文案冒充新规则。

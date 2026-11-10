@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlite3
 
 from .aggregate import calls
-from .catalog import Matcher
+from .catalog import Matcher, assigned_primers
 from .io import canonical_header, digest, safe_file, sequences, table, version
 from .batch import tune
 
@@ -80,6 +80,82 @@ def archived_raw(marker, meta, root):
     finally:conn.close()
 
 
+def build_raw(items, root, output=None, catalog=None, *, allowed_roots=(), progress=None):
+    """Match original R1 once per sample/source, independently of annotations."""
+    if not catalog:
+        return dict(rows=[], matching=[], chain_matching=[], availability=[], sources=[])
+    totals, counts, unique = Counter(), Counter(), Counter()
+    sample_totals, sample_counts = Counter(), Counter()
+    availability, receipts, sources = [], {}, {}
+    scopes = {}
+    for item in items:
+        meta = json.loads(Path(item['trace']).read_text(encoding='utf-8')) if item.get('trace') else {}
+        path, evidence = raw_source(item, root, meta, allowed_roots)
+        archived = False
+        if path is None and (meta.get('upstream') or {}).get('sources', {}).get('raw_R1'):
+            folder = Path(item['trace']).parent
+            for name, expected in meta['upstream']['files'].items():
+                checked = safe_file(folder/name, root)
+                if version(checked) != expected:
+                    raise ValueError('原始 R1 归档已变化')
+                receipts[str(checked)] = expected
+            path = safe_file(folder/meta['upstream']['archive'], root)
+            archived, evidence = True, 'archived_raw_source'
+        if path is None:
+            availability.append(dict(sample=item['sample_label'],chain=item['chain'],stage='raw_R1',status=evidence))
+            continue
+        key = (item['sample_label'], str(path.resolve()), archived)
+        entry = sources.setdefault(key, dict(path=path, meta=meta, item=item, chains=set(), evidence=evidence))
+        entry['chains'].add(item['chain'])
+        receipts[str(path)] = version(path)
+    for number, ((sample, _, archived), source) in enumerate(sources.items(), 1):
+        matcher = Matcher(assigned_primers(catalog, sample))
+        allowed = {chain:{p['name'] for p in assigned_primers(catalog, sample, chain)} for chain in source['chains']}
+        for chain in allowed:
+            scopes.setdefault((sample,chain),set()).add(source['evidence'])
+            totals.setdefault((sample,chain),0)
+            availability.append(dict(sample=sample,chain=chain,stage='raw_R1',status=source['evidence']))
+        sample_totals.setdefault(sample,0)
+        incoming = archived_raw(Path(source['item']['trace']), source['meta'], root) if archived else sequences(source['path'])
+        for ordinal, (_, sequence) in enumerate(incoming, 1):
+            category, names = match(sequence, matcher, catalog['config']) if sequence else ('sequence_unavailable', [])
+            sample_totals[sample] += 1
+            sample_counts[(sample,category)] += 1
+            for chain, primers in allowed.items():
+                selected = sorted(set(names) & primers)
+                state = category
+                if category in {'unique','multiple','unmatched'}:
+                    state = 'unique' if len(selected)==1 else 'multiple' if selected else 'unmatched'
+                totals[(sample,chain)] += 1
+                counts[(sample,chain,state)] += 1
+                if state == 'unique':
+                    unique[(sample,chain,selected[0])] += 1
+            if progress and ordinal % 20000 == 0:
+                progress(number-1,len(sources),f'{sample} · Raw R1 primer matching {ordinal:,}')
+        if progress:
+            progress(number,len(sources),f'{sample} · Raw R1 primer matching complete')
+    if any(version(path) != expected for path, expected in receipts.items()):
+        raise ValueError('原始 R1 在统计期间发生变化')
+    rows, matching, chain_matching = [], [], []
+    for (sample,chain), total in sorted(totals.items()):
+        for primer in sorted(assigned_primers(catalog,sample,chain),key=lambda p:(-unique[(sample,chain,p['name'])],p['name'])):
+            count = unique[(sample,chain,primer['name'])]
+            rows.append(dict(sample=sample,chain=chain,stage='raw_R1',primer=primer['name'],matched_reads=count,
+                total_reads=total,match_percent=100*count/total if total else None,evidence='|'.join(sorted(scopes[(sample,chain)]))))
+        for category in ('unique','multiple','unmatched'):
+            count = counts[(sample,chain,category)]
+            chain_matching.append(dict(sample=sample,chain=chain,stage='raw_R1',unit='reads',match_class=category,
+                count=count,denominator=total,percent=100*count/total if total else None))
+    for sample, total in sorted(sample_totals.items()):
+        unassessed = total - sum(sample_counts[(sample,c)] for c in ('unique','multiple','unmatched'))
+        for category in ('unique','multiple','unmatched'):
+            count = sample_counts[(sample,category)]
+            matching.append(dict(sample=sample,stage='raw_R1',unit='reads',match_class=category,
+                count=count,denominator=total,percent=100*count/total if total else None,unassessed_count=unassessed))
+    return dict(rows=rows,matching=matching,chain_matching=chain_matching,availability=availability,
+                sources=[dict(path=path,version=expected) for path,expected in sorted(receipts.items())])
+
+
 def build(items, root, output, catalog, *, allowed_roots=(), progress=None):
     if not catalog:
         return dict(rows=[], matching=[], availability=[])
@@ -131,7 +207,7 @@ def build(items, root, output, catalog, *, allowed_roots=(), progress=None):
                 names = json.loads(row['primers'])
                 self_key = (sample,chain,'mapping')
                 totals[self_key] += 1
-                stage_keys.append((sample,'mapping',row['matching_source'],row['matching_ordinal'],row['match_class']))
+                stage_keys.append((sample,'mapping',row['matching_source'],row['matching_ordinal'],row['sample_match_class']))
                 primer = names[0] if row['match_class']=='unique' else '[Multiple]' if row['match_class']=='multiple' else '[Unmatched]' if row['match_class']=='unmatched' else '[Unassessed]'
                 key = self_key+(primer,)
                 counts[key+('matched',)] += 1
@@ -202,21 +278,25 @@ def build(items, root, output, catalog, *, allowed_roots=(), progress=None):
                 LEFT JOIN annotations.annotations a ON a.ordinal=ac.ordinal
                 WHERE r.source=? ORDER BY r.ordinal'''
             totals.setdefault((sample,chain,'raw_R1'),0)
+            allowed = {p['name'] for p in assigned_primers(catalog,sample,chain)}
             for row in conn.execute(sql,(cache_key,)):
                 verified = row['rn']==1 and row['qn']<=1 and (row['qn']==0 or row['an']==1)
                 mapped = bool(verified and (row['locus'] or '').strip().upper()==chain and calls(row['v_call']))
                 retained = bool(verified and row['filter_reason']=='retained')
-                names = json.loads(row['primers'])
+                names = sorted(set(json.loads(row['primers'])) & allowed)
+                category = row['match_class']
+                if category in {'unique','multiple','unmatched'}:
+                    category = 'unique' if len(names)==1 else 'multiple' if names else 'unmatched'
                 self_key = (sample,chain,'raw_R1')
                 totals[self_key] += 1
                 stage_keys.append((sample,'raw_R1',source,row['ordinal'],row['match_class']))
-                primer = names[0] if row['match_class']=='unique' else '[Multiple]' if row['match_class']=='multiple' else '[Unmatched]' if row['match_class']=='unmatched' else '[Unassessed]'
+                primer = names[0] if category=='unique' else '[Multiple]' if category=='multiple' else '[Unmatched]' if category=='unmatched' else '[Unassessed]'
                 key = self_key+(primer,)
                 counts[key+('matched',)] += 1
                 counts[key+('mapped',)] += int(mapped)
                 counts[key+('unverified',)] += int(not verified)
                 counts[key+('retained',)] += int(retained)
-                links.append((item['sample_key'],chain,'raw_R1',cache_key,row['ordinal'],row['mapping_id'] if verified else None,row['match_class'],row['primers'],int(mapped) if verified else None,int(retained),'verified' if verified else 'ambiguous_lineage'))
+                links.append((item['sample_key'],chain,'raw_R1',cache_key,row['ordinal'],row['mapping_id'] if verified else None,category,json.dumps(names,ensure_ascii=False),int(mapped) if verified else None,int(retained),'verified' if verified else 'ambiguous_lineage'))
                 if len(links)>=10000:flush()
             flush()
             conn.commit()
@@ -225,7 +305,7 @@ def build(items, root, output, catalog, *, allowed_roots=(), progress=None):
             scope_evidence.setdefault((sample,chain,'raw_R1'),set()).add(raw_evidence)
         for (sample,chain,stage), total in sorted(totals.items()):
             primers = {key[3] for key in counts if key[:3]==(sample,chain,stage)}
-            primers.update(p['name'] for p in catalog['assignments'][sample])
+            primers.update(p['name'] for p in assigned_primers(catalog,sample,chain))
             for primer in sorted(primers):
                 key=(sample,chain,stage,primer)
                 matched,mapped,unknown,retained=(counts[key+(metric,)] for metric in ('matched','mapped','unverified','retained'))

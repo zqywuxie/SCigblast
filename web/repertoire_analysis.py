@@ -76,6 +76,7 @@ class Create(BaseModel):
     selected_ids:list[str]=Field(min_length=1,max_length=10000)
     config:dict=Field(default_factory=dict)
     comparison_species:str=''
+    primer_check_id:str=Field(default='',max_length=64)
 
 
 class Service:
@@ -161,14 +162,15 @@ class Service:
             plan=conn.execute('SELECT config_json FROM report_plans WHERE job_id=?',(row['id'],)).fetchone()
         config=json.loads(plan['config_json']) if plan else options.get('primer_analysis') or {}
         if not config or not config.get('columns',{}).get('trim_before_mapping',True):return None
-        from analysis.repertoire.catalog import build_catalog
+        from analysis.repertoire.catalog import build_catalog,chains_by_sample
         from analysis.repertoire.io import safe_file,table,write_json,digest
         from scigblast.primer import frozen_payload
         import hashlib
         manifest=safe_file(Path(row['output_root'])/'01.match'/row['dataset']/'sample_manifest.csv',row['output_root'])
-        samples=sorted({record['sample_id'] for record in table(manifest) if record.get('status')=='OK'})
+        scope=chains_by_sample([record for record in table(manifest) if record.get('status')=='OK'])
+        samples=sorted(scope)
         if not samples:raise ValueError('没有可用于引物归属的已确认样本')
-        catalog=build_catalog(config['submission_path'],config['primer_path'],config['columns'],samples)
+        catalog=build_catalog(config.get('submission_path'),config['primer_path'],config['columns'],samples,scope)
         payload=frozen_payload(catalog)
         path=Path(destination)/('primer-mapping-'+digest(payload)[:20]+'.json')
         if not path.exists():write_json(path,payload)
@@ -191,8 +193,20 @@ class Service:
             return {}
         if len(json.dumps(body))>100000:
             raise HTTPException(400,'配置过大')
-        return dict(submission_path=self.upload_path(body.get('submission_id')),
+        if not body.get('primer_id'):
+            raise HTTPException(400,'请上传引物表')
+        return dict(submission_path=self.upload_path(body['submission_id']) if body.get('submission_id') else None,
             primer_path=self.upload_path(body.get('primer_id')),columns=dict(body.get('columns',{}),observation_stage='mapping'))
+
+    def sample_chains(self,row):
+        from analysis.repertoire.catalog import chains_by_sample
+        from analysis.repertoire.io import safe_file,table
+        manifest=Path(row['output_root'])/'01.match'/row['dataset']/'sample_manifest.csv'
+        if manifest.is_file():
+            records=[r for r in table(safe_file(manifest,row['output_root'])) if r.get('status')=='OK']
+        else:
+            records=json.loads(row['options_json']).get('input_assignments',[])
+        return chains_by_sample(records)
 
     def scan(self,body):
         from analysis.repertoire.sources import discover
@@ -223,7 +237,7 @@ class Service:
         return json.loads(row['data_json'])
 
     def preview(self,body):
-        from analysis.repertoire.catalog import build_catalog
+        from analysis.repertoire.catalog import build_catalog,chains_by_sample
         data=self.scan_data(body.scan_id)
         items=[row for row in data['items'] if row['id'] in set(body.selected_ids)]
         if len(items)!=len(set(body.selected_ids)):
@@ -232,11 +246,12 @@ class Service:
         if not config:
             return dict(assignments={},samples=sorted({row['sample_label'] for row in items}))
         try:
-            return build_catalog(config['submission_path'],config['primer_path'],config['columns'],sorted({row['sample_label'] for row in items}))
+            scope=chains_by_sample(items)
+            return build_catalog(config.get('submission_path'),config['primer_path'],config['columns'],sorted(scope),scope)
         except (OSError,ValueError,KeyError) as error:
             raise HTTPException(400,str(error)) from None
 
-    def create(self,body):
+    def create(self,body,*,primer_only=False):
         from analysis.repertoire.io import digest
         from analysis.repertoire.sources import verify
         data=self.scan_data(body.scan_id)
@@ -244,22 +259,51 @@ class Service:
         items=[row for row in data['items'] if row['id'] in selected]
         if len(items)!=len(selected):
             raise HTTPException(400,'所选结果不可用')
-        self.preview(body)
+        catalog=self.preview(body)
         config=self.config(body.config)
+        if primer_only and not config:
+            raise HTTPException(400,'请先上传引物表并完成引物分配')
         try:verify(items,data['input_root'])
         except (OSError,ValueError) as error:raise HTTPException(409,str(error)) from None
         user=auth.require_user()
         parent=self.app.TREEMAP.owned_job(data['parent_job_id']) if data['parent_job_id'] else None
+        allowed_roots=[str(p) for p in self.app.configured_roots('SCIGBLAST_ALLOWED_INPUT_ROOTS','/colddata/SCigblast/data')]
+        checked=None
+        check_folder=None
+        if config and not primer_only:
+            if not body.primer_check_id:
+                raise HTTPException(409,'请先运行引物匹配预检查，并核对结果')
+            check=self.owned(body.primer_check_id)
+            if check['status']!='succeeded' or json.loads(check['source_json']).get('analysis_kind')!='primer_check':
+                raise HTTPException(409,'引物预检查尚未完成')
+            if check['parent_job_id']!=data['parent_job_id'] or check['attempt_no']!=data['attempt_no']:
+                raise HTTPException(409,'引物预检查与当前来源任务不一致')
+            from analysis.repertoire.primer_check import load as load_check
+            try:
+                checked=load_check(check['output_root'],data['input_root'],items,catalog,allowed_roots)
+            except (OSError,ValueError,KeyError) as error:
+                raise HTTPException(409,str(error)) from None
+            check_folder=check['output_root']
         from analysis.repertoire import VERSION,FIGURE_VERSION
         from analysis.repertoire.workbook import VERSION as WORKBOOK_VERSION
         comparison=None
-        if body.comparison_species:
+        if body.comparison_species and not primer_only:
             if body.comparison_species not in {'human','pig','cat','dog'}:raise HTTPException(400,'不支持该比较物种')
             comparison=dict(species=body.comparison_species,root=os.environ.get('SCIGBLAST_REFERENCE_ROOT','/opt/scigblast/igblast'))
-        key=digest(['report',VERSION,FIGURE_VERSION,WORKBOOK_VERSION,data['input_root'],items,config,data['attempt_no'],comparison])
+        if primer_only:
+            from analysis.repertoire.primer_check import fingerprint
+            try:key=fingerprint(data['input_root'],items,catalog,allowed_roots)
+            except (OSError,ValueError,KeyError) as error:raise HTTPException(409,str(error)) from None
+        else:
+            key=digest(['report',VERSION,FIGURE_VERSION,WORKBOOK_VERSION,data['input_root'],items,config,data['attempt_no'],comparison,
+                        checked['fingerprint'] if checked else None])
         run_id=uuid.uuid4().hex
-        base=Path(parent['output_root'])/'analysis'/'reports' if parent is not None else self.app.default_job_output(user,'reports').parent
+        category='primer_checks' if primer_only else 'reports'
+        base=Path(parent['output_root'])/'analysis'/category if parent is not None else self.app.default_job_output(user,category).parent
         folder=base/run_id[:12]
+        source=dict(input_root=data['input_root'],items=items,comparison_reference=comparison)
+        if primer_only:source['analysis_kind']='primer_check'
+        if check_folder:source['primer_check_root']=check_folder
         with self.app.PROCESS_LOCK,self.app.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if parent is not None:
@@ -268,12 +312,13 @@ class Service:
                     raise HTTPException(409,'来源任务已变化，请重新扫描')
             owner=parent['owner_id'] if parent is not None else user['id']
             conn.execute('INSERT OR IGNORE INTO report_runs(id,owner_id,parent_job_id,attempt_no,source_json,config_json,output_root,dedupe_key,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
-                (run_id,owner,data['parent_job_id'],data['attempt_no'],json.dumps(dict(input_root=data['input_root'],items=items,comparison_reference=comparison)),json.dumps(config),str(folder),key,self.app.now()))
+                (run_id,owner,data['parent_job_id'],data['attempt_no'],json.dumps(source),json.dumps(config),str(folder),key,self.app.now()))
             existing=conn.execute('SELECT id FROM report_runs WHERE owner_id=? AND dedupe_key=?',(owner,key)).fetchone()[0]
         return self.public(self.owned(existing))
 
     def public(self,row):
         result={k:row[k] for k in ('id','parent_job_id','attempt_no','status','created_at','started_at','ended_at','error')}
+        result['analysis_kind']=json.loads(row['source_json']).get('analysis_kind','report')
         result['archived']=False
         if row['parent_job_id']:
             with self.app.db() as conn:
@@ -472,8 +517,28 @@ def router(service):
     @router.post('/scan')
     def scan(body:Scan):return service.scan(body)
 
+    @router.post('/primer-options')
+    def primer_options(body:dict):
+        from analysis.repertoire.catalog import build_catalog
+        config=service.config(dict(body,submission_id=None))
+        if not config:return dict(groups=[],primers=[])
+        try:
+            catalog=build_catalog(None,config['primer_path'],config['columns'],[])
+            return dict(groups=sorted(catalog['groups']),primers=sorted({item['name'] for items in catalog['groups'].values() for item in items}))
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            raise HTTPException(400,str(error)) from None
+
+    @router.get('/plans/{job_id}/samples')
+    def plan_samples(job_id:str):
+        parent=service.app.TREEMAP.owned_job(job_id)
+        scope=service.sample_chains(parent)
+        return dict(samples=sorted(scope),items=[dict(sample=sample,chain=chain) for sample,chains in scope.items() for chain in chains])
+
     @router.post('/preview')
     def preview(body:Create):return service.preview(body)
+
+    @router.post('/primer-checks')
+    def primer_check(body:Create):return service.create(body,primer_only=True)
 
     @router.post('')
     def create(body:Create):return service.create(body)
@@ -485,7 +550,8 @@ def router(service):
         config=service.config(body)
         from analysis.repertoire.catalog import workbook
         if config:
-            for name in ('submission_path','primer_path'):workbook(config[name])
+            for name in ('submission_path','primer_path'):
+                if config.get(name):workbook(config[name])
             preview_plan(job_id,body)
         with service.app.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -502,20 +568,21 @@ def router(service):
         config=service.config(body)
         if not config:return dict(assignments={})
         try:
-            manifest=Path(parent['output_root'])/'01.match'/parent['dataset']/'sample_manifest.csv'
-            from analysis.repertoire.io import safe_file,table
-            if manifest.is_file():
-                samples=sorted({r['sample_id'] for r in table(safe_file(manifest,parent['output_root'])) if r.get('status')=='OK'})
-            else:
+            scope=service.sample_chains(parent)
+            if scope:
+                samples=sorted(scope)
+            elif config.get('submission_path'):
                 book=workbook(config['submission_path'],config['columns'].get('submission_sheet'))
                 index=column(config['columns'].get('sample_column','B'))
                 samples=sorted({value(book,r,index) for r in range(int(config['columns'].get('submission_header_row',1)),len(book['rows'])) if value(book,r,index)})
-            return build_catalog(config['submission_path'],config['primer_path'],config['columns'],samples)
+            else:
+                raise ValueError('请先完成 Match，再按样本和链分配引物')
+            return build_catalog(config.get('submission_path'),config['primer_path'],config['columns'],samples,scope)
         except (OSError,ValueError,KeyError) as error:raise HTTPException(400,str(error)) from None
 
     @router.get('')
     def runs(job_id:str=''):
-        user=auth.require_user();where=[];args=[]
+        user=auth.require_user();where=["COALESCE(json_extract(source_json,'$.analysis_kind'),'report')='report'"];args=[]
         if job_id:service.app.TREEMAP.owned_job(job_id);where.append('parent_job_id=?');args.append(job_id)
         if user['role']!='admin':where.append('owner_id=?');args.append(user['id'])
         with service.app.db() as conn:
@@ -684,6 +751,24 @@ def router(service):
         from analysis.repertoire.io import safe_file
         row=service.owned(run_id)
         data=service.summary(row,compact=True)
+        if data.get('analysis_kind')=='primer_check':
+            def check_content():
+                with service.read_lease(row):
+                    with service.artifact(row,'report.html').open('rb') as handle:
+                        while chunk:=handle.read(128*1024):yield chunk
+            incoming=check_content()
+            try:first=next(incoming)
+            except (OSError,ValueError,StopIteration) as error:
+                incoming.close()
+                raise HTTPException(409,'引物匹配报告不可用，请重新运行预检查') from error
+            def check_body():
+                try:
+                    yield first
+                    yield from incoming
+                finally:incoming.close()
+            headers=report_html.response_headers(download=download)
+            headers['Content-Disposition']=('attachment' if download else 'inline')+'; filename="primer_matching_report.html"'
+            return StreamingResponse(check_body(),media_type='text/html',headers=headers,background=BackgroundTask(incoming.close))
         root=Path(row['output_root'])
         try:
             manifest=json.loads(safe_file(root/'manifest.json',root).read_text(encoding='utf-8'))

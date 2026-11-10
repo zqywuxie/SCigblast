@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 
 from .aggregate import calls
+from .catalog import assigned_primers
 from .io import digest, open_text, safe_file
 from .isotype import AA, MAPPING_VERSION, classify, summarize
 from .batch import lookup_rows, prepare_observation_links, tune
@@ -87,7 +88,7 @@ def build(items, root, output, catalog=None, progress=None,comparison=None,linea
                 (group_id,item['sample_label'],item['chain'],reference_id,json.dumps(identity)))
             connection.execute('INSERT OR IGNORE INTO usage_primers VALUES(?,?)',(group_id,''))
             connection.execute('INSERT INTO usage_sources VALUES(?,?,?,?)',(item['id'],group_id,item['sample_key'],item['chain']))
-            for primer in (catalog or {}).get('assignments',{}).get(item['sample_label'],[]):
+            for primer in assigned_primers(catalog,item['sample_label'],item['chain']):
                 connection.execute('INSERT OR IGNORE INTO usage_primers VALUES(?,?)',(group_id,primer['name']))
             if meta:
                 refpath = safe_file(Path(item['trace']).parent/meta['annotation'],root)

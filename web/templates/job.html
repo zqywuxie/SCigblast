@@ -10,7 +10,34 @@
   <section class="detail-meta" id="meta-cards" aria-label="运行摘要"><div class="meta-card runtime-card"><span>本次运行时长</span><strong data-runtime-value>—</strong><small id="runtime-note"></small></div><div class="meta-card"><span>当前阶段</span><strong id="current-stage-value">—</strong></div><div class="meta-card"><span>执行次数</span><strong id="attempt-value">—</strong><small>续跑或重试重新计时</small></div></section>
   <div class="task-guidance"><p id="job-next-step"></p><button class="button button-ghost button-small" data-open-tab="log">查看日志</button></div>
   <div id="job-failure" class="page-error hidden" role="status"></div>
-  <section id="igblast-progress" class="igblast-progress panel hidden" aria-label="IgBLAST 阶段进度"><div class="igblast-progress-heading"><div><h2>IgBLAST 阶段</h2><p id="igblast-progress-summary" class="muted"></p></div><div id="igblast-progress-timing" class="igblast-progress-timing"></div></div><div id="igblast-progress-active" class="igblast-progress-active"></div><p id="igblast-progress-note" class="muted"></p><details id="igblast-task-details" class="advanced-details"><summary>查看全部链任务</summary><div class="igblast-task-controls"><input id="igblast-task-query" type="search" aria-label="搜索样本或链" placeholder="搜索样本或链"><select id="igblast-task-state" aria-label="筛选链任务状态"><option value="all">全部状态</option><option value="active">运行中</option><option value="queued">等待中</option><option value="done">已完成</option><option value="failed">失败</option></select></div><div id="igblast-task-list"></div><div class="igblast-task-pager"><span id="igblast-task-page" class="muted"></span><button id="igblast-task-prev" class="button button-ghost button-small">上一页</button><button id="igblast-task-next" class="button button-ghost button-small">下一页</button></div></details></section>
+  <section id="airr-progress" class="panel hidden" aria-label="AIRR 后处理进度"><div class="airr-heading"><h2>AIRR 后处理</h2><span id="airr-counts" role="status"></span></div><div id="airr-active" class="airr-active"></div></section>
+  <section id="igblast-progress" class="igblast-progress panel hidden" aria-label="IgBLAST 阶段进度">
+    <div class="igblast-progress-heading">
+      <div class="igblast-progress-title"><h2>IgBLAST 阶段</h2><span id="igblast-progress-status"></span></div>
+      <div id="igblast-progress-timing" class="igblast-progress-timing"></div>
+    </div>
+    <div class="igblast-progress-overview">
+      <div class="igblast-completion">
+        <div id="igblast-progress-summary" class="igblast-completion-count"></div>
+        <div id="igblast-completion-track" class="igblast-completion-track" role="progressbar" aria-label="链任务完成比例" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="igblast-completion-bar"></i></div>
+      </div>
+      <dl id="igblast-progress-counts" class="igblast-progress-counts"></dl>
+    </div>
+    <div id="igblast-progress-active" class="igblast-progress-active" hidden></div>
+    <p id="igblast-progress-error" class="igblast-progress-error" role="status" hidden></p>
+    <details id="igblast-progress-help" class="igblast-progress-help"><summary>进度说明</summary><p id="igblast-progress-note"></p></details>
+    <details id="igblast-task-details" class="igblast-task-details">
+      <summary><span class="igblast-task-heading"><span id="igblast-task-label">全部链任务</span><span id="igblast-task-count" class="igblast-task-count">0</span></span><span class="igblast-task-toggle" aria-hidden="true"><span class="when-closed">展开</span><span class="when-open">收起</span><svg viewBox="0 0 20 20" fill="none"><path d="m6 8 4 4 4-4"/></svg></span></summary>
+      <div class="igblast-task-controls">
+        <label class="igblast-task-search"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="igblast-task-query" type="search" aria-label="搜索样本或链" placeholder="搜索样本或链"><button id="igblast-task-clear" type="button" aria-label="清空搜索" hidden>×</button></label>
+        <div id="igblast-task-state" class="igblast-task-states" role="group" aria-label="筛选链任务状态" data-state="all"><button type="button" data-progress-state="all" aria-pressed="true">全部</button><button type="button" data-progress-state="active" aria-pressed="false">运行中</button><button type="button" data-progress-state="queued" aria-pressed="false">等待中</button><button type="button" data-progress-state="done" aria-pressed="false">已完成</button><button type="button" data-progress-state="failed" aria-pressed="false">失败</button></div>
+        <span id="igblast-task-results" class="igblast-task-results" role="status"></span>
+        <button id="igblast-task-reset" type="button" class="igblast-task-reset" hidden>重置筛选</button>
+      </div>
+      <div class="igblast-task-table-wrap"><table class="igblast-task-table"><colgroup><col class="igblast-task-sample-col"><col class="igblast-task-chain-col"><col></colgroup><thead><tr><th scope="col">样本</th><th scope="col">链</th><th scope="col">状态</th></tr></thead><tbody id="igblast-task-list"></tbody></table></div>
+      <div id="igblast-task-pager" class="igblast-task-pager"><span id="igblast-task-page" class="muted"></span><button id="igblast-task-prev" type="button" class="button button-ghost button-small">上一页</button><button id="igblast-task-next" type="button" class="button button-ghost button-small">下一页</button></div>
+    </details>
+  </section>
   <details id="stage-details" class="stage-panel panel"><summary class="stage-summary"><span><strong>执行阶段</strong><small>阶段完成比例 <span id="stage-percent">—</span></small></span><span class="stage-progress-track" aria-hidden="true"><i id="stage-progress-bar"></i></span><span id="progress-total" class="progress-total">—</span><span class="stage-expand-label">阶段明细</span></summary><div id="stages" class="stage-list"></div></details>
   <section class="panel tab-panel"><nav class="detail-tabs" role="tablist" aria-label="任务详情"><button class="detail-tab active" role="tab" aria-selected="true" data-tab="overview">运行概览</button><button class="detail-tab" role="tab" aria-selected="false" data-tab="match">Match 审核</button><button class="detail-tab" role="tab" aria-selected="false" data-tab="log">实时日志</button><button class="detail-tab" role="tab" aria-selected="false" data-tab="artifacts">输出文件</button><button class="detail-tab" role="tab" aria-selected="false" data-tab="treemap">克隆树图</button><button class="detail-tab" role="tab" aria-selected="false" data-tab="primer">分析报告</button><button class="detail-tab" role="tab" aria-selected="false" data-tab="audit">参数与记录</button></nav>
     <div id="tab-overview" class="tab-content active"><div id="overview-content"></div></div>

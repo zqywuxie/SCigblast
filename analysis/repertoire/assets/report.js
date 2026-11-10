@@ -6,6 +6,8 @@
  let overviewIsotypeSample='';
   const labels={overview:'总体概览',outputs:'样本产出比较',metrics:'多样性与 B cell 指标',stages:'数据变化',sample:'样本基因',primer:'引物分析',reference:'基因匹配'};
  const categories={matching:['引物匹配','比较 Raw 与 Mapping 阶段的引物识别情况。'],mapping:['Mapping 效率','比较当前样本全部引物的 Mapping rate 与保留情况。'],genes:['逐引物基因组成','选择引物，左右对照 V/J/C 的两种组成指标。'],ccompare:['引物间 C 基因对比','比较同一样本内不同引物的 C 基因组成。']};
+ const rawPrimerMatching=data.primer_matching_source==='raw_R1';
+ if(rawPrimerMatching){categories.matching[1]='仅使用最初始 Raw R1（_j 文件）统计引物匹配，MIX 总览按共享来源去重。';$('#stage').replaceChildren(new Option('Raw R1','raw_R1'));}
  $('.filters').append($('#analysis-tools'));
   function compositionNotice(){
     let host=$('#composition-note');if(!host){host=document.createElement('p');host.id='composition-note';host.className='caption';$('#module-rules').after(host);}
@@ -26,7 +28,7 @@
  const scenarioTable=id=>ReportCharts.table(id).concat(ReportCharts.table('scenario_'+id));
  const moduleFilters=new Map(),lastSections=new Map(),filterIds=['sample','chain','primer','segment','stage','scenario','reference-scope','reference-query','reference-state','output-metric','gene-compare'];
  const moduleKey=()=>[state.view,state.view==='metrics'?state.metricsCategory:state.view==='primer'?state.category:''].join(':');
- function defaultModule(){return {values:Object.fromEntries(filterIds.map(id=>[id,id==='sample'?samples[0]||'':id==='stage'?'mapping':id==='reference-scope'?'sample':''])),sampleMode:['overview','outputs'].includes(state.view)?'all':'single',selectedSamples:[],sampleQuery:'',page:0,referencePages:{},referencePageSize:10};}
+ function defaultModule(){return {values:Object.fromEntries(filterIds.map(id=>[id,id==='sample'?samples[0]||'':id==='stage'?(rawPrimerMatching?'raw_R1':'mapping'):id==='reference-scope'?'sample':''])),sampleMode:['overview','outputs'].includes(state.view)?'all':'single',selectedSamples:[],sampleQuery:'',page:0,referencePages:{},referencePageSize:10};}
  function rememberModule(){moduleFilters.set(moduleKey(),{values:Object.fromEntries(filterIds.map(id=>[id,$('#'+id)?.value||''])),sampleMode,selectedSamples:[...selectedSamples],sampleQuery,primerQuery:state.primerQuery||'',page:state.page,referencePages:{...state.referencePages},referencePageSize:state.referencePageSize});}
  function restoreModule(saved){
    samplePanelOpen=false;sampleMode=saved.sampleMode;selectedSamples=[...saved.selectedSamples];sampleQuery=saved.sampleQuery||'';state.primerQuery=saved.primerQuery||'';state.page=saved.page;state.referencePages={...saved.referencePages};state.referencePageSize=saved.referencePageSize||10;$('#reference-page-size').value=state.referencePageSize;
@@ -346,12 +348,13 @@
    $('#sample-info').hidden=state.main!=='overview';
    const chain=$('#chain'),primerView=state.view==='primer',reference=state.view==='reference',available=scopeFilters();
    $('#primer-categories').hidden=!primerView;$('#category-note').hidden=true;
-   for(const button of document.querySelectorAll('[data-primer-category]')){const active=button.dataset.primerCategory===state.category;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;button.setAttribute('aria-controls','gallery');}
+   if(rawPrimerMatching&&state.category==='mapping')state.category='matching';
+   for(const button of document.querySelectorAll('[data-primer-category]')){button.hidden=rawPrimerMatching&&button.dataset.primerCategory==='mapping';const active=button.dataset.primerCategory===state.category;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;button.setAttribute('aria-controls','gallery');}
    $('#view-title').textContent=primerView?categories[state.category][0]:reference?'基因匹配':state.view==='metrics'?(state.metricsCategory==='bcell'?'B cell 指标':'多样性指标'):labels[state.view];
    samplePicker();scenarioOptions();chain.closest('label').hidden=['overview','stages'].includes(state.view)||available.length<2;
    primers();$('#primer').closest('label').hidden=!(primerView&&state.category==='genes'||reference&&$('#reference-scope').value==='primer');
    $('#segment').closest('label').hidden=!(state.view==='sample'||primerView&&state.category==='genes'||reference);
-   $('#reference-scope-filter').hidden=!reference;$('#stage-filter').hidden=!(primerView&&state.category==='matching');
+   $('#reference-scope-filter').hidden=!reference;$('#stage-filter').hidden=rawPrimerMatching||!(primerView&&state.category==='matching');
    if(primerView&&state.category==='mapping')$('#stage').value='mapping';
    $('#filter-summary').textContent=[sampleMode==='multi'&&selectedSamples.length?selectedSamples.slice(0,3).join('、')+(selectedSamples.length>3?' 等':''):'',chain.closest('label').hidden&&available.length===1?'适用链：'+available[0]:''].filter(Boolean).join(' · ');$('#filter-summary').hidden=!$('#filter-summary').textContent;
    analysisTools();rules();compositionNotice();figures();

@@ -38,6 +38,7 @@ window.DirectoryInput = (() => {
     $('#directory-page').textContent=`${filtered.length} 项 · 第 ${page+1} / ${Math.max(1,Math.ceil(filtered.length/size))} 页`;
     $('#directory-prev').disabled=page===0;$('#directory-next').disabled=(page+1)*size>=filtered.length;
     syncBatch();
+    document.dispatchEvent(new CustomEvent('scigblast:directory-samples',{detail:[...selected.values()].map(row=>({sample:row.sample_id,chains:[...row.chains]}))}));
     if(notify)changed();
     if(focused)$(`#directory-rows [data-id="${focused}"] [data-select]`)?.focus();
   }

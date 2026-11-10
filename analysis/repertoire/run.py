@@ -21,6 +21,9 @@ from .performance import Performance
 
 
 def execute(request, output):
+    if request.get('analysis_kind')=='primer_check':
+        from .primer_check import execute as check_primers
+        return check_primers(request, output)
     from .statistics_checkpoint import checkpoint_for
     root=Path(request['input_root']).resolve()
     items=request.get('items') or discover(root)
@@ -88,7 +91,9 @@ def _execute(request, output, checkpoint):
             catalog = None
             if request.get('primer'):
                 config = request['primer']
-                catalog = build_catalog(config['submission_path'],config['primer_path'],config.get('columns',{}),sorted({item['sample_label'] for item in items}))
+                from .catalog import chains_by_sample
+                scope=chains_by_sample(items)
+                catalog = build_catalog(config.get('submission_path'),config['primer_path'],config.get('columns',{}),sorted(scope),scope)
             else:
                 frozen=[]
                 for item in items:
@@ -97,6 +102,11 @@ def _execute(request, output, checkpoint):
                         if marker.get('primer_preparation'):frozen.append(marker['primer_preparation']['catalog'])
                 if len(frozen)==len(items) and len({value['version'] for value in frozen})==1:
                     catalog=frozen[0]
+            checked=None
+            if request.get('primer_check_root'):
+                from .primer_check import load as load_primer_check
+                checked=performance.call('reuse_primer_check',load_primer_check,request['primer_check_root'],root,items,catalog,
+                    request.get('allowed_input_roots',[str(root)]))
             if catalog and request.get('figure_primers'):
                 catalog=json.loads(json.dumps(catalog))
                 catalog['config']['figure_primers']=request['figure_primers']
@@ -110,30 +120,27 @@ def _execute(request, output, checkpoint):
                 catalog['version']=digest([catalog['assignments'],catalog.get('groups',{}),catalog['config']])
             from .compute_jobs import aggregate as compute_aggregate
             data = performance.call('aggregate',compute_aggregate,items,root,staging,catalog,progress,performance=performance.data)
-            from .alternatives import compare
-            review = performance.call('alternative_mapping_groups',compare,staging/'details.sqlite', catalog, data['matching_total_summary'], progress)
-            data.update(primer_group_reviews=review['reviews'], primer_group_comparisons=review['comparisons'])
             data.update(version=VERSION,stage_summary_scope='sample',gene_segments=['V','J','C'],stages=collect(root,items),catalog=catalog)
             data['usage']=performance.call('gene_usage_and_copy_lineage',build_usage,items,root,staging,catalog,progress,
-                comparison=request.get('comparison_reference'),lineage_samples={r['sample'] for r in review['comparisons'] if r.get('status')=='suspected'})
+                comparison=request.get('comparison_reference'),lineage_samples=set())
             with closing(usage_connection(staging/'details.sqlite')) as connection:
                 traced={i['id'] for i in items if i.get('trace')}
                 for sample in data['samples']:
                     sample['mapped_reads']=connection.execute('SELECT count(*) FROM usage_records WHERE source_item=? AND eligible=1',(sample['id'],)).fetchone()[0] if sample['id'] in traced else None
                     sample['retained_reads']=connection.execute("SELECT count(*) FROM observations WHERE sample_key=? AND chain=? AND filter_reason IN ('retained','retained_history','imported_result')",(sample['sample_key'],sample['chain'])).fetchone()[0]
-            from .primer_metrics import build as primer_metrics
-            metrics=performance.call('primer_mapping_and_raw',primer_metrics,items,root,staging,catalog,
+            from .primer_metrics import build_raw as primer_metrics
+            metrics=checked['metrics'] if checked else performance.call('primer_raw_matching',primer_metrics,items,root,staging,catalog,
                 allowed_roots=request.get('allowed_input_roots',[str(root)]),progress=progress)
             data.update(primer_mapping_summary=metrics['rows'],dual_matching_summary=metrics['matching'],
-                primer_stage_availability=metrics['availability'])
+                primer_stage_availability=metrics['availability'],primer_matching_source='raw_R1',
+                primer_raw_sources=metrics['sources'])
+            data['matching_totals']=metrics['matching']
+            data['matching_total_summary']=metrics['matching']
+            data['match_counts']=metrics['chain_matching']
             from .alternatives import compare_raw
-            raw_review=performance.call('alternative_raw_groups',compare_raw,items,root,catalog,metrics['matching'],
-                allowed_roots=request.get('allowed_input_roots',[str(root)]),progress=progress,index=staging/'details.sqlite')
-            data['primer_group_reviews'].extend(raw_review['reviews'])
-            data['primer_group_comparisons'].extend(raw_review['comparisons'])
-            from .scenario_analysis import build as build_scenarios
-            data.update(performance.call('suspected_primer_analysis',build_scenarios,data,items,root,staging/'details.sqlite',
-                staging/'scenario_details.sqlite',allowed_roots=request.get('allowed_input_roots',[str(root)]),progress=progress))
+            raw_review=checked['review'] if checked else performance.call('alternative_raw_groups',compare_raw,items,root,catalog,metrics['matching'],
+                allowed_roots=request.get('allowed_input_roots',[str(root)]),progress=progress)
+            data.update(primer_group_reviews=raw_review['reviews'],primer_group_comparisons=raw_review['comparisons'],primer_scenarios=[])
             data['figure_primers']=request.get('figure_primers') or (catalog or {}).get('config',{}).get('figure_primers',[])
             data['stage_volumes']=summarize_volume(data['stages'],data['samples'])
             if any(version(path)!=signature for path,signature in receipts.items()):
@@ -146,6 +153,7 @@ def _execute(request, output, checkpoint):
             'primer_gene_counts':data['gene_counts'],'gene_coverage':data['gene_coverage'],
             'matching_summary':data['match_counts'],'matching_total_summary':data['matching_total_summary'],
             'filter_summary':data['filter_counts']}
+        if data.get('primer_matching_source')=='raw_R1':exports.pop('primer_counts',None)
         exports['primer_group_comparisons']=data.get('primer_group_comparisons', [])
         exports['primer_mapping_summary']=data.get('primer_mapping_summary',[])
         exports['dual_matching_summary']=data.get('dual_matching_summary',[])
@@ -262,6 +270,7 @@ def _execute(request, output, checkpoint):
         # Keep the first Web response independent of primer × reference table size.
         overview={key:value for key,value in data.items() if key not in {'gene_counts','gene_coverage','filter_counts','family_counts','trim_counts','catalog','preprocessing_metrics'}}
         overview['catalog']={'assignments':{sample:[{'name':p['name'],'group':p.get('group','')} for p in values] for sample,values in (catalog or {}).get('assignments',{}).items()}}
+        overview['catalog']['chain_assignments']={sample:{chain:[{'name':p['name'],'group':p.get('group','')} for p in values] for chain,values in chains.items()} for sample,chains in (catalog or {}).get('chain_assignments',{}).items()}
         write_json(staging/'summary.json',data)
         write_json(staging/'overview.json',overview)
         manifest=dict(version=VERSION,figure_version=FIGURE_VERSION,run_id=request.get('run_id'),input_root=str(root),items=items,

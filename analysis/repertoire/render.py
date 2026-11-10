@@ -136,7 +136,7 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None,ca
                     selected=dict(scoped,matching_totals=[r for r in scoped['matching_totals'] if r['sample']==sample],
                         primer_group_comparisons=[r for r in scoped['primer_group_comparisons'] if r['sample']==sample])
                     render_matching(selected,pyplot=plt,save=save,stage=stage,target_sample=sample)
-        else:
+        elif data.get('primer_matching_source')!='raw_R1':
             render_matching(data, pyplot=plt, save=save)
 
         metrics=data.get('primer_mapping_summary',[])
@@ -155,7 +155,7 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None,ca
                     save(fig,label_name(sample)+f'__{chain}__{stage}__{kind}_{page//20+1}',title,sample,chain,kind,preparation=stage)
 
         for sample, primers in (data.get('catalog') or {}).get('assignments', {}).items():
-            if metrics:break
+            if metrics or data.get('primer_matching_source')=='raw_R1':break
             for chain in sorted({r['chain'] for r in data['samples'] if r['sample'] == sample}):
                 counts = Counter()
                 for row in data['primer_counts']:

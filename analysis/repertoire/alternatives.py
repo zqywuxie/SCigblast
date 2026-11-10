@@ -99,7 +99,7 @@ def _evaluate(sample, targets, records, catalog, stage, threshold, progress=None
 
 def _mapping_records(connection,sample):
     cursor=connection.execute('''SELECT matching_source,MIN(sequence),MAX(sequence),
-        MIN(match_class),MAX(match_class),MIN(matching_unit),MAX(matching_unit),sample_key,matching_ordinal
+        MIN(sample_match_class),MAX(sample_match_class),MIN(matching_unit),MAX(matching_unit),sample_key,matching_ordinal
         FROM observations WHERE sample=? GROUP BY sample_key,matching_source,matching_ordinal''',(sample,))
     for source,sequence,maximum,category,category_max,unit,unit_max,sample_key,ordinal in cursor:
         if category!=category_max or category not in CATEGORIES:continue
@@ -130,8 +130,7 @@ def _raw_records(items,root,catalog,sample,allowed_roots):
     for item in items:
         if item['sample_label']!=sample:continue
         meta=json.loads(Path(item['trace']).read_text(encoding='utf-8')) if item.get('trace') else {}
-        if not meta:continue
-        marker=Path(item['trace']);upstream=meta.get('upstream') or {}
+        marker=Path(item['trace']) if item.get('trace') else None;upstream=meta.get('upstream') or {}
         if upstream.get('sources',{}).get('raw_R1'):
             path=safe_file(marker.parent/upstream['archive'],root)
             source=digest(upstream['sources']['raw_R1']);incoming=archived_raw(marker,meta,root)

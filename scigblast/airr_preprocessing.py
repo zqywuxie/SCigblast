@@ -14,13 +14,26 @@ import runpy
 import sys
 import time
 import subprocess
+import threading
 
 if __package__ in {None, ''}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 CHAINS=frozenset(('IGH','IGK','IGL','TRA','TRB','TRD','TRG'))
-VERSION='base-airr-preprocessing-v2-sample-overlap'
+VERSION='base-airr-preprocessing-v3-bounded-samples'
 WARM_KEYS={'SCIGBLAST_BASE_PREPROCESSING_READY_MANIFEST','SCIGBLAST_BASE_PREPROCESSING_WARMUP'}
+
+
+def preprocessing_limits():
+    budget = max(1, int(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_TOTAL_PROCESS_BUDGET', '4')))
+    requested = max(1, int(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_SAMPLE_WORKERS', '1')))
+    memory = float(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_MEMORY_BUDGET_GB', '32'))
+    per_sample = float(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_SAMPLE_MEMORY_GB', '32'))
+    if per_sample <= 0 or memory < per_sample:
+        raise ValueError('preprocessing memory budget cannot accommodate one sample')
+    workers = min(requested, budget, max(1, int(memory // per_sample)))
+    shm = min(max(1, int(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_SHM_WORKERS', '4'))), budget // workers)
+    return workers, shm, per_sample
 
 
 def discover(roots):
@@ -90,7 +103,7 @@ def signature(root,output):
     entry=project/'IR_split/pipeline/08.preprocessing.py'
     implementation=[Path(__file__),entry,*sorted((entry.parent/'models').glob('*.py'))]
     dependencies={str(p.relative_to(project)):hashlib.sha256(p.read_bytes()).hexdigest() for p in implementation}
-    settings={key:value for key,value in os.environ.items() if key.startswith('SCIGBLAST_BASE_PREPROCESSING_') and key not in WARM_KEYS}
+    settings={key:value for key,value in os.environ.items() if key.startswith('SCIGBLAST_BASE_PREPROCESSING_') and key not in WARM_KEYS | {'SCIGBLAST_BASE_PREPROCESSING_PROGRESS'}}
     manifest=Path(os.environ.get('SCIGBLAST_BASE_PREPROCESSING_READY_MANIFEST','') or Path(root)/'chain_summary.csv')
     files=[manifest,*[Path(t['source']) for t in discover([root])]]
     inputs=[]
@@ -149,6 +162,7 @@ def main():
         SCIGBLAST_IR_PREPROCESSING_INPUT=str(root),SCIGBLAST_IR_PREPROCESSING_OUTPUT=str(output),
         SCIGBLAST_IR_PREPROCESSING_INPUT_LAYOUT='chains',SCIGBLAST_IR_PREPROCESSING_UMI_SOURCE='row_contract',
         SCIGBLAST_IR_PREPROCESSING_ALLOW_ROW_CONTRACT='1')
+    os.environ['SCIGBLAST_BASE_PREPROCESSING_PROGRESS'] = '1'
     # Parallelism belongs to the bounded sample/SHM workers. Each worker must
     # not spawn a host-sized BLAS/OpenMP thread pool during NumPy imports.
     for variable in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS','VECLIB_MAXIMUM_THREADS'):
@@ -156,6 +170,7 @@ def main():
     for suffix,default in [('FILTER_WORKERS','1'),('SAMPLES_PER_WINDOW','1'),('SHM_WORKERS','4'),
         ('TOTAL_PROCESS_BUDGET','4'),('MEMORY_BUDGET_GB','32'),('MIN_AVAILABLE_GB','16')]:
         os.environ['SCIGBLAST_IR_PREPROCESSING_'+suffix]=os.environ.get('SCIGBLAST_BASE_PREPROCESSING_'+suffix,default)
+    os.environ['SCIGBLAST_IR_PREPROCESSING_SHM_WORKERS'] = str(preprocessing_limits()[1])
     # Force invalidation also on resource/adapter changes; existing model hashes
     # and per-sample source checks remain in the reused stage.
     os.environ['SCIGBLAST_IR_PREPROCESSING_ADAPTER_SIGNATURE']=hashlib.sha256(json.dumps({key:before[key] for key in ('version','implementation','settings')},sort_keys=True).encode()).hexdigest()
@@ -184,13 +199,18 @@ def main():
 
 
 class SamplePreprocessing:
-    """One bounded warmup worker; enqueue only after all tasks of a sample succeed."""
+    """Bound sample warmups; enqueue after every selected chain succeeds."""
     def __init__(self,root,output,jobs):
         self.root,self.output=Path(root),Path(output)
         self.expected=Counter(job[0] for job in jobs)
         self.completed=defaultdict(list)
-        self.executor=ThreadPoolExecutor(max_workers=1) if os.environ.get('SCIGBLAST_BASE_PIPELINED_PREPROCESSING')=='1' else None
+        self.workers, _, self.per_sample_memory = preprocessing_limits()
+        self.admission = threading.Lock()
+        self.executor=ThreadPoolExecutor(max_workers=self.workers) if os.environ.get('SCIGBLAST_BASE_PIPELINED_PREPROCESSING')=='1' else None
         self.futures=[]
+        from scigblast.progress import preprocessing_event
+        for sample in self.expected:
+            preprocessing_event(sample, 'queued')
 
     def __enter__(self):return self
 
@@ -210,9 +230,27 @@ class SamplePreprocessing:
             payload=dict(input_root=str(self.root.resolve()),rows=[dict(sample_id=sample,chain=r['chain'],status='OK',output_path=str(r.get('path') or r['output_path'])) for r in rows])
             atomic_text(manifest,lambda handle:json.dump(payload,handle,ensure_ascii=False))
             print(f'[BASE overlap] sample={sample} start chains={len(rows)}',flush=True)
-            result=subprocess.run([sys.executable,str(Path(__file__).resolve()),'--input',str(self.root),'--output',str(self.output),'--ready-manifest',str(manifest)],pass_fds=inherited_resource_fds())
-            print(f'[BASE overlap] sample={sample} '+('checkpoint ready' if result.returncode==0 else 'warmup failed; final stage will retry'),flush=True)
+            from mapping.pipeline.resources import detect_resources
+            from scigblast.progress import preprocessing_event
+            env = dict(os.environ)
+            with self.admission:
+                available = detect_resources()['memory_available_bytes']
+                floor = float(env.get('SCIGBLAST_BASE_PREPROCESSING_MIN_AVAILABLE_GB', '16'))
+                if available is not None and available / 1024 ** 3 < self.per_sample_memory + floor:
+                    raise MemoryError('insufficient container headroom for preprocessing sample')
+                process = subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'--input',str(self.root),'--output',str(self.output),'--ready-manifest',str(manifest)],env=env,pass_fds=inherited_resource_fds())
+            try:
+                returncode = process.wait()
+            except BaseException:
+                process.terminate()
+                process.wait()
+                raise
+            if returncode:
+                preprocessing_event(sample, 'failed', error='Warmup failed; final stage will retry')
+            print(f'[BASE overlap] sample={sample} '+('checkpoint ready' if returncode==0 else 'warmup failed; final stage will retry'),flush=True)
         except Exception as error:
+            from scigblast.progress import preprocessing_event
+            preprocessing_event(sample, 'failed', error=str(error))
             print(f'[BASE overlap] sample={sample} warmup unavailable: {error}; final stage will retry',flush=True)
 
     def __exit__(self,kind,value,traceback):

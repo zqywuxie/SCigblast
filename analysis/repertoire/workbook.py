@@ -189,8 +189,8 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
             c.alignment=Alignment(vertical='center',wrap_text=True)
         elif number:c.number_format='#,##0.####'
         return c
-    def write(name,records,columns,*,technical=False):
-        title,description=LABELS.get(name,(name[:28],name))
+    def write(name,records,columns,*,technical=False,label=None):
+        title,description=label or LABELS.get(name,(name[:28],name))
         if technical:title=('技术_'+title)[:28]
         accent=workbook_accent(name)
         review=not technical and name in {'sample_gene_usage','primer_gene_usage','unobserved_reference_genes','primer_unobserved_reference_genes'}
@@ -287,6 +287,11 @@ def write_workbook(destination,exports,sql_exports,index,*,catalog=None):
         for name in names:
             if name in sql_exports:records=(dict(r) for r in connection.execute(sql_exports[name]));columns=list(USAGE_COLUMNS)
             else:records=exports[name];columns=list(records[0]) if records else ['sample','count']
+            if name=='primer_mapping_summary' and records and 'mapping_percent' not in records[0]:
+                fields=[('sample','样本'),('chain','链'),('primer','引物全名'),('total_reads','Raw R1 reads'),('matched_reads','唯一匹配 reads'),('match_percent','唯一匹配率 (%)')]
+                write(name,({label:r.get(key) for key,label in fields} for r in records),[label for _,label in fields],
+                      label=('引物匹配率','最初始 Raw R1（_j）上的唯一引物匹配，分母为对应样本全部原始 reads'))
+                continue
             if name in FIELDS:
                 if name=='primer_mapping_summary':records=[r for r in records if r.get('stage')=='mapping']
                 if name=='isotype_summary':records=ordered_isotypes(records)

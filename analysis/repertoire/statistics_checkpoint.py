@@ -12,7 +12,7 @@ from .private_cache import locked
 SCHEMA = 'report-statistics-checkpoint-v1'
 SCIENTIFIC_FILES = ('aggregate.py','alternatives.py','batch.py','catalog.py','compute_jobs.py',
     'gene_cdr3.py','io.py','isotype.py','matching.py','output_metrics.py','postprocessed_usage.py',
-    'primer_metrics.py','repertoire_metrics.py','scenario_analysis.py','sources.py','usage.py','run.py','presentation.py')
+    'primer_metrics.py','primer_check.py','repertoire_metrics.py','scenario_analysis.py','sources.py','usage.py','run.py','presentation.py')
 
 
 def signature(request, items, root):
@@ -38,6 +38,8 @@ def signature(request, items, root):
     primer = json.loads(json.dumps(request.get('primer')))
     if primer:
         for name in ('submission_path','primer_path'):
+            if not primer.get(name):
+                continue
             path=Path(primer[name]).resolve()
             receipts[str(path)]=version(path)
         # This parameter selects PNGs, never the scientific population.

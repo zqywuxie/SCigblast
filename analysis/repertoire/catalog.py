@@ -10,6 +10,31 @@ from .io import digest,version
 
 IUPAC = dict(A='A', C='C', G='G', T='T', R='AG', Y='CT', S='GC', W='AT', K='GT',
              M='AC', B='CGT', D='AGT', H='ACT', V='ACG', N='ACGT')
+CHAINS = ('IGH', 'IGK', 'IGL', 'TRA', 'TRB', 'TRD', 'TRG')
+
+
+def chains_by_sample(records):
+    result = {}
+    for row in records:
+        sample = row.get('sample_label') or row.get('sample_id') or row.get('sample')
+        if not sample:
+            continue
+        chains = row.get('chains') or row.get('igblast_chains') or row.get('chain') or []
+        if isinstance(chains, str):
+            chains = chains.split(',')
+        result.setdefault(sample, set()).update(c.strip().upper() for c in chains if c.strip().upper() in CHAINS)
+    return {sample: [c for c in CHAINS if c in chains] for sample, chains in sorted(result.items())}
+
+
+def assigned_primers(catalog, sample, chain=None):
+    if not catalog:
+        return []
+    scoped = catalog.get('chain_assignments', {}).get(sample)
+    if chain is not None and scoped is not None:
+        if chain not in scoped:
+            raise ValueError(f'{sample} / {chain} 未配置引物')
+        return scoped[chain]
+    return catalog.get('assignments', {}).get(sample, [])
 
 
 def column(value):
@@ -85,15 +110,19 @@ def workbook_preview(book, header_row=1):
                 column_count=max((len(row) for row in book['rows']),default=0),merged=merged)
 
 
-def build_catalog(submission, primers, config, samples):
+def build_catalog(submission, primers, config, samples, sample_chains=None):
     from .matching import review_settings
     enabled, threshold = review_settings(config)
     config = dict(config, try_alternative_groups=enabled, primer_match_threshold=threshold)
-    source_versions={name:version(path) for name,path in (('submission',submission),('primers',primers))}
-    sub = workbook(submission, config.get('submission_sheet'))
+    sources = [('primers', primers)]
+    if submission:
+        sources.append(('submission', submission))
+    source_versions={name:version(path) for name,path in sources}
+    sub = workbook(submission, config.get('submission_sheet')) if submission else None
     book = workbook(primers, config.get('primer_sheet'))
-    si, sj, pj = (column(config.get(key, default)) for key, default in (
-        ('sample_column', 'B'), ('submission_join_column', 'I'), ('primer_join_column', 'B')))
+    si = column(config.get('sample_column', 'B')) if sub is not None else 0
+    sj = column(config.get('submission_join_column', 'I')) if sub is not None else 0
+    pj = column(config.get('primer_join_column', 'B'))
     pairs = config.get('primer_columns', [['C', 'D'], ['E', 'F']])
     if not pairs or len(pairs) > 12:
         raise ValueError('请选择 1–12 对引物名称/序列列')
@@ -131,27 +160,67 @@ def build_catalog(submission, primers, config, samples):
     assignments = {}
     aliases = config.get('sample_aliases', {})
     wanted = {aliases.get(sample, sample) for sample in samples}
-    for r in range(start_s, len(sub['rows'])):
-        sample, group = value(sub, r, si), value(sub, r, sj, inherit=True)
-        if not sample and not group:
-            continue
-        if not sample:
-            raise ValueError(f'Submission 第 {r+1} 行缺少样本身份')
-        if sample not in wanted:
-            continue
-        if not group:
-            continue
-        sep = config.get('group_separator', '')
-        groups = [s.strip() for s in group.split(sep)] if sep else [group]
+    manual = config.get('sample_groups', {})
+    chain_groups = config.get('sample_chain_groups')
+    if not isinstance(manual, dict):
+        raise ValueError('样本引物分配须为样本与引物组列表')
+    selected_chains = {}
+    if sub is None and chain_groups is not None:
+        if not isinstance(chain_groups, dict):
+            raise ValueError('请按样本和链分配引物组')
+        selected = []
+        for sample in wanted:
+            scoped = chain_groups.get(sample, {})
+            if not isinstance(scoped, dict):
+                raise ValueError(f'{sample} 的链引物配置无效')
+            for chain, groups in scoped.items():
+                if chain not in CHAINS or not isinstance(groups, list) or not groups or any(not isinstance(g, str) or not g.strip() for g in groups):
+                    raise ValueError(f'{sample} / {chain} 的引物组配置无效')
+                selected_chains[(sample, chain)] = groups
+            expected = {chain for original in samples if aliases.get(original, original) == sample
+                        for chain in (sample_chains or {}).get(original, [])}
+            missing_chains = set(expected) - set(scoped)
+            if missing_chains:
+                raise ValueError(f'{sample} 以下链未分配引物：' + '、'.join(sorted(missing_chains)))
+            selected.append((sample, list(dict.fromkeys(g for groups in scoped.values() for g in groups))))
+    elif sub is None:
+        selected = []
+        for sample in wanted:
+            groups = manual.get(sample, [])
+            if not isinstance(groups, list) or any(not isinstance(g, str) or not g.strip() for g in groups):
+                raise ValueError(f'{sample} 的引物组列表无效')
+            selected.append((sample, groups))
+    else:
+        selected = []
+        for r in range(start_s, len(sub['rows'])):
+            sample, group = value(sub, r, si), value(sub, r, sj, inherit=True)
+            sep = config.get('group_separator', '')
+            selected.append((sample, [s.strip() for s in group.split(sep)] if sep else [group]))
+    def resolve_groups(sample, groups):
+        existing = {}
         for g in groups:
             candidates = grouped.get(g)
             if candidates is None and config.get('allow_primer_name_join'):
                 candidates = [item for values in grouped.values() for item in values if item['name'] == g]
+                if sub is None:
+                    candidates = [dict(item, group=g, source_group=item['group']) for item in candidates]
             if not candidates:
                 raise ValueError(f'{sample} 对应的引物组不存在：{g}')
-            existing = assignments.setdefault(sample, {})
             for item in candidates:
                 existing[item['name']] = item
+        return existing
+
+    for sample, groups in selected:
+        group = ''.join(groups)
+        if not sample and not group:
+            continue
+        if not sample:
+            raise ValueError('Submission 中缺少样本身份')
+        if sample not in wanted:
+            continue
+        if not group:
+            continue
+        assignments.setdefault(sample, {}).update(resolve_groups(sample, groups))
     result, missing = {}, []
     for sample in samples:
         lookup = aliases.get(sample, sample)
@@ -162,12 +231,18 @@ def build_catalog(submission, primers, config, samples):
     if missing:
         raise ValueError('以下样本未连接到引物组，请检查样本列或设置样本对应：' + '、'.join(missing[:20]))
     evidence={}
-    for name,path in (('submission',submission),('primers',primers)):
+    for name,path in sources:
         with Path(path).open('rb') as incoming:sha=hashlib.file_digest(incoming,'sha256').hexdigest()
         if version(path)!=source_versions[name]:raise ValueError('工作簿在解析期间发生变化，请重新导入')
         evidence[name]=dict(sha256=sha,source_version=source_versions[name],filename=Path(path).name)
-    return dict(assignments=result, groups=grouped, config=config,
-                version=digest([result, grouped, config]), workbooks=evidence)
+    chain_assignments = {}
+    for sample in samples:
+        lookup = aliases.get(sample, sample)
+        for (name, chain), groups in selected_chains.items():
+            if name == lookup:
+                chain_assignments.setdefault(sample, {})[chain] = sorted(resolve_groups(sample, groups).values(), key=lambda row: row['name'])
+    return dict(assignments=result, chain_assignments=chain_assignments, groups=grouped, config=config,
+                version=digest([result, chain_assignments, grouped, config]), workbooks=evidence)
 
 
 class Matcher:

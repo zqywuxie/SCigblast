@@ -1,9 +1,10 @@
 <details class="rp-config advanced-details">
   <summary class="rp-config-summary"><span class="rp-config-title">引物匹配配置</span><span class="rp-config-caption">上传表格后选择对应列</span></summary>
   <div class="rp-config-body">
+    <label class="field">样本与引物关联方式<select data-rp-assignment-mode><option value="manual">上传引物表，按样本选择</option><option value="submission">上传 Submission 表自动关联</option></select></label>
     <div class="rp-section-heading"><span class="rp-step">01</span><h4>上传数据表</h4><span class="rp-section-hint">XLS / XLSX</span></div>
     <div class="rp-upload-layout">
-      <label class="rp-upload-card" data-rp-file-card="submission" data-state="empty">
+      <label class="rp-upload-card" data-rp-file-card="submission" data-state="empty" hidden>
         <span class="rp-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg></span>
         <span class="rp-upload-copy"><span class="rp-upload-heading"><strong>Submission 表</strong><span data-rp-upload-state="submission">未选择</span></span><small data-rp-upload-note="submission">样本与引物组对应表</small></span>
         <span class="rp-upload-action" data-rp-upload-action="submission">选择文件</span>
@@ -44,6 +45,11 @@
       <div data-rp-selected-preview aria-live="polite"></div>
     </details>
     <div class="rp-section-heading"><span class="rp-step">03</span><h4>匹配方式</h4></div>
+    <section data-rp-manual-allocation class="rp-manual-allocation">
+      <div class="rp-pair-heading"><strong>按样本与链分配引物</strong><button type="button" class="button button-ghost button-small" data-rp-load-groups>读取可选引物组</button></div>
+      <p class="rp-config-note">每条链分别选择引物组，可多选。MIX 拆链后按对应配置统计，运行前共享输入使用各链引物的并集。</p>
+      <div data-rp-sample-groups><p class="muted">扫描样本或完成 Match 后，在此分配引物组。</p></div>
+    </section>
     <div class="rp-behavior-grid">
       <label class="rp-sequence-field">引物表中的序列<select data-rp-field="sequence_mode"><option value="oligo">完整引物：Adapter + UMI + Barcode + C primer</option><option value="primer">仅 C primer 匹配序列</option></select></label>
       <label class="rp-trim-choice"><input type="checkbox" data-rp-field="trim_before_mapping" checked><span><strong>比对前去引物</strong><small>先记录归属，再去除明确匹配的引物</small></span></label>
@@ -53,22 +59,35 @@
       <label class="rp-trim-choice"><input type="checkbox" data-rp-field="try_alternative_groups" checked><span><strong>低匹配率时测试其他引物组</strong><small>候选并排标注 Suspected，原引物归属不变</small></span></label>
       <label class="rp-sequence-field">唯一匹配率阈值（%）<input type="number" data-rp-field="primer_match_threshold" value="50" min="0" max="100" step="1"><small>原组低于阈值时测试；候选达到阈值且优于原组才展示</small></label>
     </div>
-    <details class="advanced-details rp-secondary" data-rp-advanced><summary>高级设置</summary>
-      <div class="rp-config-grid">
-        <label>Submission 表头行<input data-rp-field="submission_header_row" type="number" value="1" min="1"></label>
-        <label>引物表头行<input data-rp-field="primer_header_row" type="number" value="1" min="1"></label>
-        <label>多组分隔符<input data-rp-field="group_separator" placeholder="留空表示单组"></label>
-        <p class="rp-help">同时统计 Raw 与合并后输入的引物匹配率和 Mapping rate。历史材料缺失时标记为不可计算。</p>
-        <label>统计数据中的引物位置<select data-rp-field="read_structure"><option value="window">序列从 C primer 起始</option><option value="oligo">仍含 Adapter + UMI + Barcode</option></select></label>
-        <label>Mapping 输入中的引物位置<select data-rp-field="mapping_read_structure"><option value="window">合并序列从 C primer 起始</option><option value="oligo">仍含 Adapter + UMI + Barcode</option></select></label>
+    <details class="advanced-details rp-settings" data-rp-advanced>
+      <summary><strong>高级设置</strong><span>表格读取与序列结构</span></summary>
+      <div class="rp-settings-body">
+        <section class="rp-setting-section">
+          <h5>表格读取</h5>
+          <div class="rp-settings-grid">
+            <label data-rp-submission-setting>Submission 表头行<input data-rp-field="submission_header_row" type="number" value="1" min="1" max="500000"></label>
+            <label>引物表头行<input data-rp-field="primer_header_row" type="number" value="1" min="1" max="500000"></label>
+            <label data-rp-submission-setting>多组分隔符<input data-rp-field="group_separator" placeholder="留空表示单组"><small>同一单元格填写多个引物组时使用</small></label>
+            <label class="rp-settings-check"><input type="checkbox" data-rp-field="allow_primer_name_join" checked><span>支持完整引物名称关联<small>组名未命中时，按引物全名精确查找</small></span></label>
+          </div>
+        </section>
+        <section class="rp-setting-section">
+          <h5>序列位置</h5>
+          <div class="rp-settings-grid">
+            <label>原始 _j 文件<select data-rp-field="read_structure"><option value="window">从 C primer 起始</option><option value="oligo">含 Adapter + UMI + Barcode</option></select><small>用于 Raw 引物匹配统计</small></label>
+            <label>合并后的比对输入<select data-rp-field="mapping_read_structure"><option value="window">从 C primer 起始</option><option value="oligo">含 Adapter + UMI + Barcode</option></select><small>用于比对前记录归属与去引物</small></label>
+          </div>
+        </section>
+        <details class="rp-structure-settings" data-rp-structure-settings>
+          <summary>Adapter / UMI / Barcode</summary>
+          <div class="rp-settings-grid">
+            <label class="rp-settings-wide">Adapter<input data-rp-field="adapter" value="ACACTCTTTCCCTACACGACGCTCTTCCGATCT" spellcheck="false" autocomplete="off"></label>
+            <label>UMI 长度<input data-rp-field="umi_length" type="number" value="10" min="0" max="100"></label>
+            <label>Barcode 长度<input data-rp-field="barcode_length" type="number" value="8" min="0" max="100"></label>
+          </div>
+        </details>
+        <p class="rp-setting-note">5′ 起点全长 IUPAC 匹配。匹配率以样本全部 Raw R1 reads 为分母。</p>
       </div>
-      <label class="check-label"><input type="checkbox" data-rp-field="allow_primer_name_join" checked> 未找到组名时，按完整引物名称精确关联</label>
-      <details class="advanced-details"><summary>完整引物结构参数</summary><div class="rp-config-grid">
-        <label class="rp-wide">Adapter<input data-rp-field="adapter" value="ACACTCTTTCCCTACACGACGCTCTTCCGATCT"></label>
-        <label>UMI 长度<input data-rp-field="umi_length" type="number" value="10" min="0" max="100"></label>
-        <label>Barcode 长度<input data-rp-field="barcode_length" type="number" value="8" min="0" max="100"></label>
-      </div></details>
-      <p class="muted">匹配规则：序列 5′ 起点全长匹配，按 IUPAC 简并碱基识别。</p>
     </details>
     <details class="advanced-details rp-secondary"><summary>完整工作表预览</summary><div data-rp-workbook-preview class="rp-workbook-preview"></div></details>
     <p class="page-error hidden" data-rp-config-error role="alert"></p>

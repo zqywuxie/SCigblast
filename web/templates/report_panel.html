@@ -7,7 +7,14 @@
     <div data-rp-candidates></div>
     {% include 'report_config.html' %}
     <details class="advanced-details rp-reference-compare"><summary>历史结果缺少参考清单时</summary><label>与当前数据库比较<select data-rp-comparison-species><option value="">仅使用当次参考记录（默认）</option><option value="pig">当前 Pig 参考</option><option value="human">当前 Human 参考</option><option value="cat">当前 Cat 参考</option><option value="dog">当前 Dog 参考</option></select></label><p class="muted">仅对缺少历史清单的结果生效，并明确标为“当前参考比较”，不会当作原比对数据库。</p></details>
-    <div class="rp-actions rp-submit"><button type="button" class="button button-ghost" data-rp-preview>核对引物分配</button><button type="button" class="button button-ghost" data-rp-save-plan hidden>保存配置，完成后自动生成</button><button type="button" class="button button-primary" data-rp-run disabled>生成报告与 PNG</button></div>
+    <section class="rp-primer-check" data-rp-check-panel>
+      <div class="rp-check-heading"><div><span class="rp-step">04</span><h4>引物匹配预检查</h4></div><button type="button" class="button button-primary button-small" data-rp-check>运行预检查</button></div>
+      <p class="rp-check-note">读取最初始 _j 文件，核对样本、链与引物组的匹配效果。</p>
+      <div data-rp-check-status role="status" aria-live="polite">选择分析结果并完成引物配置后开始。</div>
+      <div data-rp-check-results hidden></div>
+      <label class="rp-check-confirm" data-rp-check-confirm-label hidden><input type="checkbox" data-rp-check-confirm><span>我已核对所选引物组和匹配结果</span></label>
+    </section>
+    <div class="rp-actions rp-submit"><button type="button" class="button button-ghost" data-rp-preview>查看引物分配</button><button type="button" class="button button-ghost" data-rp-save-plan hidden>保存配置，完成后自动生成</button><button type="button" class="button button-primary" data-rp-run disabled>生成报告与 PNG</button></div>
     <div data-rp-allocation></div>
   </div>
   <p data-rp-message role="status" aria-live="polite" class="rp-message"></p>

@@ -417,6 +417,7 @@ class Service:
                     continue
                 files.append({k:v for k,v in item.items() if k not in {'relative_path','version'}} | {'url':f"/api/treemap/runs/{row['id']}/files/{item['id']}"})
         return dict(id=row['id'], name=row['name'], status=status, parent_job_id=row['parent_job_id'], attempt_no=row['attempt_no'],
+                    waiting_resources=status == 'running' and not row['pid'],
                     created_at=row['created_at'], started_at=row['started_at'], ended_at=row['ended_at'],
                     error=row['error'], items=items, files=files, metric='records',
                     progress=dict(done=row['done'],total=row['total']))
@@ -427,7 +428,7 @@ class Service:
         if user['role'] != 'admin':
             where.append('owner_id=?'); args.append(user['id'])
         with self.app.db() as connection:
-            rows = connection.execute('SELECT id,owner_id,parent_job_id,attempt_no,name,status,created_at,started_at,ended_at,error,done,total FROM derived_runs' + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY created_at DESC,id DESC LIMIT 100', args).fetchall()
+            rows = connection.execute('SELECT id,owner_id,parent_job_id,attempt_no,name,status,created_at,started_at,ended_at,error,done,total,pid FROM derived_runs' + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY created_at DESC,id DESC LIMIT 100', args).fetchall()
         return [self.public(row,details=False) for row in rows]
 
     def retry(self, run_id):

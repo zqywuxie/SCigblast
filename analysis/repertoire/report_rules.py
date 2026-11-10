@@ -130,4 +130,14 @@ def for_report(data, *, language='zh'):
             source['overview'][2],
         ]
     result['overview']=[*result['overview'],next(row for row in source['metrics'] if row[0]=='B cell Isotype Distribution')]
+    if data.get('primer_matching_source')=='raw_R1':
+        definition = ('Primers are matched only against the original raw R1 (_j) reads, with strict full-length 5-prime IUPAC matching.' if english else
+                      '仅在最初始 Raw R1（_j 文件）上按 5′ 起点全长 IUPAC 规则匹配引物。')
+        result['overview']=[(title,definition if title in {'Primer matching','引物匹配'} else text) for title,text in result['overview']]
+        result['matching']=[
+            ('Raw R1',definition),
+            ('Match rate' if english else '匹配率','Unique, multiple and unmatched reads divided by all original R1 reads for the sample.' if english else '唯一、多重、未匹配 reads 分别除以该样本全部原始 R1 reads。'),
+            ('MIX','Sample totals use the union of chain-specific primers and count each shared input once; chain panels use the configured primers for that chain.' if english else '样本总览使用各链引物并集，共享输入只计一次。分链面板使用对应链的引物，分母仍为该样本原始 R1 reads。'),
+        ]
+        result['mapping']=[]
     return result

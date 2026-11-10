@@ -39,6 +39,43 @@ def inherited_resource_fds():
     return tuple(sorted(fds))
 
 
+def preprocessing_event(sample, phase, completed=None, total=None, error=''):
+    """Independent, attempt-scoped telemetry. Failures never affect computation."""
+    configured = os.environ.get('SCIGBLAST_PROGRESS_DB', '')
+    if not configured:
+        return
+    try:
+        with closing(sqlite3.connect(configured + '.airr', timeout=1)) as db, db:
+            db.execute('CREATE TABLE IF NOT EXISTS samples (sample TEXT PRIMARY KEY, phase TEXT, started REAL, updated REAL, completed INTEGER, total INTEGER, error TEXT)')
+            now = time.time()
+            if phase == 'queued':
+                db.execute('INSERT OR IGNORE INTO samples VALUES(?,?,?,?,?,?,?)',
+                           (sample, phase, now, now, completed, total, ''))
+                return
+            db.execute('''INSERT INTO samples VALUES(?,?,?,?,?,?,?) ON CONFLICT(sample) DO UPDATE SET
+                phase=excluded.phase, updated=excluded.updated,
+                started=CASE WHEN excluded.phase='reading' THEN excluded.started ELSE samples.started END,
+                completed=COALESCE(excluded.completed,samples.completed),
+                total=COALESCE(excluded.total,samples.total), error=excluded.error''',
+                (sample, phase, now, now, completed, total, str(error)[:500]))
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def read_preprocessing_progress(path):
+    path = Path(str(path) + '.airr')
+    if not path.is_file():
+        return None
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
+            db.row_factory = sqlite3.Row
+            counts = dict(db.execute('SELECT phase,COUNT(*) FROM samples GROUP BY phase'))
+            active = [dict(row) for row in db.execute("SELECT * FROM samples WHERE phase NOT IN ('queued','ready','cached') ORDER BY started LIMIT 8")]
+            return dict(counts=counts, total=sum(counts.values()), active=active)
+    except (OSError, sqlite3.Error):
+        return None
+
+
 @lru_cache(maxsize=16)
 def verified_estimate(binary, species, chain):
     validated = {'pig': {'TRA', 'TRB', 'IGH', 'IGK', 'IGL'}, 'human': {'IGH', 'TRB'}}

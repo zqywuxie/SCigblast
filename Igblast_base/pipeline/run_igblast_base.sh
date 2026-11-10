@@ -488,7 +488,9 @@ rm -f "${STATE_DIR}/.pipeline_stage_06.locus_split.DONE"
 echo "[BASE 6/6] AIRR preprocessing"
 if ! stage_done 06.preprocessing; then
   rm -f "${STATE_DIR}/.pipeline_stage_06.preprocessing.DONE"
+  export SCIGBLAST_STAGE_EXTRA_THREADS="${SCIGBLAST_BASE_PREPROCESSING_TOTAL_PROCESS_BUDGET:-4}"
   run_monitored_stage "AIRR preprocessing" "$PREPROCESSING_REQUIRED_GB"     "${PYTHON_BIN}" "${SCRIPT_DIR}/06.preprocessing.py" --input "$IGBLAST_DIR" --output "$PREPROCESSING_DIR"
+  unset SCIGBLAST_STAGE_EXTRA_THREADS
   mark_stage 06.preprocessing
 else echo "[BASE] reusing AIRR preprocessing"; fi
 echo "[BASE] completed: $PREPROCESSING_DIR"

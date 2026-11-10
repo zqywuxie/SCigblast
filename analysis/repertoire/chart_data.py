@@ -86,6 +86,7 @@ def public_metadata(data):
     groups=data.get('usage',{}).get('groups',[])
     from .presentation import shared_inputs
     return dict(schema=VERSION,statistics_version=data.get('version',''),sample_inputs=shared_inputs(data),
+        primer_matching_source=data.get('primer_matching_source',''),
         figure_version=data.get('figure_version',''),
         groups=[dict({k:g.get(k) for k in ('group_id','sample','chain','primers','aa_fields','reference_scope')},
                      reference_id=g.get('reference_id',''),

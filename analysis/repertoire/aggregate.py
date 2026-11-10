@@ -9,7 +9,7 @@ import re
 import sqlite3
 import uuid
 
-from .catalog import Matcher
+from .catalog import Matcher, assigned_primers
 from .matching import summarize_matching
 from .io import digest, safe_file, table, version
 from .batch import tune
@@ -204,7 +204,8 @@ def aggregate(items, root, output, catalog=None, progress=None):
         sequence_id TEXT,match_class TEXT,primers TEXT,families INTEGER,filter_reason TEXT,
         v_call TEXT,j_call TEXT,c_call TEXT,sequence TEXT,
         mapping_primers TEXT,trim_state TEXT,trim_length INTEGER,
-        matching_source TEXT,matching_ordinal INTEGER,matching_unit TEXT,mapping_sequence_id TEXT)''')
+        matching_source TEXT,matching_ordinal INTEGER,matching_unit TEXT,mapping_sequence_id TEXT,
+        sample_match_class TEXT)''')
     match_counts, gene_counts, reason_counts, primer_counts, coverage = (Counter() for _ in range(5))
     family_counts=Counter()
     trim_counts=Counter()
@@ -214,7 +215,9 @@ def aggregate(items, root, output, catalog=None, progress=None):
     try:
         for number, item in enumerate(items, 1):
             sample, chain = item['sample_label'], item['chain']
-            matcher = Matcher(catalog['assignments'][sample]) if catalog else None
+            primers = assigned_primers(catalog, sample, chain)
+            matcher = Matcher(primers) if catalog else None
+            sample_matcher = Matcher(assigned_primers(catalog, sample)) if (catalog or {}).get('chain_assignments', {}).get(sample) else matcher
             config=catalog['config'] if catalog else {}
             selected_stage=config.get('observation_stage','mapping')
             scope=selected_stage if selected_stage.startswith('raw_') else 'retained_only' if selected_stage=='retained' else 'all_queries' if item.get('trace') else 'all_queries_final_annotations_only' if item.get('merged') else 'retained_only'
@@ -237,6 +240,10 @@ def aggregate(items, root, output, catalog=None, progress=None):
                 category = ('not_configured' if not matcher and frozen_names is None else 'sequence_unavailable' if not seq else
                             'read_structure_unavailable' if not structure_ok else
                             'unique' if len(names)==1 else 'multiple' if names else 'unmatched')
+                sample_category = category
+                if sample_matcher is not matcher and category in {'unique','multiple','unmatched'}:
+                    sample_names, _ = sample_matcher.match(match_seq)
+                    sample_category = 'unique' if len(sample_names)==1 else 'multiple' if sample_names else 'unmatched'
                 reason = row['filter_reason']
                 key = (sample, item['sample_key'], chain, scope)
                 match_counts[key+(category,)] += 1
@@ -275,20 +282,20 @@ def aggregate(items, root, output, catalog=None, progress=None):
                 pending.append((item['sample_key'], sample, item['pair'], chain, scope, row.get('sequence_id',''), category,
                      json.dumps(names,ensure_ascii=False), len(families), reason, row.get('v_call'), row.get('j_call'), row.get('c_call'), seq,
                       json.dumps(frozen_names,ensure_ascii=False) if frozen_names is not None else None,row.get('trim_state'),row.get('trim_length',0),
-                      row['matching_source'],row['matching_ordinal'],row['matching_unit'],row.get('mapping_sequence_id',row.get('sequence_id'))))
+                      row['matching_source'],row['matching_ordinal'],row['matching_unit'],row.get('mapping_sequence_id',row.get('sequence_id')),sample_category))
                 if count % 10000 == 0:
-                    conn.executemany('INSERT INTO observations VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',pending)
+                    conn.executemany('INSERT INTO observations VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',pending)
                     pending.clear()
                     conn.commit()
                     if progress:
                         progress(number-1, len(items), f'{sample} / {chain}：已统计 {count:,} 条')
-            conn.executemany('INSERT INTO observations VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',pending)
+            conn.executemany('INSERT INTO observations VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',pending)
             pending.clear()
             conn.commit()
             if catalog:
                 key=(sample,item['sample_key'],chain,scope)
                 for subset in ('all','retained'):
-                    for primer in catalog['assignments'][sample]:
+                    for primer in primers:
                         primer_counts.setdefault(key+(subset,primer['name']),0)
                 for category in ('unique','multiple','unmatched'):
                     match_counts.setdefault(key+(category,),0)
@@ -314,7 +321,7 @@ def aggregate(items, root, output, catalog=None, progress=None):
             SELECT sample,sample_key,
                 CASE WHEN MIN(scope)=MAX(scope) THEN MIN(scope) ELSE 'mixed_annotation_evidence' END AS scope,
                 matching_source,matching_ordinal,matching_unit AS unit,
-                CASE WHEN MIN(match_class)=MAX(match_class) THEN MIN(match_class)
+                CASE WHEN MIN(sample_match_class)=MAX(sample_match_class) THEN MIN(sample_match_class)
                     ELSE 'conflicting_assessment' END AS match_class,
                 group_concat(DISTINCT chain) AS chains
             FROM observations GROUP BY sample_key,matching_source,matching_ordinal

@@ -66,12 +66,13 @@ def fingerprint(items,catalog,root):
     config=dict((catalog or {}).get('config',{}));config.pop('figure_primers',None)
     selected={i['sample_label'] for i in items}
     assignments={s:(catalog or {}).get('assignments',{}).get(s,[]) for s in sorted(selected)}
+    chain_assignments={s:(catalog or {}).get('chain_assignments',{}).get(s,{}) for s in sorted(selected)}
     code=hashlib.sha256()
     for name in ('aggregate.py','catalog.py','matching.py','io.py','compute_jobs.py','batch.py'):
         code.update(Path(__file__).with_name(name).read_bytes())
     from scigblast.trace import __file__ as trace_file
     code.update(Path(trace_file).read_bytes())
-    return digest([str(root),items,dependencies,assignments,config,bool(catalog),code.hexdigest()])
+    return digest([str(root),items,dependencies,assignments,chain_assignments,config,bool(catalog),code.hexdigest()])
 
 
 def run_task(items,root,output,catalog):

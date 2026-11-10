@@ -2,6 +2,10 @@
 
 本模块分析已有 Pig/Base Mapping 和 AIRR 后处理结果，不执行 IgBLAST。Web 使用离线 `report.html` 统一展示，保留 PNG、CSV 与 `report.xlsx` 核查工作簿。
 
+Web 手动报告配置引物后的操作顺序为“选择样本与链 → 分配引物 → 运行引物匹配预检查 → 人工核对 → 生成完整报告”。预检查只读取原始 `_j`，以样本全部 Raw R1 reads 为分母，展示样本匹配构成、分链与逐引物占比，低匹配样本按配置测试其他引物组。缺少原始数据时显示不可计算。匹配率供人工核对配置，达到阈值时仍需用户确认。
+
+预检查通过同一资源队列执行，输出位于 `analysis/primer_checks/<版本>/`，提供独立 HTML 和 CSV；私有 `.primer-check.json` 保存可复用统计和来源回执。完整报告重新核验样本、链、配置、代码及 Raw 文件版本后复用这些统计。编辑配置、重新选择样本或原始数据变化后，需要重新预检查。界面的高级设置按表格读取、序列位置及 Adapter/UMI/Barcode 分组；手动分配模式仅显示该模式需要的表格字段。
+
 ## 选择正确的生成方式
 
 | 情况 | 入口 | 是否重算 |
@@ -26,7 +30,36 @@ rtk proxy python -m analysis.repertoire.export_html --source /path/to/completed-
 rtk proxy python -m analysis.repertoire.run --request /path/to/request.json --output /path/to/new-report-version
 ```
 
-最简请求可只给 `input_root`；需要引物分析时提供 `primer`：
+最简请求可只给 `input_root`。Web 默认支持只上传引物表，从识别出的样本与链逐项选择引物组，每条链可多选。选择完整引物名称时，开启精确名称关联。也可切换至 Submission 自动关联。
+
+直接请求可在 `columns.sample_chain_groups` 指定样本与链的分配。所有参与本次分析的样本链均需提供配置。MIX 拆链后按对应链统计引物与基因；共享 Raw/合并输入的总览按来源去重，使用各链引物并集。比对前的归属记录与明确剪切也使用并集。历史 `sample_groups` 配置继续按样本统一分配。
+
+```json
+{
+  "input_root": "/path/to/results",
+  "primer": {
+    "primer_path": "/path/to/primers.xls",
+    "columns": {
+      "primer_join_column": "B",
+      "primer_columns": [["C", "D"], ["E", "F"]],
+      "allow_primer_name_join": true,
+      "sample_chain_groups": {
+        "IgH-1": {"IGH": ["IgH_O1"]},
+        "TCRα-1": {"TRA": ["Pig_TRAC_1"]},
+        "MIX-1": {
+          "IGH": ["IgH_O1"],
+          "IGK": ["IgK"],
+          "IGL": ["IgL"],
+          "TRA": ["Pig_TRAC_1"],
+          "TRB": ["TCRβ"]
+        }
+      }
+    }
+  }
+}
+```
+
+Submission 自动关联请求如下。
 
 ```json
 {
@@ -54,7 +87,7 @@ rtk proxy python -m analysis.repertoire.run --request /path/to/request.json --ou
 | `sources.py`、`io.py`、`catalog.py` | 来源发现、版本核验、表格与序列读取、引物配置 |
 | `aggregate.py`、`matching.py` | 原 query 归属、跨链去重、匹配汇总 |
 | `usage.py`、`gene_cdr3.py`、`postprocessed_usage.py` | 基因组成、CDR3 去重、06 copy 追溯 |
-| `primer_metrics.py`、`alternatives.py`、`scenario_analysis.py` | Raw/Mapping 匹配率、Mapping 率、其他组与存疑分析 |
+| `primer_metrics.py`、`alternatives.py`、`scenario_analysis.py` | 原始 R1 引物匹配、其他组比较与历史关联分析 |
 | `output_metrics.py`、`repertoire_metrics.py`、`isotype.py` | 样本产出、多样性、B cell、Isotype |
 | `render*.py`、`figure_jobs.py`、`palette.py` | 静态 PNG、统一配色与有界绘图 |
 | `workbook*.py` | 实验核查工作簿 |
@@ -72,7 +105,7 @@ rtk proxy python -m analysis.repertoire.run --request /path/to/request.json --ou
 ├── 01_overview/                匹配、Isotype、样本产出汇总
 ├── 02_sample_genes/            样本 V/J/C 与参考匹配清单
 ├── 02_sample_metrics/          多样性、B cell、单样本 Isotype 数据
-├── 03_primer_genes/            逐引物匹配率、Mapping 率、V/J/C
+├── 03_primer_genes/            原始 R1 逐引物匹配率、V/J/C
 │   └── suspected/              独立的存疑引物组统计
 ├── 04_data_changes/            Raw/Clean/Merged/Mapping/Retained 变化
 ├── 05_details/                 诊断及可用性明细 CSV
@@ -88,7 +121,8 @@ rtk proxy python -m analysis.repertoire.run --request /path/to/request.json --ou
 
 - 原 query、实际 mapping 输入及最终 AIRR 分开保存；先记录引物归属再剪切。后补表只重新分析既有数据，不重新 mapping。
 - 严格 5′ 全长 IUPAC；read N 不算确定命中。唯一、多重、未匹配分开；不可评估不冒充未匹配。
-- 匹配率逐 read；Mapping rate 为对应匹配 reads 中有效 V 且 locus 为所选链的比例，不额外要求 productive。最终筛选保留量另计。
+- 新报告的引物匹配只使用最初始 R1（_j 文件），分母为该样本全部原始 reads。`primer_metrics.build_raw` 独立于 Mapping 结果和注释索引，共享来源在样本总览中只计一次；分链面板按对应引物筛选，分母仍为样本原始 reads。原始数据不可用时明确记为不可计算。
+- 新报告标记 `primer_matching_source=raw_R1`，输出 Raw 匹配率和其他组的 Raw 比较。Mapping rate 及存疑组到 Mapping 的关联分析留待后续实现。旧报告继续按其已保存的统计范围读取。
 - Pig/Base 的样本/引物 V/J/C、Isotype 组成使用已发布且回执一致的 06 junction_peps。Expression 累加 copy/umi_counts；V/J/C 分母各用该区可明确分类的权重。Unique CDR3 按基因内有效 AA 去重，同 AA 跨基因分别计数；无数据为 N/A。
 - Isotype 主类合并后重新去重，分母为可分类 C 注释；具体 C 基因继续在基因模块查看。
 - Total Reads = Merged；Total Receptor RNA = 后处理总 copy/umi_counts；Total Unique CDR3s = 对应范围唯一有效 CDR3aa。Raw/Clean 的 R1/R2 各自取证，不对半拆分。
