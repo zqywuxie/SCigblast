@@ -26,7 +26,10 @@ window.RepertoireReports = (() => {
       root.querySelectorAll('[data-rp-submission-setting]').forEach(node=>node.hidden=manualMode());
       const names=field('allow_primer_name_join').checked?primerChoices:[];
       const choices=[...groupChoices.map(name=>({name,label:name})),...names.filter(name=>!groupChoices.includes(name)).map(name=>({name,label:'引物 · '+name}))];
-      $('[data-rp-sample-groups]').innerHTML=allocationSamples.map(({sample,chains})=>{
+      const chainOrder=['IGH','IGK','IGL','TRA','TRB','TRD','TRG'];
+      const availableChains=chainOrder.filter(chain=>allocationSamples.some(row=>row.chains.includes(chain)));
+      const batch=choices.length&&availableChains.length?'<div class="rp-allocation-batch"><label>处理链<select data-rp-batch-chain>'+availableChains.map(chain=>'<option>'+chain+'</option>').join('')+'</select></label><label>引物组<select data-rp-batch-group>'+choices.map(choice=>'<option value="'+esc(choice.name)+'">'+esc(choice.label)+'</option>').join('')+'</select></label><button type="button" class="button button-ghost button-small" data-rp-batch-apply>批量添加到该链</button></div>':'';
+      $('[data-rp-sample-groups]').innerHTML=batch+allocationSamples.map(({sample,chains})=>{
         const rows=chains.map(chain=>{
           const chosen=sampleGroups[sample]?.[chain]||[];
           return `<details class="rp-sample-allocation"><summary><strong>${esc(chain)}</strong><span data-rp-chosen>${chosen.length?chosen.map(esc).join('、'):'选择引物组'}</span></summary><div class="rp-group-choices">${choices.map(choice=>`<label><input type="checkbox" data-rp-group-sample="${esc(sample)}" data-rp-group-chain="${esc(chain)}" value="${esc(choice.name)}" ${chosen.includes(choice.name)?'checked':''}>${esc(choice.label)}</label>`).join('')||'<p class="muted">请先读取可选引物组。</p>'}</div></details>`;
@@ -34,6 +37,17 @@ window.RepertoireReports = (() => {
         return `<section class="rp-sample-block"><header><strong>${esc(sample)}</strong><small>${chains.length} 条链</small></header>${rows||'<p class="muted">请先指定处理链或完成 Match。</p>'}</section>`;
       }).join('')||'<p class="muted">扫描样本或完成 Match 后，在此分配引物组。</p>';
     }
+    $('[data-rp-sample-groups]').addEventListener('click',event=>{
+      if(!event.target.closest('[data-rp-batch-apply]'))return;
+      const chain=$('[data-rp-batch-chain]').value,group=$('[data-rp-batch-group]').value;
+      for(const row of allocationSamples){
+        if(!row.chains.includes(chain))continue;
+        const chosen=new Set(sampleGroups[row.sample]?.[chain]||[]);chosen.add(group);
+        (sampleGroups[row.sample]??={})[chain]=[...chosen];
+      }
+      renderAllocation();
+      root.dispatchEvent(new Event('change',{bubbles:true}));
+    });
     $('[data-rp-sample-groups]').addEventListener('change',event=>{
       const input=event.target.closest('[data-rp-group-sample]');if(!input)return;
       const sample=input.dataset.rpGroupSample,chain=input.dataset.rpGroupChain,values=new Set(sampleGroups[sample]?.[chain]||[]);
@@ -269,16 +283,72 @@ window.RepertoireReports = (() => {
   function mount(root,{jobId=''}={}){
     const $=q=>root.querySelector(q),cfg=configPanel($('.rp-config'));
     let job=null,scan=null,runs=[],run=null,data=null,recordsAfter=0,busy=false,loading=false,timer=null,selection=new Set(),loadedId='',setupTouched=false,revision=0;
-    let sampleContext='';
+    let sampleContext='',step=1,planMode=false,scanEpoch=0;
+    const reportConfig=()=>$('[data-rp-use-primer]').checked?cfg.value():{};
     let primerCheck=null,checkEpoch=0,checkTimer=null;
     const message=(text,bad=false)=>{const node=$('[data-rp-message]');node.textContent=text;node.classList.toggle('page-error',bad);node.dataset.tone=bad?'error':'info';};
-    const setSetup=open=>{$('[data-rp-setup]').hidden=!open;$('[data-rp-open]').setAttribute('aria-expanded',String(open));$('[data-rp-open]').textContent=open?'收起配置':'生成报告';};
+    function setSetup(open){
+      $('[data-rp-setup]').hidden=!open;
+      $('[data-rp-open]').setAttribute('aria-expanded',String(open));
+      $('[data-rp-open]').textContent=open?'收起配置':'生成报告';
+      root.dataset.configuring=String(open);
+    }
+    function showStep(next,focus=false){
+      step=next;
+      root.querySelectorAll('[data-rp-step-pane]').forEach(pane=>{
+        pane.hidden=planMode?!['2','4'].includes(pane.dataset.rpStepPane):Number(pane.dataset.rpStepPane)!==step;
+      });
+      root.querySelectorAll('[data-rp-step]').forEach(button=>{
+        if(Number(button.dataset.rpStep)===step)button.setAttribute('aria-current','step');
+        else button.removeAttribute('aria-current');
+        button.dataset.complete=String(Number(button.dataset.rpStep)<step);
+      });
+      $('[data-rp-workflow]').hidden=planMode;
+      $('[data-rp-workflow-footer]').hidden=planMode;
+      $('[data-rp-back]').hidden=step===1;
+      $('[data-rp-next]').hidden=step===4;
+      $('[data-rp-step-caption]').textContent='第 '+step+' / 4 步';
+      $('[data-rp-step-feedback]').textContent='';
+      if(focus){const pane=$('[data-rp-step-pane="'+step+'"]');pane.tabIndex=-1;pane.focus({preventScroll:true});pane.scrollIntoView({block:'nearest'});}
+    }
+    function moveStep(next){
+      try{
+        if(next>1&&!selection.size)throw Error('请扫描结果，并至少选择一个样本链。');
+        if(next>2&&$('[data-rp-use-primer]').checked&&!reportConfig().primer_id)throw Error('请上传引物表并完成引物组分配。');
+        if(next>3&&$('[data-rp-use-primer]').checked&&!(primerCheck?.status==='succeeded'&&$('[data-rp-check-confirm]').checked))throw Error('请完成引物预检查，并勾选核对确认。');
+        showStep(next,true);
+      }catch(error){$('[data-rp-step-feedback]').textContent=error.message;}
+    }
+    root.querySelectorAll('[data-rp-step]').forEach(button=>button.onclick=()=>moveStep(Number(button.dataset.rpStep)));
+    $('[data-rp-next]').onclick=()=>moveStep(step===2&&!$('[data-rp-use-primer]').checked?4:step+1);
+    $('[data-rp-back]').onclick=()=>showStep(step===4&&!$('[data-rp-use-primer]').checked?2:step-1,true);
+    $('[data-rp-close]').onclick=()=>{setSetup(false);$('[data-rp-open]').focus({preventScroll:true});};
+    $('.rp-config').hidden=true;
+    $('[data-rp-use-primer]').onchange=()=>{
+      const enabled=$('[data-rp-use-primer]').checked;
+      $('.rp-config').hidden=!enabled;$('.rp-config').open=enabled;
+      $('[data-rp-preview]').hidden=!enabled;
+      invalidateCheck();
+    };
     const fileURL=(name,download=false)=>`/api/reports/${encodeURIComponent(run.id)}/file?name=${encodeURIComponent(name)}${download?'&download=true':''}`;
-    function body(){if(!scan)throw Error('请先扫描已有结果');if(!selection.size)throw Error('请至少选择一项样本链结果');return {scan_id:scan.scan_id,selected_ids:[...selection],config:cfg.value(),comparison_species:$('[data-rp-comparison-species]').value,primer_check_id:primerCheck?.status==='succeeded'&&$('[data-rp-check-confirm]').checked?primerCheck.id:''};}
+    function body(){if(!scan)throw Error('请先扫描已有结果');if(!selection.size)throw Error('请至少选择一项样本链结果');return {scan_id:scan.scan_id,selected_ids:[...selection],config:reportConfig(),comparison_species:$('[data-rp-comparison-species]').value,primer_check_id:primerCheck?.status==='succeeded'&&$('[data-rp-check-confirm]').checked?primerCheck.id:''};}
     function updateGenerate(){
       let configured=false,valid=true;
-      try{configured=Boolean(cfg.value().primer_id);}catch{valid=false;}
+      try{configured=Boolean(reportConfig().primer_id);if($('[data-rp-use-primer]').checked&&!configured)valid=false;}catch{valid=false;}
       $('[data-rp-run]').disabled=!selection.size||!valid||configured&&!(primerCheck?.status==='succeeded'&&$('[data-rp-check-confirm]').checked);
+      $('[data-rp-run]').hidden=planMode;
+      $('[data-rp-preview]').disabled=!valid||!configured||!planMode&&!selection.size;
+      $('[data-rp-check]').disabled=busy||!valid||!configured||!selection.size||['queued','running','cancelling'].includes(primerCheck?.status);
+      $('[data-rp-check-panel]').hidden=planMode||!$('[data-rp-use-primer]').checked;
+      $('[data-rp-no-primer-note]').hidden=$('[data-rp-use-primer]').checked;
+      const chosen=(scan?.items||[]).filter(item=>selection.has(item.id));
+      const samples=new Set(chosen.map(item=>item.sample_label));
+      const summary=[['任务',job?.dataset||'已有分析结果'],['样本范围',planMode?'主分析完成后读取结果':samples.size+' 个样本 · '+selection.size+' 项链结果'],
+        ['引物分析',configured?'已配置引物表':$('[data-rp-use-primer]').checked?'待完成配置':'未启用'],
+        ['匹配预检查',planMode?'主分析完成后执行':configured?(primerCheck?.status==='succeeded'&&$('[data-rp-check-confirm]').checked?'已核对':'待核对'):'无需预检查'],
+        ['输出内容','HTML 报告、PNG 与 Excel']];
+      $('[data-rp-confirm-summary]').innerHTML=summary.map(([label,value])=>'<dt>'+esc(label)+'</dt><dd>'+esc(value)+'</dd>').join('');
+
     }
     function invalidateCheck(){
       const previous=Boolean(primerCheck);
@@ -337,7 +407,7 @@ window.RepertoireReports = (() => {
       if(['failed','cancelled','interrupted'].includes(created.status))primerCheck=await api(`/api/reports/${created.id}/retry`,{});
       await pollCheck(epoch);
     });
-    async function action(button,fn){if(busy)return;busy=true;const old=button.textContent;button.disabled=true;button.setAttribute('aria-busy','true');try{await fn();}catch(e){message(e.message,true);}finally{busy=false;button.disabled=button.matches('[data-rp-check]')&&['queued','running','cancelling'].includes(primerCheck?.status);button.textContent=old;button.removeAttribute('aria-busy');updateGenerate();}}
+    async function action(button,fn){if(busy)return;busy=true;const old=button.textContent;button.disabled=true;button.setAttribute('aria-busy','true');try{await fn();}catch(e){message(e.message,true);if(button.matches('[data-rp-scan]'))$('[data-rp-candidates]').textContent='扫描失败，请点击扫描按钮重试。';}finally{busy=false;button.disabled=button.matches('[data-rp-check]')&&['queued','running','cancelling'].includes(primerCheck?.status);button.textContent=button.matches('[data-rp-scan]')&&scan?'重新扫描':old;button.removeAttribute('aria-busy');updateGenerate();}}
     function traceOptions(){
       const options=(name,values)=>{const select=$(`[data-rp-${name}]`),previous=select.value;select.replaceChildren(new Option('全部',''),...[...new Set(values.filter(Boolean))].sort().map(v=>new Option(v,v)));if(values.includes(previous))select.value=previous;};
       options('sample',data.samples.map(r=>r.sample));options('chain',data.samples.map(r=>r.chain));
@@ -355,7 +425,7 @@ window.RepertoireReports = (() => {
       $('[data-rp-empty]').hidden=Boolean(run);
       if(!run){$('[data-rp-status]').replaceChildren();$('[data-rp-run-actions]').replaceChildren();return;}
       if(run.archived){$('[data-rp-status]').innerHTML='<p class="rp-state-notice">来源任务已归档，请从任务归档包获取报告。</p>';$('[data-rp-run-actions]').replaceChildren();return;}
-      const phase=run.status==='succeeded'?'报告已生成':run.progress?.message||(run.status==='queued'?'等待可用资源':'');
+      const phase=({succeeded:'报告已生成',cancelled:'本次生成已取消，可重试或重新配置。',failed:'生成失败，可查看日志后重试。',interrupted:'生成已中断，可恢复或重新配置。'})[run.status]||run.progress?.message||(run.status==='queued'?'等待可用资源':'');
       const progress=run.status==='running'&&run.progress?.total>0?`<div class="rp-run-progress"><progress max="${Number(run.progress.total)}" value="${Math.max(0,Math.min(Number(run.progress.total),Number(run.progress.done)||0))}" aria-label="报告生成进度"></progress><span>${Number(run.progress.done)||0} / ${Number(run.progress.total)}</span></div>`:'';
       $('[data-rp-status]').innerHTML=`<div class="rp-status" data-state="${esc(run.status)}"><span class="rp-status-badge">${esc(statusName[run.status]||run.status)}</span><span class="rp-status-description">${esc(phase)}</span><small>${esc(timeLabel(run.ended_at||run.created_at))}</small></div>${progress}${run.error?`<p class="page-error rp-run-error">${esc(run.error)}</p>`:''}`;
       $('[data-rp-run-actions]').innerHTML=(['queued','running'].includes(run.status)?'<button type="button" class="button button-ghost button-small" data-rp-cancel>取消</button>':['failed','cancelled','interrupted'].includes(run.status)?'<button type="button" class="button button-ghost button-small" data-rp-retry>重试</button>':'')+`<a class="button button-ghost button-small" download="analysis.log" href="${esc(fileURL('analysis.log',true))}">日志</a>`;
@@ -377,21 +447,35 @@ window.RepertoireReports = (() => {
       try{const selected=$('[data-rp-runs]').value;runs=await api('/api/reports'+(jobId?'?job_id='+encodeURIComponent(jobId):''));
         $('[data-rp-runs]').innerHTML=runs.length?runs.map(r=>`<option value="${esc(r.id)}">${esc(timeLabel(r.created_at))} · ${esc(statusName[r.status])} · ${esc(r.id.slice(0,8))}</option>`).join(''):'<option value="">暂无报告</option>';
         if(runs.some(r=>r.id===selected))$('[data-rp-runs]').value=selected;
+        else if(runs.length)$('[data-rp-runs]').value=(runs.find(r=>['queued','running','cancelling'].includes(r.status))||runs.find(r=>r.status==='succeeded')||runs[0]).id;
         if(!jobId&&!setupTouched)setSetup(!runs.length);await display();
       }catch(e){message(e.message,true);}finally{loading=false;clearTimeout(timer);if(runs.some(r=>['queued','running','cancelling'].includes(r.status)))timer=setTimeout(()=>{if(!document.hidden&&!root.closest('[hidden]'))load();else timer=setTimeout(load,6000);},4000);}
     }
-    $('[data-rp-open]').onclick=()=>{setupTouched=true;setSetup($('[data-rp-setup]').hidden);};$('[data-rp-refresh]').onclick=load;
+    $('[data-rp-open]').onclick=()=>{
+      setupTouched=true;const open=$('[data-rp-setup]').hidden;setSetup(open);
+      if(open){showStep(step);$('[data-rp-setup]').scrollIntoView({block:'start'});if(jobId&&!planMode&&!scan&&!busy)$('[data-rp-scan]').click();}
+    };$('[data-rp-refresh]').onclick=load;
     $('[data-rp-scan]').onclick=e=>action(e.target,async()=>{
-      invalidateCheck();scan=null;selection.clear();cfg.setSamples([]);$('[data-rp-candidates]').replaceChildren();updateGenerate();
-      scan=await api('/api/reports/scan',jobId?{job_id:jobId}:{input_path:$('[data-rp-path]').value.trim()});selection=new Set(scan.items.map(r=>r.id));
-      $('[data-rp-candidates]').innerHTML=`<div class="rp-candidate-heading"><strong>样本与链</strong><span data-rp-selection-count></span><div class="rp-actions"><button type="button" class="button button-ghost button-small" data-rp-select-all>全选</button><button type="button" class="button button-ghost button-small" data-rp-select-none>清空</button></div></div><div class="rp-candidates">${scan.items.map(r=>`<label class="rp-candidate-row"><input type="checkbox" data-rp-item="${esc(r.id)}" checked><span class="rp-candidate-sample"><strong>${esc(r.sample_label)}</strong>${r.pair&&r.pair!==r.sample_label?`<span>${esc(r.pair)}</span>`:''}<small>${esc(r.dataset||'')}</small></span><span class="rp-chain-tag">${esc(r.chain)}</span></label>`).join('')}</div>`;
-      const update=()=>{$('[data-rp-selection-count]').textContent=selection.size+' / '+scan.items.length;cfg.setSamples(scan.items.filter(r=>selection.has(r.id)));invalidateCheck();};
+      const epoch=++scanEpoch;
+      invalidateCheck();scan=null;selection.clear();cfg.setSamples([]);$('[data-rp-candidates]').textContent='正在读取可用样本与链…';updateGenerate();
+      const result=await api('/api/reports/scan',jobId?{job_id:jobId}:{input_path:$('[data-rp-path]').value.trim()});
+      if(epoch!==scanEpoch)return;
+      scan=result;selection=new Set(scan.items.map(r=>r.id));
+      const samples=new Map();
+      for(const item of scan.items){if(!samples.has(item.sample_label))samples.set(item.sample_label,[]);samples.get(item.sample_label).push(item);}
+      $('[data-rp-candidates]').innerHTML='<div class="rp-candidate-heading"><strong>样本与链</strong><span data-rp-selection-count></span><div class="rp-actions"><button type="button" class="button button-ghost button-small" data-rp-select-all>全选</button><button type="button" class="button button-ghost button-small" data-rp-select-none>清空</button></div></div><label class="rp-sample-search"><input type="search" data-rp-sample-search placeholder="搜索样本名称" aria-label="搜索报告样本"></label><div class="rp-candidates rp-sample-selections">'+[...samples].map(([sample,items])=>'<div class="rp-selection-sample" data-rp-sample-name="'+esc(sample)+'"><strong>'+esc(sample)+'</strong><div>'+items.map(item=>'<label class="rp-selection-chain"><input type="checkbox" data-rp-item="'+esc(item.id)+'" checked><span>'+esc(item.chain)+'</span></label>').join('')+'</div></div>').join('')+'</div><p class="rp-search-empty" data-rp-search-empty hidden>没有符合搜索条件的样本。</p>';
+      $('[data-rp-sample-search]').oninput=event=>{
+        const query=event.target.value.trim().toLocaleLowerCase();let visible=0;
+        root.querySelectorAll('[data-rp-sample-name]').forEach(row=>{row.hidden=!row.dataset.rpSampleName.toLocaleLowerCase().includes(query);if(!row.hidden)visible++;});
+        $('[data-rp-search-empty]').hidden=visible>0;
+      };
+      const update=()=>{$('[data-rp-selection-count]').textContent=new Set(scan.items.filter(item=>selection.has(item.id)).map(item=>item.sample_label)).size+' 个样本 · '+selection.size+' / '+scan.items.length+' 项链';cfg.setSamples(scan.items.filter(r=>selection.has(r.id)));invalidateCheck();};
       $('[data-rp-candidates]').querySelectorAll('[data-rp-item]').forEach(input=>input.onchange=()=>{if(input.checked)selection.add(input.dataset.rpItem);else selection.delete(input.dataset.rpItem);update();});
-      for(const [key,checked] of [['all',true],['none',false]])$(`[data-rp-select-${key}]`).onclick=()=>{$('[data-rp-candidates]').querySelectorAll('[data-rp-item]').forEach(input=>{input.checked=checked;if(checked)selection.add(input.dataset.rpItem);else selection.delete(input.dataset.rpItem);});update();};update();message('已识别结果，请选择样本并核对引物配置。');
+      for(const [key,checked] of [['all',true],['none',false]])$(`[data-rp-select-${key}]`).onclick=()=>{$('[data-rp-candidates]').querySelectorAll('[data-rp-item]').forEach(input=>{input.checked=checked;if(checked)selection.add(input.dataset.rpItem);else selection.delete(input.dataset.rpItem);});update();};update();message('已识别结果，请选择样本并核对引物配置。');if(step===1&&!$('[data-rp-setup]').hidden)$('[data-rp-setup]').scrollIntoView({block:'start'});
     });
-    $('[data-rp-preview]').onclick=e=>action(e.target,async()=>{const preview=jobId&&job?.status!=='SUCCEEDED'?await api(`/api/reports/plans/${encodeURIComponent(jobId)}/preview`,cfg.value()):await api('/api/reports/preview',body());$('[data-rp-allocation]').innerHTML=`<div class="rp-allocation">${(Object.keys(preview.chain_assignments||{}).length?Object.entries(preview.chain_assignments).flatMap(([sample,chains])=>Object.entries(chains).map(([chain,primers])=>[sample+' / '+chain,primers])):Object.entries(preview.assignments)).map(([sample,primers])=>`<div class="rp-assignment-row"><strong>${esc(sample)}</strong><span>${primers.map(p=>`<span class="rp-primer-tag">${esc(p.name)}<small>${esc(p.group)}</small></span>`).join('')}</span></div>`).join('')||'<p class="rp-inline-empty">未配置引物表。</p>'}</div>`;message('引物分配已更新。');});
+    $('[data-rp-preview]').onclick=e=>action(e.target,async()=>{const preview=jobId&&planMode?await api(`/api/reports/plans/${encodeURIComponent(jobId)}/preview`,reportConfig()):await api('/api/reports/preview',body());$('[data-rp-allocation]').innerHTML=`<div class="rp-allocation">${(Object.keys(preview.chain_assignments||{}).length?Object.entries(preview.chain_assignments).flatMap(([sample,chains])=>Object.entries(chains).map(([chain,primers])=>[sample+' / '+chain,primers])):Object.entries(preview.assignments)).map(([sample,primers])=>`<div class="rp-assignment-row"><strong>${esc(sample)}</strong><span>${primers.map(p=>`<span class="rp-primer-tag">${esc(p.name)}<small>${esc(p.group)}</small></span>`).join('')}</span></div>`).join('')||'<p class="rp-inline-empty">未配置引物表。</p>'}</div>`;message('引物分配已更新。');});
     $('[data-rp-run]').onclick=e=>action(e.target,async()=>{const created=await api('/api/reports',body());setSetup(false);await load();$('[data-rp-runs]').value=created.id;await display();message('已加入报告生成队列。');});
-    $('[data-rp-save-plan]').onclick=e=>action(e.target,async()=>{await api(`/api/reports/plans/${encodeURIComponent(jobId)}`,cfg.value(),'PUT');message('已保存，主分析完成后自动生成报告。');await load();});
+    $('[data-rp-save-plan]').onclick=e=>action(e.target,async()=>{await api(`/api/reports/plans/${encodeURIComponent(jobId)}`,reportConfig(),'PUT');message('已保存，主分析完成后自动生成报告。');await load();});
     $('[data-rp-runs]').onchange=()=>{loadedId='';display().catch(e=>message(e.message,true));};
     for(const key of ['sample','chain'])$(`[data-rp-${key}]`).onchange=traceOptions;
     async function records(append=false){
@@ -408,12 +492,25 @@ window.RepertoireReports = (() => {
       const context=[job.attempt_no,job.status,job.current_stage].join(':');
       if(context!==sampleContext){
         sampleContext=context;
+        if(scan){scanEpoch++;scan=null;selection.clear();invalidateCheck();$('[data-rp-candidates]').textContent='任务状态已变化，请重新扫描结果。';showStep(1);}
+
         if(job.input_assignments?.length)cfg.setSamples(job.input_assignments);
         api('/api/reports/plans/'+encodeURIComponent(jobId)+'/samples').then(data=>{if(sampleContext===context&&data.items.length)cfg.setSamples(data.items);}).catch(()=>{});
       }
-const supported=['igblast_base','pig_igblast'].includes(job.pipeline);root.hidden=!supported;if(!supported)return;root.querySelector('.rp-source').hidden=true;const canPlan=!['SUCCEEDED','ARCHIVED','ARCHIVING','DELETING'].includes(job.status);$('[data-rp-save-plan]').hidden=!canPlan;$('[data-rp-check-panel]').hidden=canPlan;$('[data-rp-scan]').disabled=canPlan;$('[data-rp-source-note]').textContent=canPlan?'保存引物配置，主分析完成后自动生成报告。':'扫描当前结果，可补充配置并生成新版报告。';},load};
+      const supported=['igblast_base','pig_igblast'].includes(job.pipeline);root.hidden=!supported;if(!supported)return;
+      const previousPlanMode=planMode;
+      planMode=!['SUCCEEDED','ARCHIVED','ARCHIVING','DELETING'].includes(job.status);
+      $('[data-rp-path-field]').hidden=true;
+      $('[data-rp-current-source]').hidden=false;
+      $('[data-rp-current-source]').textContent=job.dataset+' · 当前任务结果';
+      $('[data-rp-scan]').textContent=scan?'重新扫描':'扫描当前任务结果';
+      $('[data-rp-save-plan]').hidden=!planMode;
+      $('[data-rp-scan]').disabled=planMode||['ARCHIVED','ARCHIVING','DELETING'].includes(job.status);
+      $('[data-rp-source-note]').textContent=planMode?'保存引物配置，主分析完成后自动生成报告。':'仅扫描当前任务已发布的结果。';
+      if(previousPlanMode!==planMode)showStep(step);updateGenerate();
+    },load};
     if(!jobId){const params=new URLSearchParams(location.search);if(params.get('job_id'))location.href='/jobs/'+encodeURIComponent(params.get('job_id'))+'#primer';}
-    instances.push(instance);load();return instance;
+    showStep(1);updateGenerate();instances.push(instance);load();return instance;
   }
   document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('[data-report-panel]').forEach(root=>mount(root,{jobId:window.SCIGBLAST_JOB_ID||''}));document.querySelectorAll('.rp-config').forEach(configPanel);});
   return {configPanel,update:job=>instances.forEach(panel=>panel.update(job)),load:()=>instances.forEach(panel=>panel.load())};

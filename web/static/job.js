@@ -152,7 +152,7 @@
       $('#metadata-report').innerHTML=rows.length?`<table><thead><tr><th>状态</th><th>样本</th><th>Dual Index</th><th>Note</th><th>来源</th><th>说明</th></tr></thead><tbody>${rows.map(r=>`<tr class="error-row"><td>未识别</td><td>${esc(r.sample_id)}</td><td>${esc(r.dual_index)}</td><td>${esc(r.note)}</td><td>${esc(r.file)} / ${esc(r.sheet)}:${r.row}</td><td>${esc(r.reason)}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">当前筛选下没有未识别的登记样本。</p>';
     }catch(e){if(token===matchRequest)$('#metadata-report').textContent=`登记信息读取失败：${e.message}。请刷新重试。`;}
   }
-  function setTab(name){if(name==='stages-data')name='primer';if(tab==='artifacts')saveSummaryState();if(name==='match'&&job?.requires_match_review===false)name='overview';tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));b.tabIndex=b.dataset.tab===name?0:-1;});document.querySelectorAll('.tab-content').forEach(p=>{const active=p.id===`tab-${name}`;p.classList.toggle('active',active);p.hidden=!active;});const selectedTab=$(`[data-tab="${name}"]`),nav=$('.detail-tabs');if(selectedTab.offsetLeft<nav.scrollLeft)nav.scrollLeft=selectedTab.offsetLeft;else if(selectedTab.offsetLeft+selectedTab.offsetWidth>nav.scrollLeft+nav.clientWidth)nav.scrollLeft=selectedTab.offsetLeft+selectedTab.offsetWidth-nav.clientWidth;if(name==='match')loadMatch().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);if(name==='treemap')treemapPanel?.load();if(['stages-data','primer'].includes(name))window.RepertoireReports?.load();syncSelection();persistResultView();}
+  function setTab(name){if(name==='stages-data')name='primer';if(!document.querySelector('.detail-tab[data-tab="'+name+'"]'))return;if(tab==='artifacts')saveSummaryState();if(name==='match'&&job?.requires_match_review===false)name='overview';tab=name;document.querySelectorAll('.detail-tab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===name);b.setAttribute('aria-selected',String(b.dataset.tab===name));b.tabIndex=b.dataset.tab===name?0:-1;});document.querySelectorAll('.tab-content').forEach(p=>{const active=p.id===`tab-${name}`;p.classList.toggle('active',active);p.hidden=!active;});const selectedTab=$(`[data-tab="${name}"]`),nav=$('.detail-tabs');if(selectedTab.offsetLeft<nav.scrollLeft)nav.scrollLeft=selectedTab.offsetLeft;else if(selectedTab.offsetLeft+selectedTab.offsetWidth>nav.scrollLeft+nav.clientWidth)nav.scrollLeft=selectedTab.offsetLeft+selectedTab.offsetWidth-nav.clientWidth;if(name==='match')loadMatch().catch(fail);if(name==='log')loadLog().catch(fail);if(name==='artifacts')loadArtifacts().catch(fail);if(name==='treemap')treemapPanel?.load();if(['stages-data','primer'].includes(name))window.RepertoireReports?.load();syncSelection();persistResultView();if(location.hash.slice(1)!==name)history.replaceState(null,'','#'+name);}
   async function refresh(force=false){if(document.hidden||refreshPendingCount&&!force)return;const generation=++refreshGeneration,previousStatus=job?.status,previousAttempt=attempt;let data;refreshPendingCount++;try{data=await api(`/api/jobs/${id}`);}catch(error){if(generation===refreshGeneration)connectionError(error);return;}finally{refreshPendingCount--;}if(generation!==refreshGeneration)return;job=data.job;runtimeAnchor=performance.now();lastUpdate=new Date().toLocaleTimeString('zh-CN');$('#job-updated').textContent=`最近更新 ${lastUpdate}`;$('#job-connection').classList.add('hidden');const nextSummarySignature=JSON.stringify(data.match_summary_signature||[]);const summaryChanged=matchSummarySignature!==''&&matchSummarySignature!==nextSummarySignature;matchSummarySignature=nextSummarySignature;if(attempt!==job.attempt_no){if(attempt>=0)resetResultView();attempt=job.attempt_no;revision='';offset=0;source='';$('#log-view').textContent='';if(tab==='match')loadMatch().catch(fail);}else if(tab==='match'&&job.requires_match_review&&job.status==='WAITING_REVIEW'&&(summaryChanged||previousStatus!==job.status)){loadMatch().catch(fail);}
     treemapPanel?.update(job);
     window.RepertoireReports?.update(job);
@@ -169,7 +169,13 @@
     if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING','ARCHIVED','DELETING'].includes(job.status)&&(job.submission_revision||job.sample_source==='directory'))actions.push(['edit','编辑资料 / 重新 Match']);
     if(!['QUEUED','RUNNING','MATCHING','STOPPING','ARCHIVING'].includes(job.status)&&!job.delete_in_progress)actions.push(['delete',job.status==='DELETING'?'重试删除':'删除任务']);
     if(job.can_stop_recovered&&!actions.some(([action])=>action==='stop'))actions.unshift(['stop','停止仍在执行的任务']);
-    region('#head-actions',actions.map(([action,label])=>`<button class="button ${action==='stop'||action==='delete'?'button-danger-ghost':action==='edit'?'button-ghost':'button-primary'}" data-action="${action}" ${action==='resume'&&job.resume_blocked?'disabled':''}>${label}</button>`).join(''));
+    const secondary=actions.filter(([action])=>['edit','delete'].includes(action));
+    const primary=actions.filter(([action])=>!['edit','delete'].includes(action));
+    const ready=['SUCCEEDED','ARCHIVED'].includes(job.status);
+    const actionButton=([action,label])=>'<button class="button '+(['stop','delete'].includes(action)?'button-danger-ghost':action==='edit'?'button-ghost':'button-primary')+'" data-action="'+action+'" '+(action==='resume'&&job.resume_blocked?'disabled':'')+'>'+esc(label)+'</button>';
+    const shortcuts=ready?'<button class="button button-primary" data-open-tab="artifacts">查看结果</button>'+(['igblast_base','pig_igblast'].includes(job.pipeline)?'<button class="button button-ghost" data-open-tab="primer">分析报告</button>':''):'';
+    region('#head-actions',shortcuts+primary.map(actionButton).join('')+(secondary.length?'<details id="job-more-actions" class="job-more-actions"><summary>更多操作</summary><div>'+secondary.map(actionButton).join('')+'</div></details>':''));
+
     updateRuntime();
     textValue('#runtime-note',job.status==='QUEUED'?'排队时间不计入':job.runtime_running?`第 ${job.attempt_no} 次执行 · 实时更新`:job.runtime_seconds!=null?'本次执行已结束':'从执行启动时开始计时');
     textValue('#current-stage-value',job.current_stage?(job.stage_labels[job.current_stage]||job.current_stage):job.status==='QUEUED'?'等待启动':job.completed_stages.length===job.stages.length?'全部阶段已完成':'暂无阶段信息');
@@ -191,7 +197,13 @@
     syncSelection();
     if(tab==='artifacts'&&previousStatus&&(previousStatus!==job.status||previousAttempt!==attempt))loadArtifacts().catch(fail);
     nextDetailPoll=Date.now()+detailPollDelay();
-    if(!resultViewReady){const restored=restoreResultView();if(location.hash==='#match')setTab('match');else if(location.hash==='#artifacts')setTab('artifacts');else if(location.hash==='#treemap')setTab('treemap');else if(['#stages-data','#primer'].includes(location.hash))setTab(location.hash.slice(1));else if(restored)setTab(restored);else if(['SUCCEEDED','ARCHIVED'].includes(job.status))setTab('artifacts');}
+    if(!resultViewReady){
+      const restored=restoreResultView(),requested=location.hash.slice(1);
+      if(['overview','match','artifacts','treemap','log','audit','stages-data','primer'].includes(requested))setTab(requested);
+      else if(restored)setTab(restored);
+      else if(job.status==='WAITING_REVIEW')setTab('match');
+      else if(['SUCCEEDED','ARCHIVED'].includes(job.status))setTab('artifacts');
+    }
   }
   let matchRequest=0, matchLoading=false, batchBusy=false, pageRows=[], selected=new Set(), reviewCounts=null, lastUnmarked=-1, matchSearchTimer, failedReview=null;
   $('#tab-match .match-table-wrap').before(Object.assign(document.createElement('div'), {className:'batch-review-bar', innerHTML:
@@ -561,6 +573,8 @@
   tabs.forEach(button=>{button.setAttribute('aria-controls','tab-'+button.dataset.tab);button.onkeydown=e=>{const visible=tabs.filter(b=>!b.classList.contains('hidden')),index=visible.indexOf(button);let next;if(e.key==='ArrowRight')next=(index+1)%visible.length;else if(e.key==='ArrowLeft')next=(index+visible.length-1)%visible.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=visible.length-1;else return;e.preventDefault();visible[next].focus();setTab(visible[next].dataset.tab);};});
   $('#pause-log').onclick=()=>{paused=!paused;$('#pause-log').textContent=paused?'继续刷新':'暂停刷新';};$('#copy-log').onclick=()=>navigator.clipboard.writeText($('#log-view').textContent).catch(fail);
   document.addEventListener('click',event=>{const trigger=event.target.closest('[data-open-tab],[data-open-log]');if(trigger)jumpToTab(trigger.dataset.openTab||'log');});
+  document.addEventListener('click',event=>{if(!event.target.closest('#job-more-actions'))$('#job-more-actions')?.removeAttribute('open');});
+  document.addEventListener('keydown',event=>{const menu=$('#job-more-actions');if(event.key==='Escape'&&menu?.open){menu.open=false;menu.querySelector('summary').focus({preventScroll:true});}});
   $('#job-retry').onclick=()=>refresh(true);
   $('#igblast-task-details').addEventListener('toggle',()=>{if($('#igblast-task-details').open&&job?.igblast_progress)loadIgblastTasks();});
   $('#igblast-task-query').addEventListener('input',()=>{
@@ -594,7 +608,7 @@
   let nextDetailPoll=0,nextLogPoll=0;
   const detailPollDelay=()=>activeStatuses.has(job?.status)?5000:30000;
   document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(summarySearchTimer);saveSummaryState();return;}nextDetailPoll=Date.now()+detailPollDelay();refresh(true).catch(connectionError);if(tab==='log')loadLog().catch(fail);if(tab==='artifacts')loadArtifacts().catch(fail);if(tab==='treemap')treemapPanel?.load(true);});
-  window.addEventListener('hashchange',()=>{const name=location.hash.slice(1);if(job&&['match','artifacts','treemap','stages-data','primer'].includes(name))setTab(name);});
+  window.addEventListener('hashchange',()=>{const name=location.hash.slice(1);if(job&&['overview','match','artifacts','treemap','log','audit','stages-data','primer'].includes(name))setTab(name);});
   window.addEventListener('pagehide',saveSummaryState);
   refresh().catch(fail);
   setInterval(()=>{if(document.hidden)return;updateRuntime();if(busy)return;const now=Date.now();if(now>=nextDetailPoll){nextDetailPoll=now+detailPollDelay();refresh().catch(connectionError);}if(tab==='log'&&now>=nextLogPoll){nextLogPoll=now+(activeStatuses.has(job?.status)?2000:30000);loadLog().catch(fail);}},1000);

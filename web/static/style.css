@@ -581,3 +581,25 @@ dialog.pipeline-help[open]{display:flex;flex-direction:column}body:has(#pipeline
 .tasks-panel .job-actions-cell{min-width:200px}
 .tasks-panel .row-actions{justify-content:flex-start;gap:8px}
 .airr-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.airr-heading h2{margin:0}.airr-active{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px;margin-top:16px}.airr-active article{border:1px solid var(--border,#d9e2ed);border-radius:10px;padding:14px;display:grid;gap:8px}.airr-active article>div{display:flex;justify-content:space-between;gap:12px}.airr-active progress{width:100%;height:8px;accent-color:var(--primary,#315b9b)}.airr-active small{color:var(--muted,#64748b)}
+
+/* Task context stays compact so the working tabs fit in the first viewport. */
+.detail-shell .detail-head{flex-direction:row;align-items:flex-start;flex-wrap:wrap;padding:14px 0;gap:12px}
+.detail-shell #head-actions{align-items:center;margin-left:auto;padding-top:1px;max-width:none}
+.detail-shell .detail-meta{display:flex;align-items:stretch;margin-bottom:8px}
+.detail-shell .meta-card{display:flex;align-items:baseline;gap:9px;flex:1;padding:10px 14px;flex-wrap:wrap}
+.detail-shell .meta-card>span{margin:0;font-size:11px}.detail-shell .meta-card strong,.detail-shell .runtime-card strong{font-size:14px;line-height:1.5;margin:0}
+.detail-shell .meta-card small{display:none}
+.detail-shell .task-guidance{margin-bottom:10px;min-height:30px}.detail-shell .task-guidance p{font-size:11px}
+.detail-shell .detail-job-id{display:inline-block;margin-top:2px}
+.job-more-actions{position:relative;flex:none}
+.job-more-actions>summary{padding:9px 11px;min-height:36px;list-style:none;border:1px solid var(--line);border-radius:6px;background:var(--surface);font-size:11px;color:var(--muted);cursor:pointer}
+.job-more-actions>summary::-webkit-details-marker{display:none}.job-more-actions>summary::after{content:'⌄';margin-left:7px}
+.job-more-actions>div{position:absolute;right:0;top:calc(100% + 5px);z-index:15;display:grid;gap:5px;padding:7px;min-width:195px;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;box-shadow:0 8px 25px #1225381a}
+.detail-shell .job-more-actions>div .button{text-align:left;justify-content:flex-start;width:100%}
+.detail-shell #tab-overview>.stage-panel{margin-bottom:20px}
+.detail-shell .detail-tabs{scrollbar-width:thin}.detail-shell .detail-tab{padding:13px 12px}
+@media(max-width:650px){
+  .detail-shell .detail-head{flex-direction:column;gap:12px}.detail-shell #head-actions{margin:0;justify-content:flex-start;flex-wrap:wrap}
+  .detail-shell .detail-meta{display:grid;grid-template-columns:1fr 1fr}.detail-shell .meta-card{padding:9px 11px;gap:3px 7px}
+  .detail-shell .meta-card:last-child{grid-column:1/-1}.detail-shell .meta-card strong{font-size:13px}
+}

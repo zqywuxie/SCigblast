@@ -1,21 +1,45 @@
 <section class="rp-panel" data-report-panel data-report-view="{{ report_view|default('all') }}">
   <div class="tab-toolbar rp-panel-toolbar"><h3>分析报告</h3><div class="rp-actions"><button type="button" class="button button-primary button-small" data-rp-open aria-expanded="false">生成报告</button><button type="button" class="button button-ghost button-small" data-rp-refresh>刷新</button></div></div>
   <div class="rp-setup" data-rp-setup hidden>
-    <div class="rp-setup-heading"><h4>选择分析结果</h4></div>
-    <div class="rp-source"><label>现有结果目录<input data-rp-path placeholder="服务器上的分析结果绝对路径"></label><button type="button" class="button button-primary" data-rp-scan>扫描结果</button></div>
-    <p class="rp-source-note" data-rp-source-note>支持 Pig IgBLAST / IgBLAST base 的历史结果或单链 AIRR 文件目录。</p>
-    <div data-rp-candidates></div>
-    {% include 'report_config.html' %}
-    <details class="advanced-details rp-reference-compare"><summary>历史结果缺少参考清单时</summary><label>与当前数据库比较<select data-rp-comparison-species><option value="">仅使用当次参考记录（默认）</option><option value="pig">当前 Pig 参考</option><option value="human">当前 Human 参考</option><option value="cat">当前 Cat 参考</option><option value="dog">当前 Dog 参考</option></select></label><p class="muted">仅对缺少历史清单的结果生效，并明确标为“当前参考比较”，不会当作原比对数据库。</p></details>
-    <section class="rp-primer-check" data-rp-check-panel>
-      <div class="rp-check-heading"><div><span class="rp-step">04</span><h4>引物匹配预检查</h4></div><button type="button" class="button button-primary button-small" data-rp-check>运行预检查</button></div>
-      <p class="rp-check-note">读取最初始 _j 文件，核对样本、链与引物组的匹配效果。</p>
-      <div data-rp-check-status role="status" aria-live="polite">选择分析结果并完成引物配置后开始。</div>
-      <div data-rp-check-results hidden></div>
-      <label class="rp-check-confirm" data-rp-check-confirm-label hidden><input type="checkbox" data-rp-check-confirm><span>我已核对所选引物组和匹配结果</span></label>
+    <div class="rp-setup-heading"><div><h4>生成分析报告</h4><p>选择本次分析范围，核对后提交。</p></div><button type="button" class="rp-setup-close" data-rp-close aria-label="关闭报告配置">×</button></div>
+    <nav class="rp-workflow" data-rp-workflow aria-label="报告生成步骤">
+      <button type="button" data-rp-step="1" aria-current="step"><b>1</b><span>选择样本</span></button>
+      <button type="button" data-rp-step="2"><b>2</b><span>引物配置</span></button>
+      <button type="button" data-rp-step="3"><b>3</b><span>匹配预检查</span></button>
+      <button type="button" data-rp-step="4"><b>4</b><span>确认生成</span></button>
+    </nav>
+    <section class="rp-step-pane" data-rp-step-pane="1" aria-label="选择报告样本">
+      <div class="rp-source">
+        <label data-rp-path-field>现有结果目录<input data-rp-path placeholder="服务器上的分析结果绝对路径"></label>
+        <span class="rp-current-source" data-rp-current-source hidden>当前任务结果</span>
+        <button type="button" class="button button-primary" data-rp-scan>扫描结果</button>
+      </div>
+      <p class="rp-source-note" data-rp-source-note>支持 Pig IgBLAST / IgBLAST base 的历史结果或单链 AIRR 文件目录。</p>
+      <div data-rp-candidates><div class="rp-scan-empty">扫描后选择要纳入报告的样本与链。</div></div>
     </section>
-    <div class="rp-actions rp-submit"><button type="button" class="button button-ghost" data-rp-preview>查看引物分配</button><button type="button" class="button button-ghost" data-rp-save-plan hidden>保存配置，完成后自动生成</button><button type="button" class="button button-primary" data-rp-run disabled>生成报告与 PNG</button></div>
-    <div data-rp-allocation></div>
+    <section class="rp-step-pane" data-rp-step-pane="2" hidden aria-label="报告引物配置">
+      <label class="rp-primer-toggle"><input type="checkbox" data-rp-use-primer><span><strong>包含引物匹配分析</strong><small>上传引物表，按样本与链分配引物组</small></span><em>可选</em></label>
+      {% include 'report_config.html' %}
+      <div class="rp-actions rp-allocation-actions"><button type="button" class="button button-ghost button-small" data-rp-preview hidden>核对引物分配</button></div>
+      <div data-rp-allocation></div>
+      <details class="advanced-details rp-reference-compare"><summary>历史结果缺少参考清单时</summary><label>与当前数据库比较<select data-rp-comparison-species><option value="">仅使用当次参考记录（默认）</option><option value="pig">当前 Pig 参考</option><option value="human">当前 Human 参考</option><option value="cat">当前 Cat 参考</option><option value="dog">当前 Dog 参考</option></select></label></details>
+    </section>
+    <section class="rp-step-pane" data-rp-step-pane="3" hidden aria-label="核对引物匹配">
+      <p class="rp-no-primer-note" data-rp-no-primer-note>未启用引物分析，可直接继续生成报告。</p>
+      <section class="rp-primer-check" data-rp-check-panel hidden>
+        <div class="rp-check-heading"><div><h4>引物匹配预检查</h4></div><button type="button" class="button button-primary button-small" data-rp-check>运行预检查</button></div>
+        <p class="rp-check-note">读取原始 _j 文件，核对所选引物组的匹配效果。</p>
+        <div data-rp-check-status role="status" aria-live="polite">完成引物配置后开始。</div>
+        <div data-rp-check-results hidden></div>
+        <label class="rp-check-confirm" data-rp-check-confirm-label hidden><input type="checkbox" data-rp-check-confirm><span>我已核对所选引物组和匹配结果</span></label>
+      </section>
+    </section>
+    <section class="rp-step-pane" data-rp-step-pane="4" hidden aria-label="确认报告配置">
+      <h4>确认生成范围</h4><dl class="rp-confirm-summary" data-rp-confirm-summary></dl>
+      <div class="rp-actions rp-submit"><button type="button" class="button button-ghost" data-rp-save-plan hidden>保存配置，完成后自动生成</button><button type="button" class="button button-primary" data-rp-run disabled>生成报告与 PNG</button></div>
+    </section>
+    <p class="rp-step-feedback" data-rp-step-feedback role="status" aria-live="polite"></p>
+    <div class="rp-workflow-footer" data-rp-workflow-footer><button type="button" class="button button-ghost" data-rp-back hidden>上一步</button><span data-rp-step-caption>第 1 / 4 步</span><button type="button" class="button button-primary" data-rp-next>下一步</button></div>
   </div>
   <p data-rp-message role="status" aria-live="polite" class="rp-message"></p>
   <div class="rp-history-bar"><div class="rp-run-controls"><label>报告记录<select data-rp-runs><option value="">暂无报告</option></select></label><div data-rp-run-actions class="rp-actions"></div></div><div data-rp-status></div></div>
