@@ -14,6 +14,7 @@ from functools import lru_cache
 
 from .io import safe_file,write_json
 from .usage import connect
+from .private_cache import locked, prune_files
 
 
 @lru_cache(maxsize=1)
@@ -29,7 +30,12 @@ def fingerprint(task,root,index=None):
     digest=hashlib.sha256(json.dumps(task,sort_keys=True,ensure_ascii=False).encode())
     digest.update(implementation_signature())
     with closing(connect(index or root/'details.sqlite')) as conn:
-        for row in conn.execute('SELECT * FROM gene_usage WHERE group_id=? ORDER BY primer,segment,gene,metric,aa_field',(task['usage']['groups'][0]['group_id'],)):
+        sql='SELECT * FROM gene_usage WHERE group_id=?'
+        args=[task['usage']['groups'][0]['group_id']]
+        if task.get('_gene_scope')=='primer':
+            sql+=' AND primer=?'
+            args.append(task['figure_primers'][0])
+        for row in conn.execute(sql+' ORDER BY primer,segment,gene,metric,aa_field',args):
             digest.update(json.dumps(dict(row),sort_keys=True,ensure_ascii=False).encode())
     return digest.hexdigest()
 
@@ -87,7 +93,7 @@ def reuse(cache_root,key,output,receipt_name='.figure_cache.json'):
         root=Path(cache_root)
         receipt=json.loads(safe_file(root/receipt_name,root).read_text(encoding='utf-8'))[key]
         for artifact in receipt['figures']:
-            name=artifact['png'];source=safe_file(root/name,root)
+            name=artifact['png'];source=safe_file(root/receipt.get('files',{}).get(name,name),root)
             if Path(name).is_absolute() or '..' in Path(name).parts or Path(name).suffix!='.png':return None
             (output/name).resolve().relative_to(output.resolve())
             with source.open('rb') as handle:
@@ -95,21 +101,60 @@ def reuse(cache_root,key,output,receipt_name='.figure_cache.json'):
             if file_hash(source)!=receipt['hashes'][name]:return None
         for artifact in receipt['figures']:
             target=output/artifact['png'];target.parent.mkdir(parents=True,exist_ok=True)
-            shutil.copyfile(safe_file(root/artifact['png'],root),target)
+            source=safe_file(root/receipt.get('files',{}).get(artifact['png'],artifact['png']),root)
+            if source.resolve()!=target.resolve():
+                shutil.copyfile(source,target)
         return receipt['figures']
     except (OSError,ValueError,KeyError,TypeError):return None
 
 
-def render_usage(data,output,*,figure_audit=None,figure_progress=None,cache_root=None,index=None,receipt_name='.figure_cache.json',skip_isotypes=False):
+
+def cached_figures(source,key,output,receipt_name,shared_cache=None):
+    figures=reuse(source,key,output,receipt_name)
+    if figures is not None or shared_cache is None:
+        return figures
+    if int(os.environ.get('SCIGBLAST_REPORT_FIGURE_CACHE_MB','256'))<=0:
+        return None
+    with locked(shared_cache):
+        return reuse(shared_cache,key,output,key+'.json')
+
+
+def remember_figures(shared_cache,key,output,figures):
+    if shared_cache is None:
+        return
+    budget=max(0,int(os.environ.get('SCIGBLAST_REPORT_FIGURE_CACHE_MB','256')))*1024**2
+    files={figure['png']:key+'-'+str(index)+'.png' for index,figure in enumerate(figures)}
+    if not budget or sum((output/name).stat().st_size for name in files)>budget//2:
+        return
+    with locked(shared_cache) as root:
+        for name,cached_name in files.items():
+            temporary=root/(cached_name+'.tmp')
+            shutil.copyfile(output/name,temporary)
+            os.replace(temporary,root/cached_name)
+        receipt=dict(figures=figures,files=files,
+                     hashes={name:file_hash(output/name) for name in files})
+        write_json(root/(key+'.json'),{key:receipt})
+        prune_files(root,budget)
+
+
+def render_usage(data,output,*,figure_audit=None,figure_progress=None,cache_root=None,index=None,receipt_name='.figure_cache.json',skip_isotypes=False,shared_cache=None):
     from .render_usage import render
     output=Path(output)
     groups=[g for g in data['usage']['groups'] if not data.get('figure_groups') or g['group_id'] in data['figure_groups']]
-    tasks=[dict(usage=dict(groups=[g],isotypes=[]),figure_primers=data.get('figure_primers',[])) for g in groups]
+    tasks=[]
+    requested=set(data.get('figure_primers',[]))
+    for group in groups:
+        tasks.append(dict(usage=dict(groups=[group],isotypes=[]),
+                          figure_primers=data.get('figure_primers',[]),_gene_scope='sample'))
+        for primer in group['primers']:
+            if not requested or primer in requested:
+                tasks.append(dict(usage=dict(groups=[dict(group,primers=[primer])],isotypes=[]),
+                                  figure_primers=[primer],_gene_scope='primer'))
     keys=[fingerprint(task,output,index) for task in tasks]
     results,receipts={},{}
     pending=[]
     for i,(task,key) in enumerate(zip(tasks,keys)):
-        cached=reuse(cache_root,key,output,receipt_name)
+        cached=None if figure_audit is not None else cached_figures(cache_root,key,output,receipt_name,shared_cache)
         if cached is not None:results[i]=cached
         else:pending.append((i,task))
     workers=min(effective_workers(),len(pending))
@@ -122,22 +167,45 @@ def render_usage(data,output,*,figure_audit=None,figure_progress=None,cache_root
                 results[i]=render(task,output,skip_isotypes=True,figure_audit=figure_audit,index=index)
                 if figure_progress:figure_progress(len(results),len(tasks),'样本基因图组')
         else:
-            with ProcessPoolExecutor(max_workers=workers,mp_context=multiprocessing.get_context('spawn'),initializer=initialize,initargs=(str(output),),max_tasks_per_child=4) as pool:
-                futures={pool.submit(run_task,task,str(output),str(index) if index else None):i for i,task in pending}
+            with ProcessPoolExecutor(max_workers=workers,mp_context=multiprocessing.get_context('spawn'),initializer=initialize,initargs=(str(output),),max_tasks_per_child=12) as pool:
+                remaining=iter(pending)
+                futures={}
+                def submit():
+                    try:
+                        i,task=next(remaining)
+                    except StopIteration:
+                        return
+                    futures[pool.submit(run_task,task,str(output),str(index) if index else None)]=i
+                for _ in range(workers):
+                    submit()
                 try:
-                    for future in as_completed(futures):
-                        results[futures[future]]=future.result()
-                        if figure_progress:figure_progress(len(results),len(tasks),'样本基因图组')
+                    while futures:
+                        future=next(as_completed(futures))
+                        results[futures.pop(future)]=future.result()
+                        if figure_progress:figure_progress(len(results),len(tasks),'样本或引物基因图组')
+                        submit()
                 except BaseException:
                     for future in futures:future.cancel()
                     stop_workers(pool)
                     raise
         artifacts=[]
+        generated={number for number,_ in pending}
         for i,key in enumerate(keys):
             figures=results[i];artifacts.extend(figures)
+            if i in generated:
+                remember_figures(shared_cache,key,output,figures)
             receipts[key]=dict(figures=figures,hashes={f['png']:file_hash(output/f['png']) for f in figures})
         if not skip_isotypes:
-            artifacts.extend(render(data,output,isotype_only=True,figure_audit=figure_audit,index=index))
+            from .io import digest
+            isotype_key=digest([data['usage'],implementation_signature().hex(),'isotype'])
+            isotype_receipt='.isotype_figure_cache.json'
+            figures=None if figure_audit is not None else cached_figures(cache_root,isotype_key,output,isotype_receipt,shared_cache)
+            if figures is None:
+                figures=render(data,output,isotype_only=True,figure_audit=figure_audit,index=index)
+                remember_figures(shared_cache,isotype_key,output,figures)
+            write_json(output/isotype_receipt,{isotype_key:dict(figures=figures,
+                hashes={figure['png']:file_hash(output/figure['png']) for figure in figures})})
+            artifacts.extend(figures)
         write_json(output/receipt_name,receipts)
         return artifacts
     finally:

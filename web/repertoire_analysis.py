@@ -435,10 +435,11 @@ class Service:
             workers=os.environ.get('SCIGBLAST_REPORT_FIGURE_WORKERS','auto')
             env['SCIGBLAST_REPORT_FIGURE_WORKERS']='auto' if workers=='auto' else str(max(1,min(2,int(workers))))
             env['SCIGBLAST_REPORT_FIGURE_WORKER_MB']=str(max(256,int(os.environ.get('SCIGBLAST_REPORT_FIGURE_WORKER_MB','640'))))
-            compute=os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKERS','1')
+            compute=os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKERS','auto')
             env['SCIGBLAST_REPORT_COMPUTE_WORKERS']='auto' if compute=='auto' else str(max(1,min(2,int(compute))))
             env['SCIGBLAST_REPORT_COMPUTE_WORKER_MB']=str(max(256,int(os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKER_MB','640'))))
-            env['SCIGBLAST_REPORT_STATISTICS_CACHE_MB']=str(max(0,int(os.environ.get('SCIGBLAST_REPORT_STATISTICS_CACHE_MB','0'))))
+            env['SCIGBLAST_REPORT_STATISTICS_CACHE_MB']=str(max(0,int(os.environ.get('SCIGBLAST_REPORT_STATISTICS_CACHE_MB','1024'))))
+            env['SCIGBLAST_REPORT_FIGURE_CACHE_MB']=str(max(0,int(os.environ.get('SCIGBLAST_REPORT_FIGURE_CACHE_MB','256'))))
             with (work/'analysis.log').open('ab') as log:
                 process=subprocess.Popen([sys.executable,'-m','analysis.repertoire.run','--request',str(work/'request.json'),'--output',str(folder)],
                     cwd=self.app.PIPELINE_ROOT,env=env,stdout=log,stderr=log,start_new_session=True,

@@ -92,7 +92,7 @@ Submission 自动关联请求如下。
 | `render*.py`、`figure_jobs.py`、`palette.py` | 静态 PNG、统一配色与有界绘图 |
 | `workbook*.py` | 实验核查工作簿 |
 | `report_html.py`、`chart_data.py`、`assets/`、`export_html.py` | 离线交互报告与仅 HTML 导出 |
-| `batch.py`、`compute_jobs.py`、`private_cache.py`、`performance.py` | 批量关联、可选样本归属并行、缓存、阶段计时 |
+| `batch.py`、`compute_jobs.py`、`private_cache.py`、`performance.py` | 批量关联、完整样本统计并行、缓存、阶段计时 |
 | `html_cache.py`、`api_summary.py` | Web 衍生 HTML 与查询摘要缓存 |
 
 ## 输出分类
@@ -133,7 +133,13 @@ Submission 自动关联请求如下。
 
 中文操作、英文图题与专业指标；Expression 左、Unique CDR3 右。总览默认全样本，单样本 Isotype 直接可见且独立切换。模块筛选独立，逐引物组成单样本，最多 7 张活动图。无底部重复明细及技术尾注，PNG/CSV 可离线导出；不生成 PDF/SVG。
 
-完整统计持有现有报告资源门锁，不改变全局 2 个 pipeline / 每 pipeline 4 个 IgBLAST 任务。计算 worker 默认 1、最多 2（仅独立完整样本的 aggregate）；绘图最多 2。可选统计缓存默认 0 MiB，HTML 衍生缓存默认 128 MiB。私有阶段计时与 RSS 回执不作为实验报表内容。
+完整统计持有现有报告资源门锁。计算与绘图分别自动选择最多 2 个进程，受 CPU 与内存预算约束，两个进程池按阶段先后运行。计算按完整样本划分，将共享输入的各链放在同一任务中，覆盖归属、V/J/C、copy 追溯和 Isotype。共享来源跨样本或混合流程适配器时采用串行路径。
+
+私有统计缓存位于报告输出父目录的 `.statistics_cache/`，默认上限 1024 MiB，保存逐样本统计和 B cell/多样性指标。原始结果、06 发布来源、参考材料、样本链配置或相关计算代码变化时，受影响缓存失效。各样本配置分别参与指纹，修改一个样本可继续复用其他样本。
+
+PNG 缓存位于同一父目录的 `.figure_cache/`，默认上限 256 MiB，覆盖总览、数据变化、引物匹配、基因与 Isotype 等图片。缓存核对输入、绘图代码、绘图库版本和 PNG 内容哈希。基因绘图进一步按样本与引物拆分，最多保持 2 个活动任务。缓存不进入公开下载包，空间超过预算时清理旧文件。HTML 衍生缓存默认 128 MiB。私有阶段计时与 RSS 回执用于性能检查。
+
+可通过 `SCIGBLAST_REPORT_COMPUTE_WORKERS`、`SCIGBLAST_REPORT_FIGURE_WORKERS` 指定 `auto`、`1` 或 `2`。缓存预算分别由 `SCIGBLAST_REPORT_STATISTICS_CACHE_MB` 和 `SCIGBLAST_REPORT_FIGURE_CACHE_MB` 设置，`0` 关闭对应缓存。Web 将这些配置传入报告子进程。仅调整页面时沿用上文的 HTML 导出入口，调整 PNG 使用统计复用入口，新增数据执行完整统计并自动使用有效的样本缓存。
 
 ## 多链、下载与恢复
 

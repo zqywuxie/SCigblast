@@ -63,7 +63,7 @@ def locked(root):
 def prune_files(root, budget, *, keep=()):
     """Caller holds the directory lock, including while reading cached files."""
     root=Path(root).resolve();keep=set(keep)
-    files=[p for p in root.iterdir() if p.is_file() and not p.is_symlink() and p.suffix in {'.html','.json','.sqlite'}]
+    files=[p for p in root.iterdir() if p.is_file() and not p.is_symlink() and p.suffix in {'.html','.json','.sqlite','.png'}]
     total=sum(p.stat().st_size for p in files)
     for path in sorted(files,key=lambda p:p.stat().st_mtime_ns):
         if total<=budget:break

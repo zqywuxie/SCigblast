@@ -16,7 +16,7 @@ from .io import digest, version, write_json, write_table
 from .render import render
 from .sources import discover, verify
 from scigblast.stage_metrics import collect, summarize_volume
-from .usage import build as build_usage, connect as usage_connection
+from .usage import connect as usage_connection
 from .performance import Performance
 
 
@@ -118,11 +118,11 @@ def _execute(request, output, checkpoint):
                 catalog=json.loads(json.dumps(catalog))
                 catalog['config']['observation_stage']='mapping'
                 catalog['version']=digest([catalog['assignments'],catalog.get('groups',{}),catalog['config']])
-            from .compute_jobs import aggregate as compute_aggregate
-            data = performance.call('aggregate',compute_aggregate,items,root,staging,catalog,progress,performance=performance.data)
-            data.update(version=VERSION,stage_summary_scope='sample',gene_segments=['V','J','C'],stages=collect(root,items),catalog=catalog)
-            data['usage']=performance.call('gene_usage_and_copy_lineage',build_usage,items,root,staging,catalog,progress,
-                comparison=request.get('comparison_reference'),lineage_samples=set())
+            from .compute_jobs import statistics as compute_statistics
+            data,usage = performance.call('sample_statistics',compute_statistics,items,root,staging,catalog,progress,
+                performance=performance.data,comparison=request.get('comparison_reference'))
+            data.update(version=VERSION,stage_summary_scope='sample',gene_segments=['V','J','C'],
+                        stages=collect(root,items),catalog=catalog,usage=usage)
             with closing(usage_connection(staging/'details.sqlite')) as connection:
                 traced={i['id'] for i in items if i.get('trace')}
                 for sample in data['samples']:
@@ -197,7 +197,7 @@ def _execute(request, output, checkpoint):
         exports['sample_input_summary']=shared_inputs(data)
         if not cached:
             from .repertoire_metrics import build as build_repertoire_metrics
-            data.update(performance.call('repertoire_metrics',build_repertoire_metrics,data, staging/'details.sqlite', root))
+            data.update(performance.call('repertoire_metrics',build_repertoire_metrics,data, staging/'details.sqlite', root,cache_root=output.parent/'.statistics_cache'))
         exports['diversity_summary']=data.get('diversity_summary',[])
         exports['bcell_metrics']=data.get('bcell_metrics',[])
         exports['isotype_distribution']=data.get('isotype_distribution',[])
@@ -254,7 +254,7 @@ def _execute(request, output, checkpoint):
         progress(len(items),len(items),'正在生成汇报图片')
         data['figure_version']=FIGURE_VERSION
         data['stage_overview_format']='compact-counts-and-changes-v2'
-        data['figures']=performance.call('figures',render,data,staging,top_n=min(50,max(5,int(request.get('top_n',20)))),cache_root=folder if cached else None,
+        data['figures']=performance.call('figures',render,data,staging,top_n=min(50,max(5,int(request.get('top_n',20)))),cache_root=folder if cached else None,shared_cache=output.parent/'.figure_cache',
             figure_progress=lambda done,total,title:progress(done,total,f'绘制基因与 Isotype PNG {done}/{total} · {title}',phase='figures'))
         if data.get('primer_scenarios'):
             from .scenario_analysis import render as render_scenarios

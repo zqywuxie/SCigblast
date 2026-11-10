@@ -21,7 +21,8 @@ def detail(name, **metadata):
     active=CURRENT.get()
     if active is None:yield
     else:
-        with active.phase(name,**metadata):yield
+        with active.phase(name,**metadata) as entry:
+            yield entry
 
 
 class Performance:

@@ -55,6 +55,7 @@ def render(data, output, *, figure_audit=None,figure_progress=None,isotype_only=
 
     usage=data['usage']
     requested=set(data.get('figure_primers',[]))
+    gene_scope=data.get('_gene_scope','all')
     with plt.rc_context(theme),closing(connect(index or output/'details.sqlite')) as connection:
         selected_groups=set() if isotype_only else {g['group_id'] for g in usage['groups'] if not data.get('figure_groups') or g['group_id'] in data['figure_groups']}
         expected=sum((r[3]+24)//25 for r in connection.execute('SELECT group_id,primer,segment,count(*),metric,aa_field FROM gene_usage WHERE unique_count>0 GROUP BY group_id,primer,segment,metric,aa_field')
@@ -77,7 +78,8 @@ def render(data, output, *, figure_audit=None,figure_progress=None,isotype_only=
             gid=group['group_id']
             primers=group['primers']
             if requested:primers=[p for p in primers if p in requested]
-            for primer in ['']+primers:
+            selected_primers=([''] if gene_scope=='sample' else primers if gene_scope=='primer' else ['']+primers)
+            for primer in selected_primers:
                 for segment in ('V','J','C'):
                     for metric,aa_field in [('expression','')]+[('unique_cdr3',field) for field in group.get('aa_fields',[])]:
                         total=connection.execute('SELECT count(*) FROM gene_usage WHERE group_id=? AND primer=? AND segment=? AND metric=? AND aa_field=? AND unique_count>0',(gid,primer,segment,metric,aa_field)).fetchone()[0]
@@ -124,6 +126,8 @@ def render(data, output, *, figure_audit=None,figure_progress=None,isotype_only=
                             publish(fig,name,title,'03_primer_genes' if primer else '02_sample_genes',dict(sample=group['sample'],chain=group['chain'],primer=primer,segment=segment,
                                 group_id=gid,kind='primer_genes' if primer else 'sample_genes',page=start//25+1,reference_id=group['reference_id'],metric=metric,aa_field=aa_field))
 
+            if gene_scope=='primer':
+                continue
             for metric,aa_field in [('expression','')]+[('unique_cdr3',field) for field in group.get('aa_fields',[])]:
                 # Normalize within each primer's classified C genes.
                 counts=defaultdict(Counter)

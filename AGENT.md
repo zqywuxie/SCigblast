@@ -61,6 +61,7 @@ SMTP 凭据仅保存在服务器私有设置，不回显、不写日志/任务�
 - Total Reads 使用 Merged；Total Receptor RNA 使用 AIRR 后处理总 copy/umi_counts；Total Unique CDR3s 使用对应范围的唯一有效 CDR3。Raw R1/R2、Clean R1/R2 分别取真实计数，不对半拆总数。
 - 多样性读取对应 06 Datapoint，B cell 指标使用可追溯的后处理数据，不为 UI 修改统计值。
 - 仅更新 HTML 时使用 `python -m analysis.repertoire.export_html`，读取已完成公共表和 PNG；不要调用全量 `run` 重扫 reads。新数据/引物/规则变化仍需重新统计；不能只改分母文案冒充新规则。
+- 报告计算按完整样本划分，归属、基因组成、copy 追溯及 Isotype 共用样本私有缓存，B cell/多样性指标单独缓存。默认统计缓存上限 1024 MiB、PNG 缓存 256 MiB，计算与绘图各最多 2 个进程且按阶段运行，受内存预算约束。缓存按来源、06 发布版本、参考、样本链配置和实现指纹失效，跨样本共享来源或混合流程适配器回退串行。隐藏缓存不进入公开包。
 - 完整统计后保留私有校验检查点，展示失败重试可复用；Web 位于报告输出父目录 `.report_checkpoints/<id>/`，与结果在同一文件系统；成功原子发布时消费，归档/删除清理，分析日志保留。检查点不进入公开包；不绕过来源/配置/代码指纹核验。
 
 ## 报告与 Treemap 展示

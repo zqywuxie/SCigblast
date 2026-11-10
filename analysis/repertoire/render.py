@@ -13,7 +13,39 @@ from .palette import MATCH_COLORS,constant_color,text_on
 STYLE_VERSION = FIGURE_VERSION
 
 
-def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None,cache_root=None):
+def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None,cache_root=None,shared_cache=None):
+    from .figure_jobs import cached_figures, remember_figures, file_hash, render_usage
+    from .io import digest, write_json
+    from importlib.metadata import version
+    from .performance import detail
+    import hashlib
+
+    dependencies=('render.py','render_stages.py','render_matching.py','render_metrics.py',
+                  'output_metrics.py','repertoire_metrics.py','presentation.py','palette.py','__init__.py')
+    implementation=hashlib.sha256()
+    for name in dependencies:
+        implementation.update(Path(__file__).with_name(name).read_bytes())
+    payload={key:value for key,value in data.items() if key not in {
+        'figures','html_report','workbook','task_name','statistics_created_at','exports'}}
+    key=digest([payload,top_n,implementation.hexdigest(),version('matplotlib'),version('numpy')])
+    receipt_name='.overview_figure_cache.json'
+    with detail('overview_figures') as phase:
+        artifacts=None if figure_audit is not None else cached_figures(cache_root,key,Path(output),receipt_name,shared_cache)
+        if phase is not None:
+            phase['cache_hit']=artifacts is not None
+        if artifacts is None:
+            artifacts=_render_overview(data,output,top_n=top_n,figure_audit=figure_audit)
+            remember_figures(shared_cache,key,Path(output),artifacts)
+        write_json(Path(output)/receipt_name,{key:dict(figures=artifacts,
+            hashes={figure['png']:file_hash(Path(output)/figure['png']) for figure in artifacts})})
+    if data.get('usage'):
+        with detail('gene_and_isotype_figures'):
+            artifacts.extend(render_usage(data,output,figure_audit=figure_audit,
+                figure_progress=figure_progress,cache_root=cache_root,shared_cache=shared_cache))
+    return artifacts
+
+
+def _render_overview(data, output, *, top_n=20, figure_audit=None):
     """Draw supported figures; an optional callback audits final geometry."""
     import matplotlib
     matplotlib.use('Agg')
@@ -253,9 +285,6 @@ def render(data, output, *, top_n=20, figure_audit=None, figure_progress=None,ca
                     name = label_name(sample)+f'__{chain}__{segment}__{preparation}_composition_{page//16+1}'
                     save(fig, name, title, sample, chain, 'composition', preparation=preparation, segment=segment)
 
-    if data.get('usage'):
-        from .figure_jobs import render_usage
-        artifacts.extend(render_usage(data, output, figure_audit=figure_audit,figure_progress=figure_progress,cache_root=cache_root))
     from .repertoire_metrics import render as render_repertoire_metrics
     render_repertoire_metrics(data, pyplot=plt, save=save)
     return artifacts

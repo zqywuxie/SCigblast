@@ -1,4 +1,4 @@
-"""Sample-scoped aggregate workers; all later statistics use one SQLite owner."""
+"""Bounded sample statistics workers and versioned private snapshots."""
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import closing
 import hashlib
@@ -16,7 +16,7 @@ from .private_cache import locked, prune_files, copy_snapshot
 
 
 def effective_workers():
-    configured=os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKERS','1')
+    configured=os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKERS','auto')
     requested=2 if configured=='auto' else max(1,min(2,int(configured)))
     budget=max(256,int(os.environ.get('SCIGBLAST_REPORT_MEMORY_BUDGET_MB','2048')))
     try:budget=min(budget,int(Path('/sys/fs/cgroup/memory.max').read_text())//1024**2)
@@ -54,8 +54,15 @@ def groups(items):
     return list(grouped.values())
 
 
-def fingerprint(items,catalog,root):
+def fingerprint(items,catalog,root,comparison=None):
     dependencies=[]
+    from .postprocessed_usage import resolve
+    by_chain={}
+    for item in items:
+        by_chain.setdefault(item['chain'],[]).append(item)
+    for selected in by_chain.values():
+        source,state=resolve(selected,root)
+        dependencies.append([str(source) if source else None,state,version(source) if source else None])
     for item in items:
         if item.get('trace'):
             marker=Path(item['trace']);meta=json.loads(marker.read_text(encoding='utf-8'))
@@ -65,21 +72,35 @@ def fingerprint(items,catalog,root):
             if preparation:dependencies.append(preparation)
     config=dict((catalog or {}).get('config',{}));config.pop('figure_primers',None)
     selected={i['sample_label'] for i in items}
+    for field in ('sample_groups','sample_chain_groups','sample_aliases'):
+        if field in config:
+            config[field]={sample:value for sample,value in config[field].items() if sample in selected}
     assignments={s:(catalog or {}).get('assignments',{}).get(s,[]) for s in sorted(selected)}
     chain_assignments={s:(catalog or {}).get('chain_assignments',{}).get(s,{}) for s in sorted(selected)}
     code=hashlib.sha256()
-    for name in ('aggregate.py','catalog.py','matching.py','io.py','compute_jobs.py','batch.py'):
+    for name in ('aggregate.py','catalog.py','matching.py','io.py','compute_jobs.py','batch.py',
+                 'usage.py','postprocessed_usage.py','gene_cdr3.py','isotype.py','output_metrics.py'):
         code.update(Path(__file__).with_name(name).read_bytes())
     from scigblast.trace import __file__ as trace_file
     code.update(Path(trace_file).read_bytes())
-    return digest([str(root),items,dependencies,assignments,chain_assignments,config,bool(catalog),code.hexdigest()])
+    if comparison:
+        from scigblast.igblast_cache import reference
+        name,_=reference(comparison['species'])
+        for chain in by_chain:
+            folder=Path(comparison['root'])/'database_251117'/name/chain
+            dependencies.extend((str(path),version(path)) for path in sorted(folder.glob(
+                f"{comparison['species']}_gl_{chain}_*.n*")) if path.is_file())
+    return digest([str(root),items,dependencies,assignments,chain_assignments,config,
+                   bool(catalog),comparison,code.hexdigest()])
 
 
-def run_task(items,root,output,catalog):
+def run_task(items,root,output,catalog,comparison=None):
     for key in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):os.environ[key]='1'
     folder=Path(output);folder.mkdir()
     data=serial_aggregate(items,root,folder,catalog)
-    write_json(folder/'aggregate.json',data)
+    from .usage import build
+    usage=build(items,root,folder,catalog,comparison=comparison,lineage_samples=set())
+    write_json(folder/'aggregate.json',dict(aggregate=data,usage=usage))
     return str(folder)
 
 
@@ -87,20 +108,25 @@ def file_hash(path):
     with Path(path).open('rb') as handle:return hashlib.file_digest(handle,'sha256').hexdigest()
 
 
-def aggregate(items,root,output,catalog=None,progress=None,*,performance=None):
+def statistics(items,root,output,catalog=None,progress=None,*,performance=None,comparison=None):
     output=Path(output);partitions=groups(items);workers=effective_workers()
-    budget=max(0,int(os.environ.get('SCIGBLAST_REPORT_STATISTICS_CACHE_MB','0')))*1024**2
-    if len(partitions)<2 or (workers==1 and not budget):
+    budget=max(0,int(os.environ.get('SCIGBLAST_REPORT_STATISTICS_CACHE_MB','1024')))*1024**2
+    # Mixed workflow adapters share a global composition mode. Keep their
+    # established serial behavior when a safe sample partition is unavailable.
+    workflow_modes={'05.igblastn_out' in Path(item['path']).parts for item in items}
+    if not partitions or len(workflow_modes)>1 or (workers==1 and not budget):
         if performance is not None:performance['compute']=dict(workers=1,cache_hits=0)
-        return serial_aggregate(items,root,output,catalog,progress)
-    # The default remains serial. Cache and two workers are separately opt-in.
+        from .usage import build
+        data=serial_aggregate(items,root,output,catalog,progress)
+        usage=build(items,root,output,catalog,progress,comparison=comparison,lineage_samples=set())
+        return data,usage
     work=output/'.compute';work.mkdir()
     cache=output.parent/'.statistics_cache'
     pending=[];folders={};keys={};hits=0
     try:
         for index,selected in enumerate(partitions):
             destination=work/str(index)
-            key=fingerprint(selected,catalog,root);keys[index]=key
+            key=fingerprint(selected,catalog,root,comparison);keys[index]=key
             reused=False
             if budget:
                 with locked(cache):
@@ -122,8 +148,8 @@ def aggregate(items,root,output,catalog=None,progress=None,*,performance=None):
         if performance is not None:performance['compute']=dict(workers=workers,groups=len(partitions),cache_hits=hits)
         if workers<2:
             for index,selected,destination in pending:
-                run_task(selected,root,destination,catalog);folders[index]=destination
-                if progress:progress(len(folders),len(partitions),'样本归属统计完成')
+                run_task(selected,root,destination,catalog,comparison);folders[index]=destination
+                if progress:progress(len(folders),len(partitions),'样本归属与基因组成统计完成')
         else:
             from .figure_jobs import stop_workers
             with ProcessPoolExecutor(max_workers=workers,mp_context=multiprocessing.get_context('spawn')) as pool:
@@ -132,13 +158,13 @@ def aggregate(items,root,output,catalog=None,progress=None,*,performance=None):
                 def submit():
                     try:index,selected,destination=next(remaining)
                     except StopIteration:return
-                    active[pool.submit(run_task,selected,str(root),str(destination),catalog)]=index
+                    active[pool.submit(run_task,selected,str(root),str(destination),catalog,comparison)]=index
                 for _ in range(workers):submit()
                 try:
                     while active:
                         future=next(as_completed(active));index=active.pop(future)
                         folders[index]=Path(future.result());submit()
-                        if progress:progress(len(folders),len(partitions),'样本归属统计完成')
+                        if progress:progress(len(folders),len(partitions),'样本归属与基因组成统计完成')
                 except BaseException:
                     for future in active:future.cancel()
                     stop_workers(pool);raise
@@ -154,6 +180,11 @@ def aggregate(items,root,output,catalog=None,progress=None,*,performance=None):
                     data=json.loads((folder/'aggregate.json').read_text(encoding='utf-8'))
                     write_json(cache/(key+'.json'),dict(key=key,sha256=file_hash(database),data_sha256=digest(data),data=data))
                 prune_files(cache,budget)
+        if len(folders)==1:
+            source=next(iter(folders.values()))
+            copy_snapshot(source/'details.sqlite',output/'details.sqlite')
+            result=json.loads((source/'aggregate.json').read_text(encoding='utf-8'))
+            return result['aggregate'],result['usage']
         return merge(items,partitions,folders,output)
     finally:
         if work.resolve().parent!=output.resolve() or work.is_symlink():raise ValueError('Unsafe compute work directory')
@@ -161,30 +192,67 @@ def aggregate(items,root,output,catalog=None,progress=None,*,performance=None):
 
 
 def merge(items,partitions,folders,output):
-    merged={};by_item={item['id']:index for index,part in enumerate(partitions) for item in part}
-    for index in sorted(folders):
-        data=json.loads((folders[index]/'aggregate.json').read_text(encoding='utf-8'))
-        for key,values in data.items():merged.setdefault(key,[]).extend(values)
+    """Merge disjoint sample databases, rebasing every integer row reference."""
+    from .batch import tune
+    merged={}
+    usages=[]
     target=output/'details.sqlite'
-    with closing(sqlite3.connect(target)) as conn:
-        with closing(sqlite3.connect(folders[0]/'details.sqlite')) as first:
-            conn.execute(first.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='observations'").fetchone()[0])
-        columns=[r[1] for r in conn.execute('PRAGMA table_info(observations)') if r[1]!='id']
-        names=','.join(columns);placeholders=','.join('?' for _ in columns)
-        for item in items:
-            path=folders[by_item[item['id']]]/'details.sqlite'
-            with closing(sqlite3.connect(path)) as source:
-                conn.executemany(f'INSERT INTO observations({names}) VALUES({placeholders})',
-                    source.execute(f'SELECT {names} FROM observations WHERE sample_key=? AND chain=? ORDER BY id',(item['sample_key'],item['chain'])))
-        conn.execute('CREATE INDEX observations_view ON observations(sample_key,chain,match_class,filter_reason,id)')
-        conn.execute('CREATE INDEX observations_mapping_id ON observations(sample_key,chain,mapping_sequence_id)')
-        conn.commit()
-    sample_order={item['id']:n for n,item in enumerate(items)}
-    merged['samples'].sort(key=lambda r:sample_order[r['id']])
+    with closing(sqlite3.connect(target,uri=True)) as connection:
+        tune(connection)
+        indexes=[]
+        offsets={'observations':0,'usage_records':0,'composition_records':0}
+        reference_columns={
+            'observations':{'id':'observations'},
+            'observation_links':{'first_id':'observations'},
+            'usage_records':{'id':'usage_records'},
+            'usage_calls':{'record_id':'usage_records'},
+            'usage_candidates':{'record_id':'usage_records'},
+            'composition_records':{'id':'composition_records'},
+            'composition_calls':{'record_id':'composition_records'},
+        }
+        for number in sorted(folders):
+            folder=folders[number]
+            result=json.loads((folder/'aggregate.json').read_text(encoding='utf-8'))
+            for key,values in result['aggregate'].items():
+                merged.setdefault(key,[]).extend(values)
+            usages.append(result['usage'])
+            connection.execute('ATTACH DATABASE ? AS part',
+                               ((folder/'details.sqlite').resolve().as_uri()+'?mode=ro',))
+            schemas=connection.execute(
+                "SELECT type,name,sql FROM part.sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            tables=[(name,sql) for kind,name,sql in schemas if kind=='table']
+            if number==0:
+                for _,sql in tables:
+                    connection.execute(sql)
+                indexes=[sql for kind,_,sql in schemas if kind=='index']
+            for name,_ in tables:
+                columns=[row[1] for row in connection.execute(f'PRAGMA part.table_info("{name}")')]
+                expressions=[]
+                for column in columns:
+                    parent=reference_columns.get(name,{}).get(column)
+                    expressions.append(f'"{column}"+{offsets[parent]}' if parent else f'"{column}"')
+                names=','.join('"'+column+'"' for column in columns)
+                connection.execute(f'INSERT INTO "{name}"({names}) SELECT '+','.join(expressions)+f' FROM part."{name}"')
+            for name in offsets:
+                if any(table==name for table,_ in tables):
+                    offsets[name]=connection.execute(f'SELECT coalesce(max(id),0) FROM "{name}"').fetchone()[0]
+            connection.commit()
+            connection.execute('DETACH DATABASE part')
+        for sql in indexes:
+            connection.execute(sql)
+        connection.commit()
+    sample_order={item['id']:number for number,item in enumerate(items)}
+    merged['samples'].sort(key=lambda row:sample_order[row['id']])
     extras={'match_counts':['match_class'],'family_counts':['match_class'],'trim_counts':['trim_state'],
         'primer_counts':['subset','primer'],'gene_counts':['subset','primer','trim_state','segment','gene'],'filter_counts':['reason']}
-    for name,extra in extras.items():merged[name].sort(key=lambda r:tuple(r[k] for k in ['sample','sample_key','chain','scope',*extra]))
-    merged['gene_coverage'].sort(key=lambda r:tuple(r[k] for k in ['sample','sample_key','chain','scope','segment','gene','subset']))
-    merged['matching_totals'].sort(key=lambda r:tuple(r[k] for k in ['sample','sample_key','scope','unit','chains','match_class']))
+    for name,extra in extras.items():
+        merged[name].sort(key=lambda row:tuple(row[key] for key in ['sample','sample_key','chain','scope',*extra]))
+    merged['gene_coverage'].sort(key=lambda row:tuple(row[key] for key in ['sample','sample_key','chain','scope','segment','gene','subset']))
+    merged['matching_totals'].sort(key=lambda row:tuple(row[key] for key in ['sample','sample_key','scope','unit','chains','match_class']))
     merged['matching_total_summary']=summarize_matching(merged['matching_totals'])
-    return merged
+    usage=dict(usages[0])
+    usage['groups']=sorted([group for value in usages for group in value['groups']],
+                          key=lambda group:(group['sample'],group['chain'],group['group_id']))
+    usage['isotypes']=[row for value in usages for row in value['isotypes']]
+    return merged,usage

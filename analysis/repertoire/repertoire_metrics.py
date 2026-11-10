@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from contextlib import closing
+import json
 import math
 from pathlib import Path
 import re
 
-from .io import label_name
+from .io import label_name, digest, version, safe_file, write_json
 from .usage import connect
 
 DIVERSITY = (
@@ -38,7 +39,47 @@ def isotype_order(gene):
             tuple((1,int(part)) if part.isdigit() else (0,part) for part in re.split(r'(\d+)',gene)))
 
 
-def build(data, index, root):
+def build(data, index, root, *, cache_root=None):
+    import os
+    import hashlib
+    from .private_cache import locked, prune_files
+    from .performance import detail
+
+    budget=max(0,int(os.environ.get('SCIGBLAST_REPORT_STATISTICS_CACHE_MB','1024')))*1024**2
+    if cache_root is None or not budget:
+        return _build(data,index,root)
+    result=dict(diversity_summary=[],bcell_metrics=[],isotype_distribution=[])
+    hits=0
+    implementation=hashlib.sha256()
+    for name in ('repertoire_metrics.py','postprocessed_usage.py','usage.py','isotype.py','aggregate.py'):
+        implementation.update(Path(__file__).with_name(name).read_bytes())
+    for group in data.get('usage',{}).get('groups',[]):
+        composition=group.get('composition',{})
+        if composition.get('status')!='complete':
+            continue
+        source=safe_file(composition['source'],root)
+        records=[row for row in data.get('preprocessing_metrics',[]) if row.get('sample')==group['sample']]
+        selected=dict(usage=dict(groups=[group]),preprocessing_metrics=records)
+        key='metrics-'+digest([selected,version(source),implementation.hexdigest()])
+        with locked(cache_root) as cache:
+            try:
+                receipt=json.loads(safe_file(cache/(key+'.json'),cache).read_text(encoding='utf-8'))
+                values=receipt['data']
+                if receipt['sha256']!=digest(values):
+                    raise ValueError('Invalid sample metrics cache')
+                hits+=1
+            except (OSError,ValueError,KeyError,TypeError):
+                values=_build(selected,index,root)
+                write_json(cache/(key+'.json'),dict(data=values,sha256=digest(values)))
+            prune_files(cache,budget)
+        for name in result:
+            result[name].extend(values[name])
+    with detail('sample_metrics_cache',groups=len(data.get('usage',{}).get('groups',[])),cache_hits=hits):
+        pass
+    return result
+
+
+def _build(data, index, root):
     diversity, bcell, distribution = [], [], []
     with closing(connect(index)) as conn:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='composition_sources'").fetchone():
@@ -75,6 +116,13 @@ def build(data, index, root):
             dm = [gene for gene in ('IGHD', 'IGHM') if gene in stats]
             groups = ([('IgD/M', dm)] if dm else []) + [(label(gene), [gene]) for gene in
                 sorted(stats, key=lambda g: (0 if g.startswith('IGHA') else 2 if g.startswith('IGHE') else 1, g)) if gene not in dm]
+            conn.execute('DROP TABLE IF EXISTS temp.report_bcell_memberships')
+            conn.execute("""CREATE TEMP TABLE report_bcell_memberships AS
+                SELECT DISTINCT r.aa_value,c.gene FROM composition_records r
+                JOIN composition_calls c ON c.record_id=r.id
+                WHERE r.group_id=? AND r.sample_record=1 AND r.aa_valid=1
+                  AND c.segment='C' AND c.assignment='unique' AND r.isotype_main<>''
+                  AND r.aa_value<>'' AND lower(r.aa_value) NOT IN ('nan','na','none','null')""",(gid,))
             for title, genes in groups:
                 copies = sum(stats[gene]['copies'] for gene in genes)
                 raw = [number(row.get(gene + '_ig_V_SHM_ratio')) for gene in genes]
@@ -83,18 +131,12 @@ def build(data, index, root):
                 mean = sum(value * stats[gene]['records'] for gene, value in zip(genes, raw)) / copies * 100 if copies and all(value is not None for value in raw) else None
                 if mean is not None and not 0 <= mean <= 100: mean = None
                 marks = ','.join('?' for _ in genes)
-                own, shared = conn.execute(f'''WITH memberships AS (
-                    SELECT DISTINCT r.aa_value,c.gene FROM composition_records r
-                      JOIN composition_calls c ON c.record_id=r.id
-                    WHERE r.group_id=? AND r.sample_record=1 AND r.aa_valid=1 AND c.segment='C'
-                      AND c.assignment='unique' AND r.isotype_main<>'' AND r.aa_value<>''
-                      AND lower(r.aa_value) NOT IN ('nan','na','none','null')
-                  ), presence AS (
+                own, shared = conn.execute(f'''WITH presence AS (
                     SELECT aa_value,max(CASE WHEN gene IN ({marks}) THEN 1 ELSE 0 END) AS own,
                       max(CASE WHEN gene NOT IN ({marks}) THEN 1 ELSE 0 END) AS other
-                    FROM memberships GROUP BY aa_value
+                    FROM report_bcell_memberships GROUP BY aa_value
                   ) SELECT coalesce(sum(own),0),coalesce(sum(own*other),0) FROM presence''',
-                  (gid, *genes, *genes)).fetchone()
+                  (*genes, *genes)).fetchone()
                 bcell.append(dict(sample=sample, chain=chain, group_id=gid, isotype=title,
                     mean_shm_percent=mean, shared_cdr3_percent=100 * shared / own if own else None,
                     unique_cdr3=own, shared_cdr3=shared, copies=copies,
