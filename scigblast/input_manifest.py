@@ -35,8 +35,8 @@ def fingerprint(path):
 def safe_name(value):
     # Match/fastp scripts exchange TSV lines and normalize filesystem components.
     value = str(value).strip()
-    if not value or value in {'.', '..'} or not re.fullmatch(r'[A-Za-z0-9_.-]+', value) or len(value) > 160:
-        raise ValueError('样本名仅支持字母、数字、下划线、点和短横线（最多 160 字符）')
+    if not value or value in {'.', '..'} or not re.fullmatch(r'[\w.-]+', value) or len(value.encode('utf-8')) > 160:
+        raise ValueError('样本名支持中文、希腊字母等文字、数字、下划线、点和短横线（UTF-8 最多 160 字节）')
     return value
 
 
@@ -96,10 +96,10 @@ def scan(root, config):
         versions = {side: fingerprint(Path(path)) for side, path in paths.items() if path}
         if any(v[0] == 0 for v in versions.values()):
             errors.append('FASTQ 文件为空')
-        # Allow readable candidates but never pass arbitrary relative names to shell TSVs.
-        if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', part) or part in {'.', '..'} for part in Path(pair_id).parts):
+        # Unicode letters are valid names; TSV separators and shell punctuation are excluded.
+        if any(not re.fullmatch(r'[\w.-]+', part) or part in {'.', '..'} for part in Path(pair_id).parts):
             errors.append('配对路径含不支持的字符，请规范文件名/目录名')
-        default = re.sub(r'[^A-Za-z0-9_.-]', '_', item['stem'])[:140] or 'sample'
+        default = re.sub(r'[^\w.-]', '_', item['stem']).encode('utf-8')[:140].decode('utf-8', errors='ignore') or 'sample'
         rows.append({'id': digest(pair_id)[:24], 'pair_id': pair_id, 'sample_id': default,
                      'r1': paths['r1'], 'r2': paths['r2'], 'versions': versions,
                      'valid': not errors, 'error': '；'.join(errors)})
