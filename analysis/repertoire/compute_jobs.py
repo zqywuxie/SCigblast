@@ -1,5 +1,5 @@
 """Bounded sample statistics workers and versioned private snapshots."""
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from contextlib import closing
 import hashlib
 import json
@@ -13,9 +13,10 @@ from .aggregate import aggregate as serial_aggregate
 from .io import digest, safe_file, version, write_json
 from .matching import summarize_matching
 from .private_cache import locked, prune_files, copy_snapshot
+from .performance import Performance, detail, measured
 
 
-def effective_workers():
+def worker_limits():
     configured=os.environ.get('SCIGBLAST_REPORT_COMPUTE_WORKERS','auto')
     requested=2 if configured=='auto' else max(1,min(2,int(configured)))
     budget=max(256,int(os.environ.get('SCIGBLAST_REPORT_MEMORY_BUDGET_MB','2048')))
@@ -29,7 +30,19 @@ def effective_workers():
         quota,period=Path('/sys/fs/cgroup/cpu.max').read_text().split()
         if quota!='max':cpu=min(cpu,max(1,int(quota)//int(period)))
     except (OSError,ValueError):pass
-    return max(1,min(requested,cpu,int((budget-rss-256)//per_worker)))
+    memory=max(1,int((budget-rss-256)//per_worker))
+    return dict(requested=requested,workers=max(1,min(requested,cpu,memory)),
+                budget_mb=budget,coordinator_rss_mb=round(rss,1),worker_mb=per_worker,
+                cpu_limit=cpu,memory_limit=memory)
+
+
+def effective_workers():
+    return worker_limits()['workers']
+
+
+def initialize_worker(budget_mb):
+    os.environ['SCIGBLAST_REPORT_MEMORY_BUDGET_MB']=str(budget_mb)
+    for key in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):os.environ[key]='1'
 
 
 def groups(items):
@@ -94,13 +107,21 @@ def fingerprint(items,catalog,root,comparison=None):
                    bool(catalog),comparison,code.hexdigest()])
 
 
-def run_task(items,root,output,catalog,comparison=None):
+def run_task(items,root,output,catalog,comparison=None,progress=None):
     for key in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):os.environ[key]='1'
     folder=Path(output);folder.mkdir()
-    data=serial_aggregate(items,root,folder,catalog)
-    from .usage import build
-    usage=build(items,root,folder,catalog,comparison=comparison,lineage_samples=set())
-    write_json(folder/'aggregate.json',dict(aggregate=data,usage=usage))
+    report=Performance(folder/'.worker_performance.json');report.monitor(folder)
+    def update(done,total,message):
+        write_json(folder/'.worker_progress.json',dict(done=done,total=total,message=message))
+        if progress:progress(done,total,message)
+    try:
+        data=report.call('aggregate',serial_aggregate,items,root,folder,catalog,update)
+        from .usage import build
+        usage=report.call('usage',build,items,root,folder,catalog,update,comparison=comparison,lineage_samples=set())
+        write_json(folder/'aggregate.json',dict(aggregate=data,usage=usage))
+        report.finish('succeeded')
+    except BaseException:
+        report.finish('failed');raise
     return str(folder)
 
 
@@ -109,50 +130,74 @@ def file_hash(path):
 
 
 def statistics(items,root,output,catalog=None,progress=None,*,performance=None,comparison=None):
-    output=Path(output);partitions=groups(items);workers=effective_workers()
+    output=Path(output);partitions=groups(items);limits=worker_limits();workers=limits['workers']
     budget=max(0,int(os.environ.get('SCIGBLAST_REPORT_STATISTICS_CACHE_MB','1024')))*1024**2
     # Mixed workflow adapters share a global composition mode. Keep their
     # established serial behavior when a safe sample partition is unavailable.
     workflow_modes={'05.igblastn_out' in Path(item['path']).parts for item in items}
-    if not partitions or len(workflow_modes)>1 or (workers==1 and not budget):
-        if performance is not None:performance['compute']=dict(workers=1,cache_hits=0)
+    reason=('unsafe_or_overlapping_sources' if not partitions else 'mixed_workflows' if len(workflow_modes)>1
+            else 'single_worker_cache_disabled' if workers==1 and not budget else '')
+    if reason:
+        if performance is not None:performance['compute']=dict(workers=1,cache_hits=0,reason=reason,limits=limits,cache_budget_bytes=budget)
+        if progress:progress(0,len(items),'单进程统计 · '+('缓存已关闭' if not budget else '来源需按原流程处理'))
         from .usage import build
         data=serial_aggregate(items,root,output,catalog,progress)
         usage=build(items,root,output,catalog,progress,comparison=comparison,lineage_samples=set())
         return data,usage
     work=output/'.compute';work.mkdir()
     cache=output.parent/'.statistics_cache'
-    pending=[];folders={};keys={};hits=0
+    pending=[];folders={};keys={};hits=0;cache_states=[]
     try:
         for index,selected in enumerate(partitions):
             destination=work/str(index)
-            key=fingerprint(selected,catalog,root,comparison);keys[index]=key
+            with detail('sample_fingerprint',sample=selected[0]['sample_label']):
+                key=fingerprint(selected,catalog,root,comparison)
+            keys[index]=key
             reused=False
             if budget:
-                with locked(cache):
+                # Each entry has its own lease. Hashing/copying a large snapshot
+                # must not block every other cache entry or its metadata cleanup.
+                with locked(cache/'.entries'/key):
                     try:
                         receipt=json.loads(safe_file(cache/(key+'.json'),cache).read_text(encoding='utf-8'))
                         database=safe_file(cache/(key+'.sqlite'),cache)
-                        if receipt.get('key')!=key or digest(receipt['data'])!=receipt.get('data_sha256') or file_hash(database)!=receipt['sha256']:
-                            raise ValueError('Invalid statistics cache')
-                        destination.mkdir();copy_snapshot(database,destination/'details.sqlite')
-                        write_json(destination/'aggregate.json',receipt['data']);reused=True;hits+=1
+                        with detail('sample_cache_read',sample=selected[0]['sample_label']):
+                            if receipt.get('key')!=key or digest(receipt['data'])!=receipt.get('data_sha256') or file_hash(database)!=receipt['sha256']:
+                                raise ValueError('Invalid statistics cache')
+                            destination.mkdir();copy_snapshot(database,destination/'details.sqlite')
+                        write_json(destination/'aggregate.json',receipt['data'])
+                        os.utime(database,None);os.utime(cache/(key+'.json'),None)
+                        reused=True;hits+=1
                     except (OSError,ValueError,KeyError,TypeError):
                         if destination.exists():
                             if destination.is_symlink() or destination.resolve().parent!=work.resolve():
                                 raise ValueError('Unsafe cached compute directory')
                             shutil.rmtree(destination)
+            cache_states.append(dict(sample=selected[0]['sample_label'],state='hit' if reused else 'disabled' if not budget else 'miss_or_invalid'))
             if reused:folders[index]=destination
             else:pending.append((index,selected,destination))
+        # Stable longest-first scheduling reduces the final large-sample tail.
+        pending.sort(key=lambda task:-sum(Path(i['path']).stat().st_size for i in task[1]))
         workers=min(workers,max(1,len(pending)))
-        if performance is not None:performance['compute']=dict(workers=workers,groups=len(partitions),cache_hits=hits)
+        if performance is not None:performance['compute']=dict(workers=workers,groups=len(partitions),cache_hits=hits,
+            limits=limits,cache_budget_bytes=budget,cache_samples=cache_states)
+        if progress:progress(len(folders),len(partitions),f'样本统计 · {workers} 个进程 · 复用 {hits} 个样本')
+        def completed(index):
+            receipt=folders[index]/'.worker_performance.json'
+            if performance is not None and receipt.is_file():
+                performance.setdefault('sample_statistics_receipts',[]).append(dict(sample=partitions[index][0]['sample_label'],
+                    **json.loads(receipt.read_text(encoding='utf-8'))))
+            if progress:progress(len(folders),len(partitions),'样本归属与基因组成统计完成')
         if workers<2:
             for index,selected,destination in pending:
-                run_task(selected,root,destination,catalog,comparison);folders[index]=destination
-                if progress:progress(len(folders),len(partitions),'样本归属与基因组成统计完成')
+                def update(done,total,message):
+                    if progress:progress(len(folders),len(partitions),message)
+                run_task(selected,root,destination,catalog,comparison,update);folders[index]=destination
+                completed(index)
         else:
             from .figure_jobs import stop_workers
-            with ProcessPoolExecutor(max_workers=workers,mp_context=multiprocessing.get_context('spawn')) as pool:
+            with ProcessPoolExecutor(max_workers=workers,mp_context=multiprocessing.get_context('spawn'),
+                    initializer=initialize_worker,initargs=(limits['worker_mb'],)) as pool:
                 # At most two jobs are in flight; never queue every large source.
                 remaining=iter(pending);active={}
                 def submit():
@@ -162,27 +207,39 @@ def statistics(items,root,output,catalog=None,progress=None,*,performance=None,c
                 for _ in range(workers):submit()
                 try:
                     while active:
-                        future=next(as_completed(active));index=active.pop(future)
-                        folders[index]=Path(future.result());submit()
-                        if progress:progress(len(folders),len(partitions),'样本归属与基因组成统计完成')
+                        ready,_=wait(active,timeout=2,return_when=FIRST_COMPLETED)
+                        if not ready and progress:
+                            messages=[]
+                            for index in active.values():
+                                try:messages.append(json.loads((work/str(index)/'.worker_progress.json').read_text(encoding='utf-8'))['message'])
+                                except (OSError,ValueError,KeyError):pass
+                            if messages:progress(len(folders),len(partitions),' · '.join(messages))
+                        for future in ready:
+                            index=active.pop(future);folders[index]=Path(future.result());completed(index);submit()
                 except BaseException:
                     for future in active:future.cancel()
                     stop_workers(pool);raise
         if budget:
-            with locked(cache):
-                for index,folder in folders.items():
-                    if index not in {i for i,_,_ in pending}:continue
-                    database=folder/'details.sqlite';key=keys[index]
-                    if database.stat().st_size>budget//2:continue
+            for index,folder in folders.items():
+                if index not in {i for i,_,_ in pending}:continue
+                database=folder/'details.sqlite';key=keys[index]
+                cache_states[index]['bytes']=database.stat().st_size
+                if database.stat().st_size>budget//2:
+                    cache_states[index]['state']='too_large';continue
+                with locked(cache/'.entries'/key), detail('sample_cache_write',sample=partitions[index][0]['sample_label']):
                     temp=cache/(key+'.sqlite.tmp')
                     temp.unlink(missing_ok=True)
                     copy_snapshot(database,temp);os.replace(temp,cache/(key+'.sqlite'))
                     data=json.loads((folder/'aggregate.json').read_text(encoding='utf-8'))
                     write_json(cache/(key+'.json'),dict(key=key,sha256=file_hash(database),data_sha256=digest(data),data=data))
+                    cache_states[index]['state']='stored'
+            with locked(cache):
                 prune_files(cache,budget)
         if len(folders)==1:
             source=next(iter(folders.values()))
-            copy_snapshot(source/'details.sqlite',output/'details.sqlite')
+            # This work DB is owned by this run; it is already independent from
+            # any cached snapshot, so no second multi-GB copy is necessary.
+            os.replace(source/'details.sqlite',output/'details.sqlite')
             result=json.loads((source/'aggregate.json').read_text(encoding='utf-8'))
             return result['aggregate'],result['usage']
         return merge(items,partitions,folders,output)
@@ -191,6 +248,7 @@ def statistics(items,root,output,catalog=None,progress=None,*,performance=None,c
         shutil.rmtree(work)
 
 
+@measured('statistics_merge')
 def merge(items,partitions,folders,output):
     """Merge disjoint sample databases, rebasing every integer row reference."""
     from .batch import tune

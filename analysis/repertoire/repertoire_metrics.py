@@ -161,7 +161,7 @@ def render(data, *, pyplot, save):
                 cell.get_text().set_color('white' if i == 0 else '#233343')
             title = sample + ' / ' + chain + ' · Diversity indexes'
             fig.suptitle(title, fontsize=12, fontweight='bold', y=.98)
-            save(fig, stem + '__diversity', title, sample, chain, 'diversity')
+            save(fig, stem + '__diversity', title, sample, chain, 'diversity',group_id=gid,metric_keys=[r['metric'] for r in rows])
         rows = [r for r in data.get('bcell_metrics', []) if r['group_id'] == gid]
         if rows:
             height = max(3.8, .40 * len(rows) + 1.8)
@@ -180,7 +180,7 @@ def render(data, *, pyplot, save):
                 ax.grid(axis='x', color='#E6EBEF', linewidth=.6); ax.set_axisbelow(True)
             title = sample + ' / IGH · B cell Metrics'
             fig.suptitle(title, fontsize=12, fontweight='bold', y=.98)
-            save(fig, stem + '__bcell_metrics', title, sample, chain, 'bcell_metrics')
+            save(fig, stem + '__bcell_metrics', title, sample, chain, 'bcell_metrics',group_id=gid)
     from .render_metrics import render_comparisons, render_isotype_distribution
     render_comparisons(data, pyplot=pyplot, save=save)
     render_isotype_distribution(data, pyplot=pyplot, save=save)

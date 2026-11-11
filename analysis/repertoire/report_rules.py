@@ -33,7 +33,7 @@ RULES = {
         ('% Unique CDR3', '每个明确归属的基因内对有效 CDR3aa 去重，以这些基因的去重计数之和为分母。同一 CDR3aa 跨基因出现时分别计入；无注释及未唯一归属的数据不计入分母。'),
     ],
     'outputs': [
-        ('Total Reads', '所选输入范围内双端合并后的 Merged reads，每个成功合并的配对计一条。共用输入的不同链可重复显示该值，不能跨链相加。'),
+        ('Total Reads', '所选输入范围内双端合并后的 Merged reads，每个成功合并的配对计一条。样本共用输入只计一次，不能将同一输入按链重复相加。'),
         ('Total Receptor RNA', 'AIRR 后处理后 umi_counts 的总和（copy 按 umi_counts 记录）。'),
         ('Total Unique CDR3s', '同一 AIRR 后处理范围、当前链内的唯一 CDR3aa 数，不是各基因去重数的累加。'),
     ],
@@ -140,4 +140,7 @@ def for_report(data, *, language='zh'):
             ('MIX','Sample totals use the union of chain-specific primers and count each shared input once; chain panels use the configured primers for that chain.' if english else '样本总览使用各链引物并集，共享输入只计一次。分链面板使用对应链的引物，分母仍为该样本原始 R1 reads。'),
         ]
         result['mapping']=[]
+    result['overview']=[(title,('Primer matching is assessed on original raw R1 (_j) reads only.' if english else
+        '引物匹配构成仅使用最初始 Raw R1（_j）数据，各类占比以样本全部原始 R1 reads 为分母。')
+        if title in {'Primer matching','引物匹配'} else text) for title,text in result['overview']]
     return result

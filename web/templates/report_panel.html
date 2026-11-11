@@ -19,7 +19,7 @@
     </section>
     <section class="rp-step-pane" data-rp-step-pane="2" hidden aria-label="报告引物配置">
       <label class="rp-primer-toggle"><input type="checkbox" data-rp-use-primer><span><strong>包含引物匹配分析</strong><small>上传引物表，按样本与链分配引物组</small></span><em>可选</em></label>
-      {% include 'report_config.html' %}
+      {% set report_setup = true %}{% include 'report_config.html' %}{% set report_setup = false %}
       <div class="rp-actions rp-allocation-actions"><button type="button" class="button button-ghost button-small" data-rp-preview hidden>核对引物分配</button></div>
       <div data-rp-allocation></div>
       <details class="advanced-details rp-reference-compare"><summary>历史结果缺少参考清单时</summary><label>与当前数据库比较<select data-rp-comparison-species><option value="">仅使用当次参考记录（默认）</option><option value="pig">当前 Pig 参考</option><option value="human">当前 Human 参考</option><option value="cat">当前 Cat 参考</option><option value="dog">当前 Dog 参考</option></select></label></details>
@@ -50,15 +50,6 @@
       <div class="rp-report-intro"><span class="rp-report-eyebrow">ANALYSIS REPORT</span><h4 data-rp-result-summary></h4><p data-rp-report-scope></p></div>
       <div data-rp-downloads class="rp-actions"></div>
     </section>
-    <details class="advanced-details rp-data-details"><summary><span>追溯与导出</span><span class="rp-detail-count">原始归属及注释记录</span></summary><div class="rp-detail-body">
-      <div class="rp-filters">
-        <label>样本<select data-rp-sample></select></label><label>链<select data-rp-chain></select></label><label>引物<select data-rp-primer></select></label>
-        <label data-rp-group-label hidden>结果范围<select data-rp-group></select></label><label>基因区<select data-rp-segment><option value="C">C</option><option>V</option><option>J</option></select></label><label>基因<input data-rp-gene placeholder="完整基因名"></label>
-        <label>匹配类别<select data-rp-record-class><option value="">全部</option><option value="unique">唯一匹配</option><option value="multiple">多重匹配</option><option value="unmatched">未匹配</option><option value="sequence_unavailable">序列不可用</option></select></label>
-        <label>注释 / 过滤状态<select data-rp-record-reason><option value="">全部</option><option value="retained">最终保留</option><option value="no_v_call">无 V 注释</option><option value="nonproductive_or_unknown">非 productive / 未知</option><option value="different_locus">其他链</option><option value="missing_airr_row">缺少 AIRR 输出</option><option value="ambiguous_lineage">关联不唯一</option></select></label>
-        <label>引物处理<select data-rp-trim><option value="">全部</option><option value="trimmed_unique">唯一匹配，已剪切</option><option value="trimmed_multi_same_length">同长多重匹配，已剪切</option><option value="unmatched_untrimmed">未匹配，原序列</option><option value="ambiguous_length_untrimmed">长度不确定，原序列</option><option value="structure_untrimmed">结构不符，原序列</option><option value="primer_only_untrimmed">无剩余片段，原序列</option></select></label>
-      </div><div class="rp-actions"><button type="button" class="button button-primary button-small" data-rp-record-load>查看记录</button><div data-rp-record-downloads class="rp-actions"></div></div>
-      <div data-rp-records></div><button type="button" class="button button-ghost button-small" data-rp-record-more hidden>下一页记录</button>
-    </div></details>
+
   </div>
 </section>

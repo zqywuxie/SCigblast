@@ -1,6 +1,8 @@
 """Per-gene distinct CDR3 usage, without bringing read-level keys into RAM."""
+from .performance import measured
 
 
+@measured('gene_cdr3_summary')
 def enrich(connection):
     connection.execute('PRAGMA temp_store=FILE')
     postprocessed = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE name='composition_records'").fetchone())

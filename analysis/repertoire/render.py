@@ -89,7 +89,7 @@ def _render_overview(data, output, *, top_n=20, figure_audit=None):
     def heading(fig, title, left=.08, y=.955):
         fig.text(.5, y, wrapped(title, 90), ha='center', va='top', fontsize=12, fontweight='bold')
 
-    def save(fig, name, title, sample='', chain='', kind='', primer='', preparation='', segment='', exclude_axes=()):
+    def save(fig, name, title, sample='', chain='', kind='', primer='', preparation='', segment='', exclude_axes=(),group_id='',metric_keys=()):
         category = FIGURE_CATEGORIES[kind]
         folder = output / category / 'figures'
         folder.mkdir(parents=True, exist_ok=True)
@@ -107,7 +107,7 @@ def _render_overview(data, output, *, top_n=20, figure_audit=None):
             plt.close(fig)
         artifacts.append(dict(id=name, title=title, sample=sample, chain=chain,
             kind=kind, category=category, primer=primer, preparation=preparation,
-            segment=segment, style_version=STYLE_VERSION, png=path.relative_to(output).as_posix()))
+            segment=segment,group_id=group_id,metric_keys=list(metric_keys),style_version=STYLE_VERSION, png=path.relative_to(output).as_posix()))
 
     def horizontal(labels, values, title, *, value_labels, xlabel='', colors=None, note='', compact=False):
         """Use a common scale and a separate aligned column for values."""

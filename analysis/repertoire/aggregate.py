@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import closing
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -12,13 +13,21 @@ import uuid
 from .catalog import Matcher, assigned_primers
 from .matching import summarize_matching
 from .io import digest, safe_file, table, version
-from .batch import tune
+from .batch import tune, projection
+from .performance import detail, measured, measured_rows
 
 BAD = {'', '*', '-', 'NA', 'N/A', 'NONE', 'NULL', 'NO_HIT', 'UNMAPPED', 'NOT_FOUND'}
 
 
+@lru_cache(maxsize=4096)
+def _call_names(value):
+    return tuple(sorted({v.strip().split('*')[0] for v in re.split(r'[,;]', value) if v.strip().upper() not in BAD}))
+
+
 def calls(value):
-    return sorted({v.strip().split('*')[0] for v in re.split(r'[,;]', value or '') if v.strip().upper() not in BAD})
+    # Return a fresh list to retain caller semantics; gene calls repeat millions
+    # of times, while the bounded vocabulary is small.
+    return list(_call_names(value or ''))
 
 
 def attach_primers(conn,meta,root):
@@ -47,7 +56,8 @@ def mapping_observations(item, root,archive_root=None):
         conn.row_factory = sqlite3.Row
         conn.execute('ATTACH DATABASE ? AS q', (queries.as_uri()+'?mode=ro',))
         try:
-            conn.executescript('''PRAGMA temp_store=FILE;
+            with detail('mapping_identity_index',sample=item['sample_label'],chain=item['chain']):
+                conn.executescript('''PRAGMA temp_store=FILE;
                 CREATE TEMP TABLE query_counts AS SELECT sequence_id,count(*) AS n FROM q.queries GROUP BY sequence_id;
                 CREATE INDEX temp.query_count_id ON query_counts(sequence_id);
                 CREATE TEMP TABLE annotation_counts AS SELECT sequence_id,count(*) AS n,min(ordinal) AS ordinal
@@ -56,9 +66,10 @@ def mapping_observations(item, root,archive_root=None):
             has_primers=attach_primers(conn,meta,root)
             extra=(',p.names AS assigned_primers,p.families AS assigned_families,p.state AS trim_state,p.trim_length AS trim_length'
                    if has_primers else ',NULL AS assigned_primers,NULL AS assigned_families,NULL AS trim_state,0 AS trim_length')
+            fields=projection(conn,'annotations',('filter_reason','v_call','j_call','c_call','locus'))
             sql = '''SELECT q.ordinal AS query_ordinal,q.sequence_id AS query_id,q.offset,
                 coalesce(qc.n,0) AS query_duplicates,coalesce(ac.n,0) AS annotation_count,
-                a.*'''+extra+''' FROM q.queries q LEFT JOIN query_counts qc ON qc.sequence_id=q.sequence_id
+                '''+fields+extra+''' FROM q.queries q LEFT JOIN query_counts qc ON qc.sequence_id=q.sequence_id
                 LEFT JOIN annotation_counts ac ON ac.sequence_id=q.sequence_id
                 LEFT JOIN annotations a ON a.ordinal=ac.ordinal'''+(
                 ' LEFT JOIN primers.assignments p ON p.ordinal=q.ordinal' if has_primers else '')+' ORDER BY q.ordinal'
@@ -184,6 +195,7 @@ def observations(item,root,stage='mapping',archive_root=None):
     finally:conn.close()
 
 
+@measured('aggregate')
 def aggregate(items, root, output, catalog=None, progress=None):
     output = Path(output)
     stage=(catalog or {}).get('config',{}).get('observation_stage','mapping')
@@ -223,7 +235,8 @@ def aggregate(items, root, output, catalog=None, progress=None):
             scope=selected_stage if selected_stage.startswith('raw_') else 'retained_only' if selected_stage=='retained' else 'all_queries' if item.get('trace') else 'all_queries_final_annotations_only' if item.get('merged') else 'retained_only'
             refs=json.loads(Path(item['trace']).read_text(encoding='utf-8')) if item.get('trace') else None
             count, sequence_available = 0, 0
-            for row, scope, meta in observations(item, root,selected_stage,output/'.inputs'):
+            for row, scope, meta in measured_rows('sample_observations',
+                    observations(item, root,selected_stage,output/'.inputs'),sample=sample,chain=chain):
                 count += 1
                 refs = meta
                 seq = row.get('sequence', '') or ''
@@ -312,9 +325,10 @@ def aggregate(items, root, output, catalog=None, progress=None):
             if progress:
                 progress(number, len(items), f'{sample} / {chain} 完成')
         if progress:progress(len(items),len(items),'正在建立逐记录索引与跨链去重汇总')
-        conn.execute('CREATE INDEX observations_view ON observations(sample_key,chain,match_class,filter_reason,id)')
-        conn.execute('CREATE INDEX observations_mapping_id ON observations(sample_key,chain,mapping_sequence_id)')
-        conn.commit()
+        with detail('observation_indexes'):
+            conn.execute('CREATE INDEX observations_view ON observations(sample_key,chain,match_class,filter_reason,id)')
+            conn.execute('CREATE INDEX observations_mapping_id ON observations(sample_key,chain,mapping_sequence_id)')
+            conn.commit()
         # Shared inputs are counted once across chains by archived source + ordinal,
         # including duplicate sequence IDs. Final-only legacy rows stay chain-specific.
         total_rows=conn.execute('''WITH unique_records AS (

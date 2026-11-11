@@ -1,4 +1,4 @@
-/* Report creation, history and trace. Visualizations live in report.html. */
+/* Report creation, history. Visualizations live in report.html. */
 window.RepertoireReports = (() => {
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   async function api(url, body, method) {
@@ -18,8 +18,42 @@ window.RepertoireReports = (() => {
     const $=q=>root.querySelector(q), error=$('[data-rp-config-error]');
     const field=name=>$(`[data-rp-field="${name}"]`);
     let allocationSamples=[],groupChoices=[],primerChoices=[],sampleGroups={},optionsReady=false,optionsEpoch=0;
+    const guided=root.hasAttribute('data-rp-guided-config');
+    let configPage='table',allocationChain='',allocationQuery='',onlyMissing=false;
+    function showConfigPage(page){
+      configPage=page;
+      if(!guided)return;
+      root.querySelectorAll('[data-rp-config-page]').forEach(node=>node.hidden=node.dataset.rpConfigPage!==page);
+      root.querySelectorAll('[data-rp-config-tab]').forEach(button=>{
+        const active=button.dataset.rpConfigTab===page;
+        button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;
+      });
+      root.dispatchEvent(new Event('scigblast:primer-page',{bubbles:true}));
+    }
+    function updateConfigState(){
+      if(!guided)return;
+      const total=allocationSamples.reduce((sum,row)=>sum+row.chains.length,0);
+      const assigned=allocationSamples.reduce((sum,row)=>sum+row.chains.filter(chain=>sampleGroups[row.sample]?.[chain]?.length).length,0);
+      $('[data-rp-allocation-count]').textContent=total?assigned+' / '+total:'';
+      const chainRows=allocationSamples.filter(row=>row.chains.includes(allocationChain));
+      const count=$('[data-rp-chain-count]');
+      if(count)count.textContent=chainRows.length+' 个样本 · 未配置 '+chainRows.filter(row=>!sampleGroups[row.sample]?.[allocationChain]?.length).length;
+
+      const tab=$('[data-rp-config-tab="allocation"]');tab.hidden=!manualMode();tab.disabled=!optionsReady;
+      const button=$('[data-rp-to-allocation]');
+      let tableReady=Boolean(uploads.primer&&readyBook('primer')&&(manualMode()||uploads.submission&&readyBook('submission')));
+      if(tableReady){
+        try{selected('primer',true);if(!manualMode())selected('submission',true);}
+        catch{tableReady=false;}
+      }
+      button.disabled=Boolean(pending)||!tableReady;
+      button.textContent=manualMode()?'读取引物组并分配 →':'确认配置，继续预检查 →';
+      $('[data-rp-table-status]').textContent=optionsReady?groupChoices.length+' 个引物组可用':tableReady?'对应列已完整，请核对预览内容。':'上传引物表并选择分组、名称和序列列。';
+    }
+
     const manualMode=()=>$('[data-rp-assignment-mode]').value==='manual';
     function renderAllocation(){
+      root.dataset.assignmentMode=manualMode()?'manual':'submission';
       $('[data-rp-manual-allocation]').hidden=!manualMode();
       $('[data-rp-file-card="submission"]').hidden=manualMode();
       $('[data-rp-map-group="submission"]').hidden=manualMode()||!readyBook('submission');
@@ -29,6 +63,7 @@ window.RepertoireReports = (() => {
       const chainOrder=['IGH','IGK','IGL','TRA','TRB','TRD','TRG'];
       const availableChains=chainOrder.filter(chain=>allocationSamples.some(row=>row.chains.includes(chain)));
       const batch=choices.length&&availableChains.length?'<div class="rp-allocation-batch"><label>处理链<select data-rp-batch-chain>'+availableChains.map(chain=>'<option>'+chain+'</option>').join('')+'</select></label><label>引物组<select data-rp-batch-group>'+choices.map(choice=>'<option value="'+esc(choice.name)+'">'+esc(choice.label)+'</option>').join('')+'</select></label><button type="button" class="button button-ghost button-small" data-rp-batch-apply>批量添加到该链</button></div>':'';
+      if(guided){renderGuidedAllocation(choices,availableChains);updateConfigState();return;}
       $('[data-rp-sample-groups]').innerHTML=batch+allocationSamples.map(({sample,chains})=>{
         const rows=chains.map(chain=>{
           const chosen=sampleGroups[sample]?.[chain]||[];
@@ -37,6 +72,73 @@ window.RepertoireReports = (() => {
         return `<section class="rp-sample-block"><header><strong>${esc(sample)}</strong><small>${chains.length} 条链</small></header>${rows||'<p class="muted">请先指定处理链或完成 Match。</p>'}</section>`;
       }).join('')||'<p class="muted">扫描样本或完成 Match 后，在此分配引物组。</p>';
     }
+    function renderGuidedAllocation(choices,chains){
+      if(!chains.includes(allocationChain))allocationChain=chains[0]||'';
+      const records=allocationSamples.filter(row=>row.chains.includes(allocationChain));
+      const missing=records.filter(row=>!sampleGroups[row.sample]?.[allocationChain]?.length).length;
+      const chainOptions=chains.map(chain=>'<option '+(chain===allocationChain?'selected':'')+'>'+chain+'</option>').join('');
+      const groupOptions=choices.map(choice=>'<option value="'+esc(choice.name)+'">'+esc(choice.label)+'</option>').join('');
+      const batch=[
+        '<div class="rp-allocation-batch">',
+        '<label>处理链<select data-rp-batch-chain>'+chainOptions+'</select></label>',
+        '<label>统一添加引物组<select data-rp-batch-group>'+groupOptions+'</select></label>',
+        '<button type="button" class="button button-primary button-small" data-rp-batch-apply '+(!choices.length?'disabled':'')+'>应用到本链全部样本</button>',
+        '</div>'
+      ].join('');
+      const controls=[
+        '<div class="rp-allocation-tools">',
+        '<label><input type="search" data-rp-allocation-query aria-label="搜索需要分配引物的样本" placeholder="搜索样本" value="'+esc(allocationQuery)+'"></label>',
+        '<label class="rp-missing-toggle"><input type="checkbox" data-rp-only-missing '+(onlyMissing?'checked':'')+'>只看未配置</label>',
+        '<span data-rp-chain-count>'+records.length+' 个样本 · 未配置 '+missing+'</span></div>'
+      ].join('');
+      const rows=records.map(({sample})=>{
+        const selected=sampleGroups[sample]?.[allocationChain]||[];
+        const choicesHtml=choices.map(choice=>[
+          '<label><input type="checkbox" data-rp-group-sample="'+esc(sample)+'" data-rp-group-chain="'+allocationChain+'" ',
+          'value="'+esc(choice.name)+'" '+(selected.includes(choice.name)?'checked':'')+'>',
+          esc(choice.label)+'</label>'
+        ].join('')).join('');
+        return [
+          '<tr data-rp-allocation-row="'+esc(sample)+'" data-assigned="'+Boolean(selected.length)+'">',
+          '<th scope="row">'+esc(sample)+'</th>',
+          '<td><span class="rp-chain-tag">'+allocationChain+'</span></td>',
+          '<td><span data-rp-row-state class="rp-assignment-state" data-ready="'+Boolean(selected.length)+'">'+(selected.length?'已配置':'未配置')+'</span></td>',
+          '<td><details class="rp-assignment-editor"><summary>',
+          '<span data-rp-chosen>'+esc(selected.join('、')||'选择引物组')+'</span><span class="rp-edit-label">修改</span></summary>',
+          '<label class="rp-choice-search"><input type="search" data-rp-choice-query placeholder="搜索组名或引物" aria-label="搜索可选引物组"></label>',
+          '<div class="rp-group-choices">'+choicesHtml+'</div></details></td></tr>'
+        ].join('');
+      }).join('');
+      const table=[
+        '<div class="rp-assignment-table-wrap"><table class="rp-assignment-table">',
+        '<thead><tr><th>样本</th><th>链</th><th>状态</th><th>引物组</th></tr></thead>',
+        '<tbody>'+rows+'</tbody></table>',
+        '<p class="rp-search-empty" data-rp-allocation-empty hidden>没有符合条件的样本。</p></div>'
+      ].join('');
+      $('[data-rp-sample-groups]').innerHTML=batch+controls+table;
+      filterAllocation();
+    }
+    function filterAllocation(){
+      let visible=0;
+      root.querySelectorAll('[data-rp-allocation-row]').forEach(row=>{
+        row.hidden=!row.dataset.rpAllocationRow.toLocaleLowerCase().includes(allocationQuery.toLocaleLowerCase())||onlyMissing&&row.dataset.assigned==='true';
+        if(!row.hidden)visible++;
+      });
+      const empty=$('[data-rp-allocation-empty]');if(empty)empty.hidden=visible>0;
+    }
+    $('[data-rp-sample-groups]').addEventListener('input',event=>{
+      if(event.target.matches('[data-rp-choice-query]')){
+        const query=event.target.value.trim().toLocaleLowerCase();
+        event.target.closest('details').querySelectorAll('.rp-group-choices>label').forEach(label=>label.hidden=!label.textContent.toLocaleLowerCase().includes(query));
+        return;
+      }
+      if(event.target.matches('[data-rp-allocation-query]')){allocationQuery=event.target.value;filterAllocation();}
+    });
+    $('[data-rp-sample-groups]').addEventListener('toggle',event=>{
+      const editor=event.target;if(!editor.matches('.rp-assignment-editor'))return;
+      if(editor.open)root.querySelectorAll('.rp-assignment-editor[open]').forEach(other=>{if(other!==editor)other.open=false;});
+      else if(onlyMissing)filterAllocation();
+    },true);
     $('[data-rp-sample-groups]').addEventListener('click',event=>{
       if(!event.target.closest('[data-rp-batch-apply]'))return;
       const chain=$('[data-rp-batch-chain]').value,group=$('[data-rp-batch-group]').value;
@@ -49,11 +151,17 @@ window.RepertoireReports = (() => {
       root.dispatchEvent(new Event('change',{bubbles:true}));
     });
     $('[data-rp-sample-groups]').addEventListener('change',event=>{
+      if(guided&&event.target.matches('[data-rp-batch-chain]')){allocationChain=event.target.value;renderAllocation();return;}
+      if(event.target.matches('[data-rp-only-missing]')){onlyMissing=event.target.checked;filterAllocation();return;}
       const input=event.target.closest('[data-rp-group-sample]');if(!input)return;
       const sample=input.dataset.rpGroupSample,chain=input.dataset.rpGroupChain,values=new Set(sampleGroups[sample]?.[chain]||[]);
       if(input.checked)values.add(input.value);else values.delete(input.value);
       (sampleGroups[sample]??={})[chain]=[...values];
       input.closest('details').querySelector('[data-rp-chosen]').textContent=[...values].join('、')||'选择引物组';
+      const row=input.closest('[data-rp-allocation-row]');
+      if(row){row.dataset.assigned=String(values.size>0);const status=row.querySelector('[data-rp-row-state]');status.dataset.ready=String(values.size>0);status.textContent=values.size?'已配置':'未配置';}
+      updateConfigState();
+
     });
     $('[data-rp-assignment-mode]').addEventListener('change',renderAllocation);
     field('allow_primer_name_join').addEventListener('change',()=>{
@@ -63,20 +171,43 @@ window.RepertoireReports = (() => {
     function pruneGroups(allowed){
       for(const chains of Object.values(sampleGroups))for(const chain of Object.keys(chains))chains[chain]=chains[chain].filter(name=>allowed.has(name));
     }
-    function invalidateGroups(){optionsReady=false;optionsEpoch++;groupChoices=[];primerChoices=[];renderAllocation();}
-    $('[data-rp-load-groups]').onclick=async()=>{
+    function invalidateGroups(){optionsReady=false;optionsEpoch++;groupChoices=[];primerChoices=[];if(guided)showConfigPage('table');renderAllocation();}
+    async function loadGroups(){
       const button=$('[data-rp-load-groups]');button.disabled=true;
       try{
         const body=result.value(true),epoch=optionsEpoch;
-        if(!body.primer_id)throw Error('请先上传引物表并选择对应列');
+        if(!body.primer_id)throw Error('请上传引物表并选择分组、名称和序列列。');
         const choices=await api('/api/reports/primer-options',body);
-        if(epoch!==optionsEpoch)return;
+        if(epoch!==optionsEpoch)return false;
         groupChoices=choices.groups;primerChoices=choices.primers;optionsReady=true;
-        const allowed=new Set([...groupChoices,...primerChoices]);
-        pruneGroups(allowed);
-        renderAllocation();error.classList.add('hidden');
-      }catch(e){fail(e);}finally{button.disabled=false;}
-    };
+        pruneGroups(new Set([...groupChoices,...primerChoices]));
+        renderAllocation();error.classList.add('hidden');root.dispatchEvent(new Event('change',{bubbles:true}));return true;
+      }finally{button.disabled=false;}
+    }
+    $('[data-rp-load-groups]').onclick=()=>loadGroups().catch(fail);
+    if(guided){
+      root.querySelectorAll('[data-rp-config-tab]').forEach(button=>{
+        const name=button.dataset.rpConfigTab;
+        button.id=previewId+'-config-'+name;button.setAttribute('aria-controls',button.id+'-panel');
+        const panel=$('[data-rp-config-page="'+name+'"]');
+        panel.id=button.id+'-panel';panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby',button.id);
+        button.onclick=()=>showConfigPage(name);
+        button.onkeydown=event=>{
+          if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+          event.preventDefault();
+          const buttons=[...root.querySelectorAll('[data-rp-config-tab]')].filter(item=>!item.disabled&&!item.hidden);
+          const index=buttons.indexOf(button);
+          const next=event.key==='Home'?buttons[0]:event.key==='End'?buttons.at(-1):buttons[(index+1)%buttons.length];
+          next?.click();next?.focus({preventScroll:true});
+        };
+      });
+      $('[data-rp-to-allocation]').onclick=async()=>{
+        try{
+          if(manualMode()){if(await loadGroups()){showConfigPage('allocation');root.scrollIntoView({block:'start'});}}
+          else{result.value();root.dispatchEvent(new Event('scigblast:primer-config-ready',{bubbles:true}));}
+        }catch(error){fail(error);}
+      };
+    }
     const columnNumber=text=>{text=text.trim().toUpperCase();if(!/^[A-Z]{1,3}$/.test(text))throw Error('列须用 Excel 字母，例如 B、I、AA');return [...text].reduce((n,c)=>n*26+c.charCodeAt(0)-64,0)-1;};
     const columnName=index=>{let name='';for(let n=index+1;n>0;n=Math.floor((n-1)/26))name=String.fromCharCode(65+(n-1)%26)+name;return name;};
     const headerRow=key=>{const row=Number(field(key+'_header_row').value);if(!Number.isInteger(row)||row<1||row>500000)throw Error('表头行须为 1–500000 的整数');return row;};
@@ -111,11 +242,33 @@ window.RepertoireReports = (() => {
       mappingFields[key].forEach(name=>{field(name).innerHTML='<option value="">上传后选择</option>';field(name).disabled=true;});
       if(key==='primer'){$('[data-rp-primer-pairs]').replaceChildren();syncPairButtons();}
     }
+    function suggestColumns(key){
+      if(!guided)return;
+      const book=books[key],header=headerRow(key)-1;
+      const titles=Array.from({length:book.column_count},(_,index)=>String(cell(book,header,index).value).toLowerCase().replace(/[\s_'’".()（）\-:]/g,''));
+      const unique=pattern=>{const found=titles.map((value,index)=>pattern.test(value)?index:-1).filter(index=>index>=0);return found.length===1?columnName(found[0]):'';};
+      if(key==='submission'){
+        field('sample_column').value=unique(/^(sample|sampleid|samplename|样本|样本名|样本名称)$/);
+        field('submission_join_column').value=unique(/^(group|groupname|primergroup|primerdesign|chain|引物组|引物设计|分组|链)$/);
+        return;
+      }
+      field('primer_join_column').value=unique(/^(group|groupname|primergroup|chain|引物组|分组|链)$/);
+      const inferred=[];
+      for(let i=0;i<titles.length-1;i++){
+        if(/^(name|primername|引物名|引物名称)$/.test(titles[i])&&(/^(seq|sequence|primersequence)$/.test(titles[i+1])||titles[i+1].includes('序列')))inferred.push([columnName(i),columnName(i+1)]);
+      }
+      for(const [index,pair] of inferred.slice(0,12).entries()){
+        if(index)addPair();
+        const row=$('[data-rp-primer-pairs]').children[index];row.querySelector('[data-rp-pair-name]').value=pair[0];row.querySelector('[data-rp-pair-sequence]').value=pair[1];
+      }
+      if(inferred.length)$('[data-rp-selected-columns]').open=false;
+    }
     function populateColumns(key){
       if(headerRow(key)>books[key].row_count)throw Error('所选表头行超出工作表，请调整表头行');
       const options=columnOptions(key);
       mappingFields[key].forEach(name=>{field(name).innerHTML=options;field(name).disabled=false;});
       if(key==='primer'){$('[data-rp-primer-pairs]').replaceChildren();addPair();}
+      suggestColumns(key);
     }
     $('[data-rp-add-pair]').onclick=()=>{addPair();columnsChanged('primer');};
     function fail(e){error.textContent=e.message;error.classList.remove('hidden');}
@@ -199,7 +352,7 @@ window.RepertoireReports = (() => {
         if(revision!==generation||epoch!==revisions[key]||uploads[key]!==token)return;
         books[key]=book;populateColumns(key);uploadState(key,'ready');showPreview();error.classList.add('hidden');
       }catch(e){if(revision===generation&&epoch===revisions[key]){delete books[key];clearColumns(key);uploadState(key,'error');showPreview();fail(e);}}
-      finally{pending--;}
+      finally{pending--;updateConfigState();root.dispatchEvent(new Event('change',{bubbles:true}));}
     }
     root.querySelectorAll('[data-rp-upload]').forEach(input=>input.addEventListener('change',async()=>{
       const file=input.files[0],key=input.dataset.rpUpload,revision=generation,epoch=++revisions[key];
@@ -215,7 +368,7 @@ window.RepertoireReports = (() => {
         populateColumns(key);$(`[data-rp-upload-note="${key}"]`).textContent=file.name;$(`[data-rp-upload-note="${key}"]`).title=file.name;uploadState(key,'ready');previewKey=key;showPreview();
         if(headerRow(key)-1!==data.preview_start)await refreshBook(key);
       }catch(e){if(revision===generation&&epoch===revisions[key]){delete books[key];clearColumns(key);showPreview();uploadState(key,'error');fail(e);$(`[data-rp-upload-note="${key}"]`).textContent='读取失败，请重新选择文件或调整表头行';}}
-      finally{pending--;if(revision===generation&&epoch===revisions[key])field(key+'_sheet').disabled=false;}
+      finally{pending--;if(revision===generation&&epoch===revisions[key])field(key+'_sheet').disabled=false;updateConfigState();root.dispatchEvent(new Event('change',{bubbles:true}));}
     }));
     for(const key of ['submission','primer']){
       field(key+'_sheet').addEventListener('change',()=>{previewKey=key;refreshBook(key);});
@@ -223,7 +376,16 @@ window.RepertoireReports = (() => {
       field(key+'_header_row').addEventListener('change',()=>{previewKey=key;refreshBook(key);});
     }
     for(const [key,names] of Object.entries(mappingFields))for(const name of names)field(name).addEventListener('change',()=>columnsChanged(key));
-    const result={setSamples(records){
+    const result={page(){return guided&&manualMode()?configPage:'';},back(){
+      if(guided&&configPage==='allocation'){showConfigPage('table');root.scrollIntoView({block:'start'});return true;}
+      return false;
+    },async advance(){
+      if(guided&&manualMode()&&configPage==='table'){
+        if(await loadGroups()){showConfigPage('allocation');root.scrollIntoView({block:'start'});}
+        return false;
+      }
+      result.value();return true;
+    },setSamples(records){
       const bySample=new Map(),order=['IGH','IGK','IGL','TRA','TRB','TRD','TRG'];
       for(const row of records){
         const sample=typeof row==='string'?row:row.sample_label||row.sample_id||row.sample;
@@ -256,7 +418,7 @@ window.RepertoireReports = (() => {
     for(const name of ['sequence_mode','adapter','umi_length','barcode_length'])field(name).addEventListener('change',invalidateGroups);
     const structureOptions=()=>{$('[data-rp-structure-settings]').hidden=!['sequence_mode','read_structure','mapping_read_structure'].some(name=>field(name).value==='oligo');};
     for(const name of ['sequence_mode','read_structure','mapping_read_structure'])field(name).addEventListener('change',structureOptions);
-    structureOptions();
+    structureOptions();updateConfigState();
     configs.set(root,result);return result;
   }
   function table(rows,columns,{groupBySample=false}={}){
@@ -282,7 +444,7 @@ window.RepertoireReports = (() => {
   const statusName={queued:'排队中',running:'生成中',succeeded:'已完成',failed:'失败',cancelled:'已取消',cancelling:'正在取消',interrupted:'已中断'};
   function mount(root,{jobId=''}={}){
     const $=q=>root.querySelector(q),cfg=configPanel($('.rp-config'));
-    let job=null,scan=null,runs=[],run=null,data=null,recordsAfter=0,busy=false,loading=false,timer=null,selection=new Set(),loadedId='',setupTouched=false,revision=0;
+    let job=null,scan=null,runs=[],run=null,data=null,busy=false,loading=false,timer=null,selection=new Set(),loadedId='',setupTouched=false,revision=0;
     let sampleContext='',step=1,planMode=false,scanEpoch=0;
     const reportConfig=()=>$('[data-rp-use-primer]').checked?cfg.value():{};
     let primerCheck=null,checkEpoch=0,checkTimer=null;
@@ -309,6 +471,7 @@ window.RepertoireReports = (() => {
       $('[data-rp-next]').hidden=step===4;
       $('[data-rp-step-caption]').textContent='第 '+step+' / 4 步';
       $('[data-rp-step-feedback]').textContent='';
+      updateGenerate();
       if(focus){const pane=$('[data-rp-step-pane="'+step+'"]');pane.tabIndex=-1;pane.focus({preventScroll:true});pane.scrollIntoView({block:'nearest'});}
     }
     function moveStep(next){
@@ -320,8 +483,18 @@ window.RepertoireReports = (() => {
       }catch(error){$('[data-rp-step-feedback]').textContent=error.message;}
     }
     root.querySelectorAll('[data-rp-step]').forEach(button=>button.onclick=()=>moveStep(Number(button.dataset.rpStep)));
-    $('[data-rp-next]').onclick=()=>moveStep(step===2&&!$('[data-rp-use-primer]').checked?4:step+1);
-    $('[data-rp-back]').onclick=()=>showStep(step===4&&!$('[data-rp-use-primer]').checked?2:step-1,true);
+    $('[data-rp-next]').onclick=async()=>{
+      try{
+        if(step===2&&$('[data-rp-use-primer]').checked&&!await cfg.advance())return;
+        moveStep(step===2&&!$('[data-rp-use-primer]').checked?4:step+1);
+      }catch(error){$('[data-rp-step-feedback]').textContent=error.message;}
+    };
+    $('.rp-config').addEventListener('scigblast:primer-config-ready',()=>moveStep(3));
+    $('.rp-config').addEventListener('scigblast:primer-page',()=>updateGenerate());
+    $('[data-rp-back]').onclick=()=>{
+      if(step===2&&$('[data-rp-use-primer]').checked&&cfg.back())return;
+      showStep(step===4&&!$('[data-rp-use-primer]').checked?2:step-1,true);
+    };
     $('[data-rp-close]').onclick=()=>{setSetup(false);$('[data-rp-open]').focus({preventScroll:true});};
     $('.rp-config').hidden=true;
     $('[data-rp-use-primer]').onchange=()=>{
@@ -337,6 +510,8 @@ window.RepertoireReports = (() => {
       try{configured=Boolean(reportConfig().primer_id);if($('[data-rp-use-primer]').checked&&!configured)valid=false;}catch{valid=false;}
       $('[data-rp-run]').disabled=!selection.size||!valid||configured&&!(primerCheck?.status==='succeeded'&&$('[data-rp-check-confirm]').checked);
       $('[data-rp-run]').hidden=planMode;
+      $('[data-rp-next]').textContent=step===2&&$('[data-rp-use-primer]').checked?(cfg.page()==='table'?'分配引物 →':'匹配预检查 →'):'下一步';
+
       $('[data-rp-preview]').disabled=!valid||!configured||!planMode&&!selection.size;
       $('[data-rp-check]').disabled=busy||!valid||!configured||!selection.size||['queued','running','cancelling'].includes(primerCheck?.status);
       $('[data-rp-check-panel]').hidden=planMode||!$('[data-rp-use-primer]').checked;
@@ -359,7 +534,10 @@ window.RepertoireReports = (() => {
       status.textContent=previous?'配置或样本已变化，请重新运行预检查。':'选择分析结果并完成引物配置后开始。';
       $('[data-rp-check]').disabled=false;updateGenerate();
     }
-    for(const event of ['input','change'])$('.rp-config').addEventListener(event,invalidateCheck);
+    for(const event of ['input','change'])$('.rp-config').addEventListener(event,change=>{
+      if(change.target.matches('[data-rp-allocation-query],[data-rp-only-missing],[data-rp-batch-chain],[data-rp-batch-group],[data-rp-choice-query]'))return;
+      invalidateCheck();
+    });
     $('[data-rp-check-confirm]').onchange=updateGenerate;
     function checkResults(summary){
       const format=value=>value===null||value===undefined?'N/A':Number(value).toFixed(2)+'%';
@@ -408,17 +586,6 @@ window.RepertoireReports = (() => {
       await pollCheck(epoch);
     });
     async function action(button,fn){if(busy)return;busy=true;const old=button.textContent;button.disabled=true;button.setAttribute('aria-busy','true');try{await fn();}catch(e){message(e.message,true);if(button.matches('[data-rp-scan]'))$('[data-rp-candidates]').textContent='扫描失败，请点击扫描按钮重试。';}finally{busy=false;button.disabled=button.matches('[data-rp-check]')&&['queued','running','cancelling'].includes(primerCheck?.status);button.textContent=button.matches('[data-rp-scan]')&&scan?'重新扫描':old;button.removeAttribute('aria-busy');updateGenerate();}}
-    function traceOptions(){
-      const options=(name,values)=>{const select=$(`[data-rp-${name}]`),previous=select.value;select.replaceChildren(new Option('全部',''),...[...new Set(values.filter(Boolean))].sort().map(v=>new Option(v,v)));if(values.includes(previous))select.value=previous;};
-      options('sample',data.samples.map(r=>r.sample));options('chain',data.samples.map(r=>r.chain));
-      const sample=$('[data-rp-sample]').value,chain=$('[data-rp-chain]').value;
-      const groups=(data.usage?.groups||[]).filter(g=>(!sample||g.sample===sample)&&(!chain||g.chain===chain));
-      options('primer',groups.flatMap(g=>g.primers||[]));
-      const select=$('[data-rp-group]'),previous=select.value;
-      select.replaceChildren(new Option('全部结果范围',''),...groups.map(g=>new Option(g.sample+' / '+g.chain+' / '+g.group_id.slice(0,8),g.group_id)));
-      if(groups.some(g=>g.group_id===previous))select.value=previous;else if(groups.length===1)select.value=groups[0].group_id;
-      $('[data-rp-group-label]').hidden=groups.length<2;
-    }
     async function display(){
       const ticket=++revision;run=runs.find(r=>r.id===$('[data-rp-runs]').value)||null;
       $('[data-rp-results]').hidden=!run||run.status!=='succeeded'||run.archived;
@@ -437,7 +604,7 @@ window.RepertoireReports = (() => {
       $('[data-rp-downloads]').innerHTML=`<a class="button button-primary" target="_blank" rel="noopener" href="/api/reports/${id}/report.html?download=false">打开报告 ↗</a><a class="button button-ghost" download="SCIGBLAST_report.html" href="/api/reports/${id}/report.html">轻量分享 HTML</a><a class="button button-ghost" download="report_${id}_check.zip" href="/api/reports/${id}/download?package=check">实验核查包 · HTML＋Excel</a><a class="button button-ghost" download="report.xlsx" href="${esc(fileURL('report.xlsx',true))}">Excel</a><a class="button button-ghost" download="report_${id}_png.zip" href="/api/reports/${id}/download?images_only=true">PNG 压缩包</a><a class="button button-ghost" download="report_${id}.zip" href="/api/reports/${id}/download">完整材料</a>`;
       if(loadedId!==run.id){
         const summary=await api(`/api/reports/${id}/summary?compact=true`);if(ticket!==revision)return;
-        data=summary;loadedId=run.id;traceOptions();$('[data-rp-records]').replaceChildren();$('[data-rp-record-downloads]').replaceChildren();$('[data-rp-record-more]').hidden=true;
+        data=summary;loadedId=run.id;
       }
       $('[data-rp-result-summary]').textContent=data.task_name||job?.dataset||'免疫组库分析报告';
       $('[data-rp-report-scope]').textContent=[...new Set(data.samples.map(r=>r.sample+' / '+r.chain))].join(' · ');
@@ -477,17 +644,6 @@ window.RepertoireReports = (() => {
     $('[data-rp-run]').onclick=e=>action(e.target,async()=>{const created=await api('/api/reports',body());setSetup(false);await load();$('[data-rp-runs]').value=created.id;await display();message('已加入报告生成队列。');});
     $('[data-rp-save-plan]').onclick=e=>action(e.target,async()=>{await api(`/api/reports/plans/${encodeURIComponent(jobId)}`,reportConfig(),'PUT');message('已保存，主分析完成后自动生成报告。');await load();});
     $('[data-rp-runs]').onchange=()=>{loadedId='';display().catch(e=>message(e.message,true));};
-    for(const key of ['sample','chain'])$(`[data-rp-${key}]`).onchange=traceOptions;
-    async function records(append=false){
-      if(!run||!data)return;const id=run.id;
-      const params=new URLSearchParams({match_class:$('[data-rp-record-class]').value,reason:$('[data-rp-record-reason]').value,trim_state:$('[data-rp-trim]').value,after:String(append?recordsAfter:0)});
-      if($('[data-rp-group]').value)params.set('group_id',$('[data-rp-group]').value);
-      for(const key of ['sample','chain','primer','gene','segment']){const value=$(`[data-rp-${key}]`).value.trim();if(value)params.set(key,value);}
-      const result=await api(`/api/reports/${id}/records?${params}`);if(run?.id!==id)return;
-      $('[data-rp-records]').innerHTML=table(result.rows);recordsAfter=result.next_cursor||0;$('[data-rp-record-more]').hidden=!result.has_more;params.delete('after');
-      $('[data-rp-record-downloads]').innerHTML=`<a class="button button-ghost button-small" download="records_${esc(id)}.fasta" href="/api/reports/${encodeURIComponent(id)}/sequences?${esc(params.toString())}&format=fasta">序列 FASTA</a><a class="button button-ghost button-small" download="records_${esc(id)}.tsv" href="/api/reports/${encodeURIComponent(id)}/sequences?${esc(params.toString())}&format=tsv">关联表 TSV</a>`;
-    }
-    $('[data-rp-record-load]').onclick=e=>action(e.target,()=>records());$('[data-rp-record-more]').onclick=e=>action(e.target,()=>records(true));
     const instance={update(value){job=value;if(!jobId)return;
       const context=[job.attempt_no,job.status,job.current_stage].join(':');
       if(context!==sampleContext){

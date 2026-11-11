@@ -47,6 +47,7 @@ def _execute(request, output, checkpoint):
     staging = output.parent/('.'+output.name+'.'+uuid.uuid4().hex)
     staging.mkdir()
     performance = Performance(request.get('performance_path') or staging/'.performance.json')
+    performance.monitor(lambda: staging)
     performance.data.update(items=len(items),statistics_reuse=bool(request.get('statistics_source')))
     def progress(done,total,message,phase='statistics'):
         if request.get('progress_path'):
@@ -145,6 +146,12 @@ def _execute(request, output, checkpoint):
             data['stage_volumes']=summarize_volume(data['stages'],data['samples'])
             if any(version(path)!=signature for path,signature in receipts.items()):
                 raise ValueError('阶段报告在统计期间发生变化，请重新扫描')
+        if cached and recovered is None:
+            # Stage receipts are inexpensive metadata. Refresh them when
+            # repainting an old report so corrected identity joins do not
+            # require re-reading FASTQ/AIRR or recomputing gene ownership.
+            data['stages']=performance.call('stage_metrics_refresh',collect,root,items)
+            data['stage_volumes']=summarize_volume(data['stages'],data['samples'])
         # Observation diagnostics include failed queries. They retain counts but
         # must not expose the former input-normalized percentages as gene usage.
         data['gene_counts']=[{key:value for key,value in row.items() if key not in
@@ -205,8 +212,9 @@ def _execute(request, output, checkpoint):
         data['usage']['isotypes']=[dict(row,unit=count_unit(row.get('metric'),row.get('subset')=='postprocessed')) for row in data['usage']['isotypes']]
         exports['isotype_summary']=data['usage']['isotypes']
         from .presentation import annotation_coverage
-        with closing(usage_connection(staging/'details.sqlite')) as connection:
-            data['annotation_coverage']=performance.call('annotation_coverage',annotation_coverage,connection)
+        if not cached or 'annotation_coverage' not in data:
+            with closing(usage_connection(staging/'details.sqlite')) as connection:
+                data['annotation_coverage']=performance.call('annotation_coverage',annotation_coverage,connection)
         exports['annotation_coverage']=data['annotation_coverage']
         exports['sequence_family_matching']=data['family_counts']
         exports['primer_preparation_summary']=data['trim_counts']

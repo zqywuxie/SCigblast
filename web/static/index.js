@@ -16,6 +16,81 @@
   const mappingPageSize = 20;
   let scanGeneration = 0, scannedInput = '', mappingCurrent=false, mappingScanning=false, validationGeneration = 0, lastJobsUpdate = '';
   const pipelineDescriptions = {ir_split:'Bulk IR FASTQ → 样本 UMI 与免疫指标', '10x_split':'单细胞 FASTQ → 细胞链与 UMI 结果', igblast_base:'通用 FASTQ → IgBLAST 注释', pig_igblast:'猪 FASTQ → 专属参考库注释', mapping:'免疫组库 CSV → 各样本 UMI count'};
+  let taskStep=1,taskReached=1;
+  const taskSteps=['选择流程','数据与样本','附加设置','核对创建'];
+  const taskStepHelp=['选择与数据类型相符的分析流程。','添加服务器数据，确认样本来源与处理链。','报告、克隆树图和其他设置均可按需选择。','核对本次配置，检查通过后创建任务。'];
+  function syncTaskWizard(){
+    const form=$('#new-job-form');if(!form)return;
+    document.querySelectorAll('[data-task-step]').forEach(button=>{
+      const step=Number(button.dataset.taskStep);
+      button.setAttribute('aria-current',step===taskStep?'step':'false');
+      button.dataset.state=step===taskStep?'current':step<taskStep?'done':step<=taskReached?'visited':'pending';
+      button.disabled=taskSubmitting||step>taskReached+1;
+      button.querySelector('i').textContent=step<taskStep?'✓':'';
+    });
+    document.querySelectorAll('[data-task-final]').forEach(node=>node.hidden=taskStep!==4);
+    $('#task-step-back').hidden=taskStep===1;$('#task-step-back').disabled=taskSubmitting;
+    $('#task-step-next').hidden=taskStep===4;$('#task-step-next').disabled=taskSubmitting||taskStep===1&&!pipelineInfo[selectedPipeline()];
+    $('#task-step-next').textContent=(taskSteps[taskStep]||'下一步')+' →';
+    $('#task-step-position').textContent='第 '+taskStep+' / 4 步 · '+taskSteps[taskStep-1];
+    $('#drawer-description').textContent=taskStepHelp[taskStep-1];
+    const info=pipelineInfo[selectedPipeline()]||{},mapping=selectedPipeline()==='mapping';
+    $('#task-check-status').hidden=taskStep!==4;
+    if(taskStep===1)$('#task-scope-message').textContent=info.label?info.label+' · '+(mapping?'免疫组库 CSV':'配对 FASTQ'):'请选择分析流程';
+    if(taskStep===2)$('#task-scope-message').textContent=DirectoryInput.active()?DirectoryInput.scope():mapping?$('#mapping-scope').textContent||'扫描 CSV 目录并选择样本与链':'确认输入目录和 Submission';
+    if(taskStep===3){const selected=[form.elements.generate_treemap.checked?'克隆树图':'',['igblast_base','pig_igblast'].includes(selectedPipeline())&&form.elements.generate_report.checked?'分析报告':''].filter(Boolean);$('#task-scope-message').textContent=selected.length?'已启用：'+selected.join('、'):'附加分析均为可选，默认关闭';}
+    if(taskStep===4)$('#task-scope-message').textContent=DirectoryInput.editingJob()?'保存后重新匹配样本':mapping?'创建后按所选样本与链开始分析':'创建后先匹配样本，核对后继续分析';
+    const flowMarkup='<div class="task-flow-facts"><span>输入<strong>'+esc(mapping?'免疫组库 CSV':'配对 FASTQ')+'</strong></span><span>创建后<strong>'+esc(mapping?'直接开始分析':'样本匹配 → 人工核对 → 分析')+'</strong></span></div><div class="task-flow-stages" aria-label="分析阶段">'+(info.stages||[]).map(stage=>'<span>'+esc(info.stage_labels?.[stage]||stage)+'</span>').join('')+'</div>';
+    const flow=$('#task-flow-summary');if(flow._markup!==flowMarkup){flow.innerHTML=flowMarkup;flow._markup=flowMarkup;}
+  }
+  function showTaskStep(step,focus=true){
+    taskStep=step;taskReached=Math.max(taskReached,step);
+    document.querySelectorAll('[data-task-pane]').forEach(pane=>{const active=Number(pane.dataset.taskPane)===step;pane.hidden=!active;pane.inert=!active;});
+    syncTaskWizard();$('.task-form-scroll').scrollTop=0;
+    if(focus){const heading=$('[data-task-pane="'+step+'"] .drawer-step strong');heading.tabIndex=-1;heading.focus({preventScroll:true});}
+  }
+  function focusTaskField(input){
+    const pane=input?.closest('[data-task-pane]');if(pane)showTaskStep(Number(pane.dataset.taskPane),false);
+    for(let node=input?.parentElement;node&&node.id!=='new-job-form';node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;
+    if(input?.id==='pipeline')$('#pipeline-cards .selected')?.focus();
+    else input?.focus();
+  }
+  function taskStepError(step,text,input){
+    showTaskStep(step,false);showMessage(text,true);if(input){if(input.matches('input,select,textarea'))input.setAttribute('aria-invalid','true');focusTaskField(input);input.reportValidity?.();}return false;
+  }
+  function checkTaskStep(step){
+    if(step===1)return Boolean(pipelineInfo[selectedPipeline()])||taskStepError(1,'请先选择分析流程。',$('#pipeline'));
+    if(step===2){
+      const path=$('[name=input_path]');
+      if(!path.value.trim())return taskStepError(2,'请填写或选择服务器上的输入目录。',path);
+      if(DirectoryInput.active()&&!DirectoryInput.ready())return taskStepError(2,DirectoryInput.scope(),$('#directory-scan'));
+      if(selectedPipeline()==='mapping'&&(!mappingCurrent||mappingScanning||scannedInput!==path.value.trim()||!mappingSelection().length||!mappingSampleSelection().length||$('#new-job-form button[type=submit]').disabled))return taskStepError(2,'请扫描 CSV 目录，并选择有数据交集的样本与链。',$('#mapping-scan'));
+    }
+    const pane=$('[data-task-pane="'+step+'"]'),invalid=[...pane.querySelectorAll('input,select,textarea')].find(input=>input.willValidate&&!input.checkValidity());
+    if(invalid)return taskStepError(step,invalid.validationMessage||'请补全本步骤的必填信息。',invalid);
+    if(step===3){try{taskBody($('#new-job-form'));}catch(error){return taskStepError(3,error.message,pane.querySelector('[aria-invalid=true]'));}}
+    return true;
+  }
+  function renderTaskReview(){
+    const form=$('#new-job-form'),body=taskBody(form),info=pipelineInfo[body.pipeline]||{};
+    const species=body.pipeline==='igblast_base'?body.species:body.pipeline==='pig_igblast'?'pig':body.pipeline==='mapping'?'human':'';
+    const rows=[['分析流程',info.label||body.pipeline],...(species?[['物种',species]]:[]),['原始数据',body.input_path],['数据集名称',body.dataset_label||'使用输入目录名']];
+    if(DirectoryInput.active()){
+      const assignments=body.input_assignments||[];
+      rows.push(['样本来源','扫描目录'],['处理范围',[new Set(assignments.map(r=>r.sample_id)).size+' 个样本',assignments.length+' 对 FASTQ',[...new Set(assignments.flatMap(r=>r.chains))].join(' / ')].join(' · ')]);
+    }else if(body.pipeline==='mapping')rows.push(['处理范围',$('#mapping-scope').textContent],['处理链',body.mapping_chains.join(' / ')]);
+    else rows.push(['样本来源',body.submission_revision?'Submission 工作副本':body.submission_path]);
+    const additions=[body.generate_treemap?'克隆树图':'',body.generate_report?'分析报告':'',body.primer_analysis?.primer_id?'引物分析':''].filter(Boolean);
+    if(info.requires_barcode)rows.push(['Barcode',body.barcode_csv||'系统默认 Barcode']);
+    rows.push(['附加分析',additions.join('、')||'未启用'],['追溯范围',body.trace_mode==='full'?'全流程':'比对输入与注释']);
+    $('#task-review-summary').innerHTML=rows.map(([label,value])=>'<div><dt>'+esc(label)+'</dt><dd>'+esc(value||'—')+'</dd></div>').join('');
+  }
+  function goTaskStep(target){
+    if(taskSubmitting)return;
+    if(target>taskStep){for(let step=taskStep;step<target;step++)if(!checkTaskStep(step))return;}
+    if(target===4){try{renderTaskReview();}catch(error){taskStepError(3,error.message);return;}}
+    showMessage('');showTaskStep(target);
+  }
   function fieldFeedback(name, message, error = false) {
     const input = document.querySelector(`[name="${name}"]`); if (!input || input.disabled) return;
     input.setAttribute('aria-invalid', String(error));
@@ -32,12 +107,13 @@
     $('#validation-summary').textContent = '配置已变更，请检查后创建。'; $('#validation-details').classList.add('hidden');
     $('#form-message').textContent = '';
   }
-  function focusInvalidField(){const input=$('#new-job-form [aria-invalid="true"]');if(!input)return;for(let node=input.parentElement;node&&node.id!=='new-job-form';node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;input.focus();}
+  function focusInvalidField(){const input=$('#new-job-form [aria-invalid="true"]');if(input)focusTaskField(input);}
   function validationError(error) {
     let details; try { details = JSON.parse(error.message); } catch { /* Plain server error. */ }
     const issues = details?.errors || [];
     issues.forEach(issue => fieldFeedback(issue.field, issue.message || issue.code, true));
     const text = issues.map(issue => issue.message || issue.code).filter(Boolean).join('；') || details?.message || error.message;
+    if(issues.length===0&&taskStep===4&&/引物|工作表|上传/.test(text))showTaskStep(3,false);
     $('#validation-summary').textContent = text; $('#task-check-status').textContent='检查发现问题'; showMessage(text, true);
     focusInvalidField();
   }
@@ -83,6 +159,7 @@
     const mapping=selectedPipeline()==='mapping';
     $('#new-job-form button[type="submit"]').disabled=taskSubmitting||!DirectoryInput.ready()||mapping&&(!mappingCurrent||mappingScanning||!scannedInput||scannedInput!==$('[name="input_path"]').value.trim()||!chains.length||!samples.length||!fileCount);
     $('#task-scope-message').textContent=taskSubmitting?'正在提交任务…':DirectoryInput.active()?DirectoryInput.scope():mapping?scope:$('[name=input_path]').value.trim()?'创建后先执行 Match，再核对样本':'请填写服务器上的输入目录';
+    syncTaskWizard();
   }
   function clearMappingScan() {
     invalidateValidation();
@@ -130,7 +207,7 @@
     $('#task-check-status').textContent='尚未检查配置';
     clearTimeout(showMessage.timer);
     document.querySelectorAll('.path-state').forEach(n => n.classList.remove('ok', 'bad'));
-    updatePipelineFields();
+    updatePipelineFields();taskReached=1;showTaskStep(1,false);
   }
   const browseLabels = { input: '原始数据目录', submission: 'Submission 文件或目录', barcode: 'Barcode CSV', output: '输出根目录' };
   let pickerKind = '', pickerTarget = '', pickerPath = '', pickerBusy = false;
@@ -483,8 +560,12 @@
     }catch(error){if(generation===validationGeneration)validationError(error);}finally{button.disabled=false;}
   }
 
+  document.querySelectorAll('[data-task-step]').forEach(button=>button.onclick=()=>goTaskStep(Number(button.dataset.taskStep)));
+  $('#task-step-next').onclick=()=>goTaskStep(taskStep+1);
+  $('#task-step-back').onclick=()=>goTaskStep(taskStep-1);
   $('#new-job-form').addEventListener('submit', async event=>{
-    event.preventDefault();if(taskSubmitting)return;
+    event.preventDefault();if(taskSubmitting)return;if(taskStep<4){goTaskStep(taskStep+1);return;}
+    for(let step=1;step<=3;step++)if(!checkTaskStep(step))return;
     const button=event.target.querySelector('button[type="submit"]');let locked=[];
     try{
       const body=taskBody(event.target),url=DirectoryInput.editingJob()?`/api/jobs/${DirectoryInput.editingJob()}/input-rematch`:'/api/jobs';
@@ -584,7 +665,7 @@
   $('[name="submission_path"]').addEventListener('input', () => { resetSubmission(); $('#submission-status').textContent = '路径已变更，可查看 / 编辑新选择的 Submission'; });
   loadPipelines().then(() => { Object.entries(pipelineInfo).forEach(([key, info]) => { $('#pipeline-filter').insertAdjacentHTML('beforeend', `<option value="${key}">${esc(info.label)}</option>`); }); renderPipelineCards(); resetForm(); refreshJobs();
     const editJob=new URLSearchParams(location.search).get('edit_input_job');
-    if(editJob){Submission.api(`/api/jobs/${encodeURIComponent(editJob)}/input-assignments`).then(async saved=>{openDrawer();$('#pipeline').value=saved.pipeline;if(saved.species)$('#igblast-species').value=saved.species;$('[name=input_path]').value=saved.input_path;$('[name=input_path]').readOnly=true;$('[name=dataset_label]').value=saved.dataset_label;$('[name=generate_treemap]').checked=Boolean(saved.generate_treemap??saved.options?.generate_treemap);$('[name=sample_source][value=directory]').checked=true;DirectoryInput.edit({...saved,job_id:editJob});$('#drawer-title').textContent='修改目录样本 / 重新 Match';updatePipelineFields();await DirectoryInput.scan();}).catch(e=>showMessage(e.message,true));} }).catch(connectionError);
+    if(editJob){Submission.api(`/api/jobs/${encodeURIComponent(editJob)}/input-assignments`).then(async saved=>{openDrawer();$('#pipeline').value=saved.pipeline;if(saved.species)$('#igblast-species').value=saved.species;$('[name=input_path]').value=saved.input_path;$('[name=input_path]').readOnly=true;$('[name=dataset_label]').value=saved.dataset_label;$('[name=generate_treemap]').checked=Boolean(saved.generate_treemap??saved.options?.generate_treemap);$('[name=sample_source][value=directory]').checked=true;DirectoryInput.edit({...saved,job_id:editJob});$('#drawer-title').textContent='修改目录样本 / 重新 Match';updatePipelineFields();showTaskStep(2);await DirectoryInput.scan();}).catch(e=>showMessage(e.message,true));} }).catch(connectionError);
   window.addEventListener('pageshow', event => { if(event.persisted) { resetForm(); closeDrawer(); refreshJobs(); } });
   document.addEventListener('visibilitychange', () => { clearTimeout(pollTimer); if (!document.hidden) refreshJobs(); });
 })();

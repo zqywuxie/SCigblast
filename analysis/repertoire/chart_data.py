@@ -4,6 +4,31 @@ from __future__ import annotations
 import csv
 
 VERSION = 'public-report-charts-v3-multichain-coverage'
+
+
+def viewer_figures(tables, figures):
+    """One interactive descriptor per data view, independent of legacy PNG pages."""
+    schemas={t['id']:set(t['columns']) for t in tables}
+    result=list(figures)
+    for kind,kinds,view,title in (
+        ('sample_outputs',{'sample_outputs'},'outputs','Sample output comparison'),
+        ('diversity_comparison',{'diversity','diversity_comparison'},'metrics','Diversity indexes')):
+        if not supports({'kind':kind},schemas):continue
+        result=[f for f in result if f['kind'] not in kinds]
+        result.append(dict(id='interactive-'+kind,kind=kind,view=view,title=title,interactive=True,
+            dynamic=True,page=1,sample='',chain='',group_id='',primer='',segment='',metric='',stage='',filename=kind+'.png'))
+    # Never relabel mapping-only historical matching statistics as Raw.
+    raw=any(dict(zip(t['columns'],row)).get('stage')=='raw_R1'
+            for t in tables if t['id'] in {'dual_matching_summary','matching_total_summary'} for row in rows(t))
+    result=[f for f in result if f['kind']!='matching' or f.get('stage')=='raw_R1']
+    if raw and supports({'kind':'matching'},schemas):
+        result=[f for f in result if f['kind']!='matching']
+        result.append(dict(id='interactive-matching-raw',kind='matching',view='overview',title='Primer matching composition · Raw',
+            interactive=True,dynamic=True,page=1,sample='',chain='',group_id='',primer='',segment='',metric='',stage='raw_R1',filename='primer_matching_raw.png'))
+    elif not raw:
+        for figure in result:
+            if figure['kind']=='matching':figure['interactive']=False
+    return result
 # Explicit allowlist: no paths, sequence IDs, primer sequences or private settings.
 FIELDS = frozenset('group_id reference_catalog sample chain primer stage category match_class segment gene isotype level metric aa_field count unique_count ambiguous_count denominator percent matched_reads total_reads match_percent mapped_reads mapping_percent retained_reads unverified_reads label unit previous_count reduction retention_percent status assigned_group tested_group original_unique_percent unique_percent multiple_percent unmatched_percent threshold_percent value mean_shm_percent shared_cdr3_percent total_receptor_rna total_unique_cdr3s'.split())
 TABLES = {

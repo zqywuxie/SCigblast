@@ -3,9 +3,37 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 from analysis.repertoire.io import table, version
 from analysis.repertoire.sources import files_under
+
+
+def fastp_manifest_identities(manifest):
+    """Exact stage-relative identities, including the hashed Base layout.
+
+    Lossy ASCII names are never used as aliases. A colliding legacy path
+    retains both identities so the consumer can reject ambiguous evidence.
+    """
+    from .input_manifest import unified_stage_relative
+    index={}
+    safe=lambda value:re.sub(r'[^A-Za-z0-9._-]+','_',str(value)).strip('_') or 'unnamed'
+    for row in table(manifest):
+        if (row.get('status') or '').upper()!='OK':continue
+        sample,pair=row.get('sample_id',''),row.get('pair_id','')
+        if not sample or not pair:continue
+        parts=Path(pair.replace('\\','/')).parts
+        if any(p in {'..','.'} for p in parts):continue
+        paths={unified_stage_relative(sample,pair).as_posix()}
+        dedup=[]
+        for part in parts:
+            name=safe(part)
+            if not dedup or dedup[-1]!=name:dedup.append(name)
+        if dedup:
+            relative=Path(*dedup)
+            paths.add((relative if relative.name==safe(sample) else relative/safe(sample)).as_posix())
+        for path in paths:index.setdefault(path,set()).add((sample,pair))
+    return index
 
 
 def merge_records(path):
@@ -57,9 +85,13 @@ def collect(root, items):
     selected={(item['sample_label'],item['pair']) for item in items}
     selected_scopes={(item['sample_label'],item['pair'],namespace(item['path'])) for item in items}
     identities=set(selected)
+    fastp_identities={}
     for summary in files_under(root,{'sample_manifest.csv','igblast_summary.tsv'}):
         for record in table(summary):
             if record.get('sample_id') is not None:identities.add((record['sample_id'],record.get('pair_id','')))
+        if summary.name=='sample_manifest.csv':
+            for relative,values in fastp_manifest_identities(summary).items():
+                fastp_identities.setdefault((namespace(summary),relative),set()).update(values)
     def identity(sample,pair):
         if (sample,pair) in identities:return sample,pair
         candidates={(s,p) for s,p in identities if p==pair or Path(str(p).replace('\\','/')).name==pair}
@@ -130,6 +162,10 @@ def collect(root, items):
             pair = row.get('pair_id') or row.get('sample') or ''
             candidates = labels.get(pair, set())
             sample = next(iter(candidates)) if len(candidates) == 1 else row.get('sample_id') or pair
+            relative=Path(row['json_path']).parent.as_posix() if row.get('json_path') else row.get('relative_dir','')
+            linked=fastp_identities.get((namespace(path),relative),set())
+            if len(linked)>1:continue
+            if linked:sample,pair=next(iter(linked))
             if report:
                 data = json.loads(report.read_text(encoding='utf-8'))
                 before, after = (data.get('summary', {}).get(k, {}) for k in ('before_filtering', 'after_filtering'))

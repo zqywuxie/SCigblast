@@ -13,7 +13,7 @@ from .io import digest, open_text, safe_file, table, version, selected_reader, s
 from .isotype import AA, classify
 from .output_metrics import count, published
 from .batch import lookup_rows
-from .performance import detail
+from .performance import detail, measured
 
 LINEAGE_FIELDS=('sequence_id','sequence','locus','v_call','j_call','c_call','cdr3_aa')
 
@@ -80,6 +80,7 @@ def resolve(selected, root):
     return source, 'complete'
 
 
+@measured('postprocessed_composition')
 def build(connection, items, root, progress=None,*,lineage_samples=None):
     """Materialize sample copies and independently verified primer copy shares."""
     # This adapter covers Pig/Base 05 -> 06. Other workflows keep their existing

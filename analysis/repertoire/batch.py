@@ -1,6 +1,7 @@
 """Bounded source lookups and bulk inserts, owned by one SQLite writer."""
 from itertools import islice
 import os
+from .performance import measured
 
 BATCH_SIZE = 10000
 
@@ -20,6 +21,13 @@ def batches(records, size=BATCH_SIZE):
         yield batch
 
 
+def projection(connection, table, fields, *, alias='a'):
+    """Select needed annotation fields before transporting rows into Python."""
+    columns={row[1] for row in connection.execute('PRAGMA table_info('+table+')')}
+    return ','.join((alias+'."'+field+'"' if field in columns else 'NULL')+' AS "'+field+'"' for field in fields)
+
+
+@measured('observation_link_index')
 def prepare_observation_links(connection):
     # Count via the existing covering ID index. Do not fetch large sequence
     # payloads in ID-sorted order just to aggregate three small text fields.

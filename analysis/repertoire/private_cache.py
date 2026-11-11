@@ -1,5 +1,5 @@
 """Owned cache locks and bounded cleanup; source reports are never modified."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
 import time
@@ -39,21 +39,23 @@ def directory(path):
 
 
 @contextmanager
-def locked(root):
+def locked(root, *, blocking=True):
     root=directory(root)
     path=root/'.lock'
     if path.is_symlink():raise ValueError('Cache lock contains a symbolic link')
     with path.open('a+b') as handle:
         if os.name=='posix':
             import fcntl
-            fcntl.flock(handle,fcntl.LOCK_EX)
+            fcntl.flock(handle,fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         else:
             import msvcrt
             if path.stat().st_size==0:handle.write(b'0');handle.flush()
             while True:
                 try:
                     handle.seek(0);msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1);break
-                except OSError:time.sleep(.05)
+                except OSError:
+                    if not blocking:raise BlockingIOError('Cache entry in use')
+                    time.sleep(.05)
         try:yield root
         finally:
             if os.name=='posix':fcntl.flock(handle,fcntl.LOCK_UN)
@@ -65,9 +67,16 @@ def prune_files(root, budget, *, keep=()):
     root=Path(root).resolve();keep=set(keep)
     files=[p for p in root.iterdir() if p.is_file() and not p.is_symlink() and p.suffix in {'.html','.json','.sqlite','.png'}]
     total=sum(p.stat().st_size for p in files)
-    for path in sorted(files,key=lambda p:p.stat().st_mtime_ns):
+    entries={}
+    for path in files:entries.setdefault(path.stem,[]).append(path)
+    for key,paths in sorted(entries.items(),key=lambda entry:max(p.stat().st_mtime_ns for p in entry[1])):
         if total<=budget:break
-        if path.name in keep:continue
-        size=path.stat().st_size
-        if path.resolve().parent!=root:raise ValueError('Unsafe cache cleanup path')
-        path.unlink();total-=size
+        if any(path.name in keep for path in paths):continue
+        try:
+            with locked(root/'.entries'/key,blocking=False) if (root/'.entries').is_dir() else nullcontext():
+                for path in paths:
+                    if not path.exists():continue
+                    size=path.stat().st_size
+                    if path.resolve().parent!=root:raise ValueError('Unsafe cache cleanup path')
+                    path.unlink();total-=size
+        except BlockingIOError:continue

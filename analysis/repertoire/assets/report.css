@@ -76,3 +76,48 @@ main{padding-top:18px}header{align-items:center;padding-bottom:12px;margin-botto
 .samples{padding:12px 18px}.samples summary{font-size:14px;padding-bottom:6px}.samples details[open] summary{margin-bottom:4px}.samples .table-wrap{max-height:280px}.samples td,.samples th{padding:5px 10px;font-size:12px}.sample-table-scroll{cursor:grab;overscroll-behavior:contain;scrollbar-width:auto;scrollbar-color:#9bafc0 var(--soft);touch-action:pan-x pan-y}.sample-table-scroll.is-dragging{cursor:grabbing;user-select:none}.sample-table-scroll:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.report-workspace{padding:16px 18px}.section-head{margin-bottom:8px}.filters{margin-top:8px;margin-bottom:8px;gap:8px 14px}.note{padding:7px 12px}.pager{margin:8px 0}.filter-summary{margin-top:0}.reference-tools{align-items:flex-end}.reference-tools>button{min-height:39px;font-size:12px}.reference-tools>.caption{flex:1 1 100%}
 .coverage-strip{display:flex;flex-wrap:wrap;gap:5px 10px;padding:7px 12px;border-bottom:1px solid var(--line);background:var(--soft)}.coverage-badge{font-size:11px;line-height:1.7;color:var(--ink)}.inspect-context{display:block;margin:0 10px 9px auto;padding:4px 8px;border:0;background:transparent;color:var(--blue);font-size:11px}.output-panels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.output-panels>.chart-host{min-width:0}
 @media(max-width:1000px){.output-panels{grid-template-columns:1fr}}@media(max-width:680px){main{padding-top:12px}header .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.report-info{margin-left:0}.report-info dl{left:0;right:auto}.report-workspace{padding:12px}.samples{padding:10px 12px}.filters{gap:8px}.coverage-badge{font-size:10px}}
+
+/* A quiet, grouped sample ledger and a single gene lookup workspace. */
+.samples tbody tr.sample-white{background:var(--surface)}
+.samples tbody tr.sample-shade{background:var(--soft)}
+.samples tbody tr.sample-start td{border-top:3px solid var(--line);padding-top:11px}
+.samples tbody tr.sample-start:first-child td{border-top-width:1px}
+.samples tbody tr.sample-continuation td{border-top:0;border-bottom-color:transparent}
+.samples td.sample-name{font-weight:650;min-width:170px;overflow-wrap:anywhere}
+.sample-chain{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.03em;color:var(--blue)}
+.samples th{position:sticky;top:0;z-index:1}
+.output-panels{display:flex;flex-direction:column;gap:0}
+.output-panels>.chart-host{padding:0 12px 8px;overflow:hidden}
+.output-panels>.chart-host+.chart-host{border-top:1px solid var(--line)}
+.chart-panel-title{font-size:15px;font-weight:650;text-align:center;margin:18px 0 8px;color:var(--ink)}
+.output-chart .chart-legend{margin:4px auto 0;justify-content:center}
+.chart-legend .chart-legend-reset{border:0;color:var(--blue);background:transparent;font-size:10px;padding:4px 8px;margin-left:6px}
+.reference-tools{margin:14px 0 0}
+.reference-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.reference-toolbar label{margin:0;min-width:0}
+.reference-toolbar input,.reference-toolbar select{font-size:13px;min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);padding:7px 10px}
+.reference-toolbar .reference-search{flex:1 1 230px;max-width:360px}
+.reference-search input{width:100%}
+.reference-mode{display:flex;flex:none;padding:3px;gap:2px;border:1px solid var(--line);border-radius:7px;background:var(--soft)}
+.reference-mode button{border:0;border-radius:4px;background:transparent;font-size:12px;padding:7px 13px;color:var(--muted)}
+.reference-mode button[aria-pressed=true]{background:var(--surface);color:var(--blue);font-weight:650;box-shadow:0 1px 3px #17344915}
+#reference-download{margin-left:auto;font-size:12px;min-height:38px;padding:7px 12px;background:var(--surface);border:1px solid var(--line);color:var(--blue)}
+.reference-segments{display:flex;gap:20px;border-bottom:1px solid var(--line);margin-top:15px}
+.reference-segments button{padding:10px 4px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;font-size:12px;color:var(--muted)}
+.reference-segments button[aria-selected=true]{border-bottom-color:var(--blue);color:var(--blue);font-weight:650}
+.reference-summary{display:flex;justify-content:space-between;gap:12px;padding:12px 0;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.gene-matching-scroll{border:1px solid var(--line);border-radius:7px;overflow:auto;max-height:620px}
+.gene-matching-table{width:100%;font-size:13px}
+.gene-matching-table thead th{padding:10px 14px;color:var(--muted);font-size:11px;font-weight:500;position:sticky;top:0;background:var(--surface);z-index:1}
+.gene-matching-table td{padding:10px 14px;border-bottom:1px solid var(--line);white-space:normal;overflow-wrap:anywhere}
+.gene-matching-table .gene-name{font-weight:550;font-variant-numeric:tabular-nums}
+.gene-matching-table tbody tr{background:var(--surface)}
+.gene-matching-table .family-divider th{padding:8px 14px;text-align:left;background:var(--soft);font-size:11px;letter-spacing:.04em;border-top:3px solid var(--line);border-bottom:1px solid var(--line);color:var(--blue)}
+.gene-matching-table tbody:first-of-type .family-divider th{border-top-width:1px}
+.gene-matching-table td:last-child,.gene-matching-table thead th:last-child{text-align:right;width:100px}
+.gene-matching-table .gene-status{font-size:11px;min-width:0;padding:3px 9px;border-radius:4px;font-weight:550}
+.reference-pager{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:12px;padding:0;font-size:11px;color:var(--muted)}
+.reference-pager>span{margin-right:auto}
+.reference-pager label{display:flex;align-items:center;gap:5px;margin:0}
+.reference-pager input{width:56px;height:31px;padding:4px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--ink);font-size:11px}
+@media(max-width:680px){.reference-toolbar{gap:8px}.reference-mode{flex:0 0 auto}.reference-toolbar .reference-search{max-width:none;flex:1 1 160px}#reference-download{margin-left:0}.reference-segments{gap:16px}.gene-matching-table td{padding:9px 10px;min-width:80px}.gene-matching-table .gene-name{min-width:110px}.reference-summary{font-size:11px}.output-panels>.chart-host{padding-left:2px;padding-right:2px}.samples td.sample-name{min-width:140px}.chart-panel-title{font-size:14px}}

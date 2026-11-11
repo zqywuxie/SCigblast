@@ -1,6 +1,14 @@
-<details class="rp-config advanced-details">
+<details class="rp-config advanced-details"{% if report_setup %} data-rp-guided-config{% endif %}>
   <summary class="rp-config-summary"><span class="rp-config-title">引物匹配配置</span><span class="rp-config-caption">上传表格后选择对应列</span></summary>
   <div class="rp-config-body">
+    {% if report_setup %}
+    <div class="rp-config-navigation" role="tablist" aria-label="引物配置">
+      <button type="button" role="tab" data-rp-config-tab="table" aria-selected="true">读取引物表</button>
+      <button type="button" role="tab" data-rp-config-tab="allocation" aria-selected="false" disabled>分配到样本 <span data-rp-allocation-count></span></button>
+    </div>
+    {% endif %}
+    <section data-rp-config-page="table" aria-label="引物表与对应列">
+    <div class="rp-table-main">
     <label class="field">样本与引物关联方式<select data-rp-assignment-mode><option value="manual">上传引物表，按样本选择</option><option value="submission">上传 Submission 表自动关联</option></select></label>
     <div class="rp-section-heading"><span class="rp-step">01</span><h4>上传数据表</h4><span class="rp-section-hint">XLS / XLSX</span></div>
     <div class="rp-upload-layout">
@@ -44,24 +52,22 @@
       <div class="rp-preview-tabs" role="tablist" aria-label="选择预览的数据表"><button type="button" role="tab" data-rp-preview-tab="submission">Submission</button><button type="button" role="tab" data-rp-preview-tab="primer">引物序列表</button></div>
       <div data-rp-selected-preview aria-live="polite"></div>
     </details>
-    <div class="rp-section-heading"><span class="rp-step">03</span><h4>匹配方式</h4></div>
-    <section data-rp-manual-allocation class="rp-manual-allocation">
-      <div class="rp-pair-heading"><strong>按样本与链分配引物</strong><button type="button" class="button button-ghost button-small" data-rp-load-groups>读取可选引物组</button></div>
-      <p class="rp-config-note">每条链分别选择引物组，可多选。MIX 拆链后按对应配置统计，运行前共享输入使用各链引物的并集。</p>
-      <div data-rp-sample-groups><p class="muted">扫描样本或完成 Match 后，在此分配引物组。</p></div>
-    </section>
-    <div class="rp-behavior-grid">
-      <label class="rp-sequence-field">引物表中的序列<select data-rp-field="sequence_mode"><option value="oligo">完整引物：Adapter + UMI + Barcode + C primer</option><option value="primer">仅 C primer 匹配序列</option></select></label>
-      <label class="rp-trim-choice"><input type="checkbox" data-rp-field="trim_before_mapping" checked><span><strong>比对前去引物</strong><small>先记录归属，再去除明确匹配的引物</small></span></label>
     </div>
-    <p class="rp-config-note">未明确匹配的序列保留原样；任务完成后补表只进行统计。</p>
+    <aside class="rp-table-side" aria-label="匹配设置">
+    {% if report_setup %}<h4>匹配设置</h4>{% endif %}
     <div class="rp-behavior-grid">
+      <label class="rp-sequence-field">引物表中的序列<select data-rp-field="sequence_mode"><option value="oligo">完整引物（含 Adapter / UMI / Barcode）</option><option value="primer">仅 C primer 匹配序列</option></select></label>
+      <label class="rp-trim-choice"{% if report_setup %} hidden{% endif %}><input type="checkbox" data-rp-field="trim_before_mapping" checked><span><strong>比对前去引物</strong><small>先记录归属，再去除明确匹配的引物</small></span></label>
+      {% if report_setup %}<label class="rp-sequence-field">原始 _j 文件<select data-rp-field="read_structure"><option value="window">从 C primer 起始</option><option value="oligo">含 Adapter + UMI + Barcode</option></select></label>{% endif %}
+    </div>
+    {% if not report_setup %}<p class="rp-config-note">未明确匹配的序列保留原样；任务完成后补表只进行统计。</p>{% endif %}
+    <details class="advanced-details rp-settings" data-rp-advanced>
+      <summary><strong>更多匹配设置</strong><span>低匹配率测试与序列结构</span></summary>
+      <div class="rp-settings-body">\n        <div class="rp-behavior-grid">
       <label class="rp-trim-choice"><input type="checkbox" data-rp-field="try_alternative_groups" checked><span><strong>低匹配率时测试其他引物组</strong><small>候选并排标注 Suspected，原引物归属不变</small></span></label>
       <label class="rp-sequence-field">唯一匹配率阈值（%）<input type="number" data-rp-field="primer_match_threshold" value="50" min="0" max="100" step="1"><small>原组低于阈值时测试；候选达到阈值且优于原组才展示</small></label>
     </div>
-    <details class="advanced-details rp-settings" data-rp-advanced>
-      <summary><strong>高级设置</strong><span>表格读取与序列结构</span></summary>
-      <div class="rp-settings-body">
+
         <section class="rp-setting-section">
           <h5>表格读取</h5>
           <div class="rp-settings-grid">
@@ -74,8 +80,8 @@
         <section class="rp-setting-section">
           <h5>序列位置</h5>
           <div class="rp-settings-grid">
-            <label>原始 _j 文件<select data-rp-field="read_structure"><option value="window">从 C primer 起始</option><option value="oligo">含 Adapter + UMI + Barcode</option></select><small>用于 Raw 引物匹配统计</small></label>
-            <label>合并后的比对输入<select data-rp-field="mapping_read_structure"><option value="window">从 C primer 起始</option><option value="oligo">含 Adapter + UMI + Barcode</option></select><small>用于比对前记录归属与去引物</small></label>
+            {% if not report_setup %}<label>原始 _j 文件<select data-rp-field="read_structure"><option value="window">从 C primer 起始</option><option value="oligo">含 Adapter + UMI + Barcode</option></select><small>用于 Raw 引物匹配统计</small></label>{% endif %}
+            <label{% if report_setup %} hidden{% endif %}>合并后的比对输入<select data-rp-field="mapping_read_structure"><option value="window">从 C primer 起始</option><option value="oligo">含 Adapter + UMI + Barcode</option></select><small>用于比对前记录归属与去引物</small></label>
           </div>
         </section>
         <details class="rp-structure-settings" data-rp-structure-settings>
@@ -90,6 +96,17 @@
       </div>
     </details>
     <details class="advanced-details rp-secondary"><summary>完整工作表预览</summary><div data-rp-workbook-preview class="rp-workbook-preview"></div></details>
+    {% if report_setup %}<div class="rp-table-continue"><span data-rp-table-status role="status">上传引物表后确认对应列。</span><button type="button" class="button button-primary" data-rp-to-allocation disabled>读取引物组并分配 →</button></div>{% endif %}
+    </aside>
+    </section>
+    <section data-rp-config-page="allocation"{% if report_setup %} hidden{% endif %} aria-label="样本引物分配">
+    <div class="rp-section-heading"><span class="rp-step">03</span><h4>匹配方式</h4></div>
+    <section data-rp-manual-allocation class="rp-manual-allocation">
+      <div class="rp-pair-heading"><strong>按样本与链分配引物</strong><button type="button" class="button button-ghost button-small" data-rp-load-groups>读取可选引物组</button></div>
+      <p class="rp-config-note">每条链分别选择引物组，可多选。MIX 拆链后按对应配置统计，运行前共享输入使用各链引物的并集。</p>
+      <div data-rp-sample-groups><p class="muted">扫描样本或完成 Match 后，在此分配引物组。</p></div>
+    </section>
+    </section>
     <p class="page-error hidden" data-rp-config-error role="alert"></p>
   </div>
 </details>

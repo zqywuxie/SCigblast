@@ -15,9 +15,10 @@ import subprocess
 
 from .aggregate import calls
 from .catalog import assigned_primers
-from .io import digest, open_text, safe_file
+from .io import digest, open_text, safe_file, selected_reader
 from .isotype import AA, MAPPING_VERSION, classify, summarize
-from .batch import lookup_rows, prepare_observation_links, tune
+from .batch import lookup_rows, prepare_observation_links, tune, projection
+from .performance import measured, measured_rows
 
 USAGE_COLUMNS = ('group_id','sample','chain','reference_id','reference_scope','primer','segment','gene',
                  'unique_count','ambiguous_count','denominator','percent','reference_catalog','status','metric','aa_field')
@@ -48,6 +49,7 @@ def current_reference(root,species,chain):
     return refs,genes
 
 
+@measured('gene_usage')
 def build(items, root, output, catalog=None, progress=None,comparison=None,lineage_samples=None):
     database = Path(output)/'details.sqlite'
     connection = sqlite3.connect(database,uri=True)
@@ -102,13 +104,21 @@ def build(items, root, output, catalog=None, progress=None,comparison=None,linea
             # With trace evidence, include mapped nonproductive queries as well;
             # the public pipeline TSV remains filtered and unchanged.
             with closing(connect(safe_file(Path(item['trace']).parent/meta['annotation'],root))) if meta else open_text(path) as handle:
-                reader = handle.execute('SELECT * FROM annotations ORDER BY ordinal') if meta else csv.DictReader(handle,delimiter='\t' if '.tsv' in path.suffixes else ',')
-                fields = meta.get('annotation_fields', []) if meta else reader.fieldnames or []
+                if meta:
+                    fields=meta.get('annotation_fields',[])
+                else:
+                    delimiter='\t' if '.tsv' in path.suffixes else ','
+                    fields=next(csv.reader(handle,delimiter=delimiter),[])
+                    handle.seek(0)
+                    reader=selected_reader(handle,('sequence_id','locus','chain','v_call','j_call','c_call','cdr3_aa','junction_aa'),delimiter=delimiter)
                 aa_field = 'cdr3_aa' if 'cdr3_aa' in fields else 'junction_aa' if 'junction_aa' in fields else ''
                 if meta:
                     connection.execute('ATTACH DATABASE ? AS source_annotations',
                         (safe_file(Path(item['trace']).parent/meta['annotation'],root).as_uri()+'?mode=ro',))
-                    reader=connection.execute('''SELECT a.*,l.n AS __n,o.match_class AS __match_class,
+                    fields=projection(handle,'annotations',('sequence_id','locus','chain','v_call','j_call','c_call','cdr3_aa','junction_aa'))
+                    if 'locus' not in {r[1] for r in handle.execute('PRAGMA table_info(annotations)')}:
+                        fields=fields.replace('NULL AS "locus",','')
+                    reader=connection.execute('''SELECT '''+fields+''',l.n AS __n,o.match_class AS __match_class,
                         o.primers AS __primers,o.trim_state AS __trim_state FROM source_annotations.annotations a
                         LEFT JOIN observation_links l ON l.sample_key=? AND l.chain=? AND l.mapping_sequence_id=a.sequence_id
                         LEFT JOIN observations o ON l.n=1 AND o.id=l.first_id
@@ -125,7 +135,8 @@ def build(items, root, output, catalog=None, progress=None,comparison=None,linea
                         l.n AS __n,l.match_class AS __match_class,l.primers AS __primers,l.trim_state AS __trim_state
                         FROM report_batch b LEFT JOIN report_source_links l ON l.mapping_sequence_id=b.sequence_id ORDER BY b.ordinal''')
                 record_batch, call_batch, primer_batch = [], [], set()
-                for ordinal, (row, linked) in enumerate(joined,1):
+                for ordinal, (row, linked) in enumerate(measured_rows('sample_gene_records',joined,
+                        sample=item['sample_label'],chain=item['chain']),1):
                     sequence_id = row.get('sequence_id','')
                     match_class, primer, trim_state = 'not_assessed', '', 'not_recorded'
                     if linked['__n'] == 1:
@@ -288,6 +299,7 @@ def rows(connection, *, group_id='', primer=None, segment='', metric='expression
     yield from (dict(row) for row in connection.execute(sql,args))
 
 
+@measured('gene_expression_summary')
 def materialize_gene_usage(connection, *, postprocessed):
     """One abundance/denominator contract for original and independent scenarios."""
     records = 'composition_records' if postprocessed else 'usage_records'

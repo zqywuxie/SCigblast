@@ -5,6 +5,8 @@
 ## 当前工作
 
 - [Base AIRR 后处理性能与进度优化](active/6e73b5a8-0d9c-48d1-a734-ffbd0d56bf91_plan.md)，实现与切片验证完成，待完整双任务资源验收及部署。
+- [报告前端布局与 Raw 阶段计数修复](active/20261111_8a61d0c4_report_raw_outputs_plan.md)，代码和真实数据预览已完成，待推送及部署。
+- [报告生成性能优化](active/20261111_f487e620_report_generation_performance_plan.md)，首批实现及隔离验证完成，待完整样本资源基准。
 
 ## 历史设计
 

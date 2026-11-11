@@ -65,13 +65,13 @@ def render_comparisons(data, *, pyplot, save):
         title='Diversity indexes · All samples'
         if len(groups)>12:title+=f' · {start//12+1}/{math.ceil(len(groups)/12)}'
         fig.suptitle(title,fontsize=14,fontweight='bold',y=.98)
-        save(fig,f'diversity_comparison_{start//12+1:02}',title,kind='diversity_comparison')
+        save(fig,f'diversity_comparison_{start//12+1:02}',title,kind='diversity_comparison',metric_keys=CORE_METRICS)
         if any(values.get((g['group_id'],'Simpson evenness')) is not None for g in batch):
             fig,ax=pyplot.subplots(figsize=(10,max(3.5,len(batch)*.35+1.6)))
             fig.subplots_adjust(left=.30,right=.95,top=.82,bottom=.15)
             bars(ax,batch,'Simpson evenness')
             title='Simpson evenness · All samples'
-            save(fig,f'simpson_evenness_comparison_{start//12+1:02}',title,kind='diversity_comparison')
+            save(fig,f'simpson_evenness_comparison_{start//12+1:02}',title,kind='diversity_comparison',metric_keys=['Simpson evenness'])
     metrics=data.get('bcell_metrics',[])
     groups=sorted([g for gid,g in by_group.items() if any(r['group_id']==gid for r in metrics)],key=group_order)
     labels=list(dict.fromkeys(r['isotype'] for r in metrics))
