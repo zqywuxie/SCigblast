@@ -47,6 +47,12 @@ window.ReportCharts=(()=>{
   function bars(labels,series,title,{horizontal=false,percent=false,stack=false}={}){
     return {type:'bars',labels,series,title,horizontal,percent,stack};
   }
+  function primerAssignments(sample,chain=''){
+    const order=['IGH','IGK','IGL','TRA','TRB','TRD','TRG'];
+    return unique(data.samples.filter(r=>r.sample===sample&&(!chain||r.chain===chain))
+      .sort((a,b)=>order.indexOf(a.chain)-order.indexOf(b.chain))
+      .map(r=>(r.chain?r.chain+': ':'')+({'未配置':'Not configured','未提供组名':'Unnamed group'}[r.primer_groups]||r.primer_groups||'Not recorded')));
+  }
   function gene(f){
     const source=table(f.scenario_id?'scenario_primer_gene_usage':f.kind==='primer_genes'?'primer_gene_usage':'sample_gene_usage'),rows=scope(source,f,{primer:true,metric:true}).filter(r=>r.unique_count>0);
     // Distinct input/reference groups must never be silently pooled.
@@ -62,22 +68,22 @@ window.ReportCharts=(()=>{
     const columns=[];
     const sampleOrder=new Map(data.samples.map((r,i)=>[r.sample,i]));
     for(const group of [...groups.values()].sort((a,b)=>(sampleOrder.get(a.sample)??999)-(sampleOrder.get(b.sample)??999)||natural(a.sample,b.sample)||natural(a.unit,b.unit))){
-      const assignment=data.samples.find(r=>r.sample===group.sample)?.primer_groups;
-      const original={label:assignment||'Assigned',sample:group.sample,group:assignment||'Assigned',values:group.values};
+      const assignments=primerAssignments(group.sample);
+      const original={sample:group.sample,group:assignments.join('; ')||'Not recorded',assignments:assignments.length?assignments:['Not recorded'],values:group.values};
       const others=table('primer_group_comparisons').filter(r=>r.sample===group.sample&&r.status==='suspected'&&(r.stage||'mapping')===(f.stage||'mapping')&&(r.unit===group.unit||(r.unit==='queries'&&group.unit==='reads')));
-      columns.push(original,...others.map(r=>({label:r.tested_group+'*',sample:group.sample,group:r.tested_group,suspected:true,values:Object.fromEntries(['unique','multiple','unmatched'].map(c=>[c,{percent:r[c+'_percent'],count:r[c+'_count'],denominator:r.denominator}]))})));
+      columns.push(original,...others.map(r=>({sample:group.sample,group:r.tested_group,assignments:[r.tested_group+'*'],suspected:true,values:Object.fromEntries(['unique','multiple','unmatched'].map(c=>[c,{percent:r[c+'_percent'],count:r[c+'_count'],denominator:r.denominator}]))})));
     }
     if(f.countOnly)return columns.length;
     const batch=columns.slice((f.page-1)*12,f.page*12),categories=['unique','multiple','unmatched'];
     if(!batch.length)return [];
-    const sampleGroups=[];batch.forEach((r,i)=>{const last=sampleGroups.at(-1);if(last?.sample===r.sample)last.end=i;else sampleGroups.push({sample:r.sample,start:i,end:i});});
-    const spec=bars(batch.map(r=>r.label),categories.map((category,i)=>({name:['Unique','Multiple','Unmatched'][i],color:data.colors.matching[category],data:batch.map(r=>({...point(r.values[category]?.percent,r.values[category]),sample:r.sample,primerGroup:r.group,suspected:!!r.suspected,itemStyle:r.suspected?{borderColor:'#B84A48',borderWidth:1.2}:undefined}))})),'Primer matching composition · '+(f.stage==='raw_R1'?'Raw':'Mapping reads'),{percent:true,stack:true});
-    return [{...spec,matching:true,sampleGroups,suspected:batch.map(r=>!!r.suspected)}];
+    const labels=batch.map(r=>['Sample: '+r.sample,r.suspected?'Suspected group:':'Primer groups:',...r.assignments].map(line=>wrap(line,22)).join('\n'));
+    const spec=bars(labels,categories.map((category,i)=>({name:['Unique','Multiple','Unmatched'][i],color:data.colors.matching[category],data:batch.map(r=>({...point(r.values[category]?.percent,r.values[category]),sample:r.sample,primerGroup:r.group,suspected:!!r.suspected,itemStyle:r.suspected?{borderColor:'#B84A48',borderWidth:1.2}:undefined}))})),'Primer matching composition · '+(f.stage==='raw_R1'?'Raw':'Mapping reads'),{percent:true,stack:true});
+    return [{...spec,matching:true,fixedHeight:360+Math.max(...labels.map(label=>label.split('\n').length))*16,suspected:batch.map(r=>!!r.suspected)}];
   }
   function rates(f){
     const rows=scope(table(f.scenario_id?'scenario_primer_mapping_summary':'primer_mapping_summary'),f).filter(r=>r.stage===f.stage&&!r.primer.startsWith('[')).sort((a,b)=>(b.matched_reads||0)-(a.matched_reads||0)||natural(a.primer,b.primer)).slice((f.page-1)*20,f.page*20);
     const mapping=f.kind==='primer_mapping',name=mapping?'Mapping rate':'Unique primer matching';
-    return rows.length?[bars(rows.map(r=>r.primer),[{name: name+' (%)',color:mapping?'#3979B8':'#419A8B',data:rows.map(r=>({value:r[mapping?'mapping_percent':'match_percent'],count:r[mapping?'mapped_reads':'matched_reads'],denominator:r[mapping?'matched_reads':'total_reads'],unit:'reads',denominatorMeaning:mapping?'Reads uniquely assigned to this primer at Mapping input':'All assessable reads at this stage'}))}],name+' · '+(f.stage==='raw_R1'?'Raw':'Mapping reads'),{horizontal:true,percent:true})]:[];
+    return rows.length?[{...bars(rows.map(r=>r.primer),[{name: name+' (%)',color:mapping?'#3979B8':'#419A8B',data:rows.map(r=>({value:r[mapping?'mapping_percent':'match_percent'],sample:r.sample,chain:r.chain,primer:r.primer,primerGroup:r.primer_group||f.primer_group||primerAssignments(r.sample,r.chain).join('; '),count:r[mapping?'mapped_reads':'matched_reads'],denominator:r[mapping?'matched_reads':'total_reads'],unit:'reads',denominatorMeaning:mapping?'Reads uniquely assigned to this primer at Mapping input':'All assessable reads at this stage'}))}],name+' · '+(f.stage==='raw_R1'?'Raw':'Mapping reads'),{horizontal:true,percent:true}),subtitle:[f.sample&&'Sample: '+f.sample,f.chain&&'Chain: '+f.chain].filter(Boolean).join(' | '),labelAxisName:'Primer'}]:[];
   }
   function isotypes(f){
     return ['abundance','unique_cdr3'].map(metric=>{
@@ -169,20 +175,19 @@ window.ReportCharts=(()=>{
   function orderedGroups(rows){const order=['IGH','IGK','IGL','TRA','TRB','TRD','TRG'];return unique(rows.map(r=>r.group_id)).sort((a,b)=>{const x=rows.find(r=>r.group_id===a),y=rows.find(r=>r.group_id===b);return order.indexOf(x.chain)-order.indexOf(y.chain)||natural(x.sample,y.sample)||natural(a,b);});}
   function specs(f){if(!f.interactive)return [];switch(f.kind){case 'sample_genes':case 'primer_genes':return gene(f);case 'matching':return matching(f);case 'primers':case 'primer_mapping':return rates(f);case 'isotype':return isotypes(f);case 'composition':return composition(f);case 'sample_outputs':return outputs(f);case 'stage_overview':return stages(f);default:return metrics(f);}}
   function tooltip(params){return (Array.isArray(params)?params:[params]).map(p=>{
-    const r=p.data||{},value=Array.isArray(r.value)?r.count:r.value,unit=units[r.unit]||r.unit;return (r.sample?[r.sample,r.chain,r.primerGroup].filter(Boolean).join(' / ')+(r.suspected?' · Suspected':''):p.name)+'\n'+(p.seriesName?p.seriesName+': ':'')+number(value)+(r.count!=null&&(r.denominator!=null||r.count!==value)?'\nCount: '+number(r.count)+(unit?' '+unit:''):'')+(r.denominator!=null?'\nDenominator: '+number(r.denominator)+(unit?' '+unit:'')+(r.denominatorMeaning?'\n'+r.denominatorMeaning:''):'')+(r.change?'\n'+r.change:'');
+    const r=p.data||{},value=Array.isArray(r.value)?r.count:r.value,unit=units[r.unit]||r.unit;return (r.sample?['Sample: '+r.sample,r.chain&&'Chain: '+r.chain,r.primer&&'Primer: '+r.primer,r.primerGroup&&'Primer groups: '+r.primerGroup,r.suspected&&'Suspected'].filter(Boolean).join('\n'):p.name)+'\n'+(p.seriesName?p.seriesName+': ':'')+number(value)+(r.count!=null&&(r.denominator!=null||r.count!==value)?'\nCount: '+number(r.count)+(unit?' '+unit:''):'')+(r.denominator!=null?'\nDenominator: '+number(r.denominator)+(unit?' '+unit:'')+(r.denominatorMeaning?'\n'+r.denominatorMeaning:''):'')+(r.change?'\n'+r.change:'');
   }).join('\n\n');}
   const wrap=(s,width=22)=>String(s).split('\n').map(line=>line.match(new RegExp('.{1,'+width+'}','g'))?.join('\n')||'').join('\n');
   const dashboardColumns=spec=>spec.panels.length>2&&window.innerWidth>1200?2:1;
   const dashboardCell=spec=>Math.max(210,Math.min(600,Math.max(...spec.panels.map(p=>p.labels.length),1)*24+90));
   function barOption(spec,{small=false}={}){
     const max=Math.max(1,...spec.series.flatMap(s=>s.data.map(r=>r.value||0))),labels=spec.labels,wide=spec.horizontal;
-    const category={type:'category',data:labels.map((label,i)=>({value:label,textStyle:spec.suspected?.[i]||String(label).includes('\nSuspected')?{color:'#B84A48'}:undefined})),inverse:wide,axisTick:{show:false},axisLine:{show:false},axisLabel:{color:'#506273',fontSize:spec.matching?10:11,interval:0,formatter:v=>wrap(v,spec.matching?9:wide?28:18)}};
+    const category={type:'category',name:spec.labelAxisName||'',nameTextStyle:{color:'#506273',fontSize:11},nameGap:12,data:labels.map((label,i)=>({value:label,textStyle:spec.suspected?.[i]||String(label).includes('\nSuspected')?{color:'#B84A48'}:undefined})),inverse:wide,axisTick:{show:false},axisLine:{show:false},axisLabel:{color:'#506273',fontSize:11,lineHeight:16,interval:0,formatter:v=>spec.matching?v:wrap(v,wide?28:18)}};
     const value={type:'value',max:spec.axisMax??(spec.percent?(spec.stack?100:Math.min(100,Math.max(5,5*Math.ceil(max/5)))):undefined),axisLabel:{color:'#647586',formatter:v=>number(v)+(spec.percent?'%':'')},splitLine:{lineStyle:{color:'#E8EDF2'}}};
-    const sampleAxis=spec.matching?{...category,position:'bottom',offset:32,data:labels.map((_,i)=>{const group=spec.sampleGroups.find(g=>Math.floor((g.start+g.end)/2)===i);return group?group.sample:'';}),axisLabel:{color:'#506273',fontSize:10,interval:0,margin:8,formatter:(v,i)=>{const g=spec.sampleGroups.find(g=>Math.floor((g.start+g.end)/2)===i);return wrap(v,g?Math.max(7,Math.min(22,(g.end-g.start+1)*7)):7);}}}:null;
-    return {title:{text:spec.title,left:'center',top:8,textStyle:{fontSize:small?12:15,color:'#233343',fontWeight:600}},
+    return {title:{text:spec.title,subtext:spec.subtitle||'',subtextStyle:{color:'#506273',fontSize:11},left:'center',top:8,textStyle:{fontSize:small?12:15,color:'#233343',fontWeight:600}},
       legend:{show:false,type:'scroll',top:42,left:'center',textStyle:{fontSize:11,color:'#455564'}},
-      grid:{left:wide?'3%':'4%',right:wide?'13%':'4%',top:58,bottom:spec.matching?100:wide?24:Math.min(180,Math.max(...labels.map(s=>wrap(s,18).split('\n').length),1)*15+25),containLabel:true},
-      xAxis:sampleAxis?[category,sampleAxis]:wide?value:category,yAxis:wide?category:value,
+      grid:{left:wide?'3%':'4%',right:wide?'13%':'4%',top:spec.subtitle?78:58,bottom:spec.matching?24:wide?24:Math.min(180,Math.max(...labels.map(s=>wrap(s,18).split('\n').length),1)*15+25),containLabel:true},
+      xAxis:wide?value:category,yAxis:wide?category:value,
       dataZoom:!wide&&labels.length>12?[{type:'slider',xAxisIndex:0,startValue:0,endValue:11,bottom:4,height:15},{type:'inside',xAxisIndex:0,startValue:0,endValue:11,zoomOnMouseWheel:false}]:[],
       series:spec.series.map(series=>({name:series.name,type:'bar',stack:spec.stack?'composition':undefined,barMaxWidth:wide?20:48,itemStyle:{color:series.color},emphasis:{focus:'series'},label:{show:spec.showValues!==false,position:spec.stack?'inside':wide?'right':'top',color:spec.stack?textOn(series.color):'#233343',fontSize:10,formatter:p=>p.value==null?'N/A':spec.stack?(p.value>=7?Number(p.value).toFixed(1)+'%':''):spec.percent?Number(p.value).toFixed(2)+'%':number(p.value)},data:series.data}))};
   }
@@ -210,7 +215,7 @@ window.ReportCharts=(()=>{
     const node=document.createElement('div');node.className='interactive-chart';node.setAttribute('role','img');node.setAttribute('aria-label',spec.title);
     const height=spec.fixedHeight??(spec.type==='dashboard'?Math.ceil(spec.panels.length/dashboardColumns(spec))*dashboardCell(spec)+60:spec.type==='matrix'?Math.max(350,spec.rows.length*65+200):spec.outputComparison?330:spec.horizontal?Math.max(310,spec.labels.length*40+130):440);
     node.style.height=height+'px';
-    if(spec.matching){host.classList.add('matching-chart');node.style.minWidth=Math.max(280,spec.labels.length*58+68)+'px';}
+    if(spec.matching){host.classList.add('matching-chart');node.style.minWidth=Math.max(280,spec.labels.length*156+84)+'px';}
     if(spec.outputComparison)host.classList.add('output-chart');
     if(f.kind==='stage_overview'){host.classList.add('chart-scroll');node.style.minWidth=Math.max(680,spec.labels.length*105+160)+'px';}
     if(spec.primerComposition){host.classList.add('chart-scroll');node.style.minWidth=Math.max(280,spec.labels.length*82+100)+'px';}
@@ -269,7 +274,7 @@ window.ReportCharts=(()=>{
     const records=[],selectedSamples=figure.sample||figure.samples?.join('; ')||'All applicable samples';
     for(const chart of charts){const item=[...live.values()].find(item=>item.chart===chart);if(!item)continue;const spec=item.spec,options=chart.getOption(),legend=options.legend?.[0]?.selected||{};
       const zoom=options.dataZoom?.[0],indexes=labels=>labels.map((_,i)=>i).filter(i=>!zoom||(i>=(zoom.startValue??Math.floor((zoom.start||0)*(labels.length-1)/100))&&i<=(zoom.endValue??Math.ceil((zoom.end??100)*(labels.length-1)/100))));
-      const add=(panel,label,series,p,extra={})=>records.push({task:data.task_name||'',report_id:data.report_id||'',sample:p.sample||((spec.outputComparison||figure.kind==='isotype')?String(label).split('\n')[0]:selectedSamples),chain:p.chain??figure.chain??'',count_scope:p.countScope||'',primer:figure.primer||'',primer_group:p.primerGroup||figure.primer_group||'',analysis:figure.scenario_id||p.suspected?'Suspected':'Original',segment:figure.segment||'',stage:figure.stage||'',chart:panel.title,label,series,value:p.value,unit:panel.percent?'percent':units[p.unit]||p.unit||'',count:p.count,denominator:p.denominator,count_unit:units[p.unit]||p.unit||'',denominator_definition:p.denominatorMeaning||'',...extra});
+      const add=(panel,label,series,p,extra={})=>records.push({task:data.task_name||'',report_id:data.report_id||'',sample:p.sample||((spec.outputComparison||figure.kind==='isotype')?String(label).split('\n')[0]:selectedSamples),chain:p.chain??figure.chain??'',count_scope:p.countScope||'',primer:p.primer||figure.primer||'',primer_group:p.primerGroup||figure.primer_group||'',analysis:figure.scenario_id||p.suspected?'Suspected':'Original',segment:figure.segment||'',stage:figure.stage||'',chart:panel.title,label,series,value:p.value,unit:panel.percent?'percent':units[p.unit]||p.unit||'',count:p.count,denominator:p.denominator,count_unit:units[p.unit]||p.unit||'',denominator_definition:p.denominatorMeaning||'',...extra});
       for(const panel of spec.type==='dashboard'?spec.panels:spec.type==='bars'?[spec]:[]){for(const series of panel.series){if(legend[series.name]===false)continue;for(const i of indexes(panel.labels))add(panel,panel.labels[i],series.name,series.data[i]);}}
       if(spec.type==='matrix')for(const p of spec.points){const [x,y,value]=p.value,range=options.visualMap?.[0]?.range;if(range&&(value<range[0]||value>range[1]))continue;add(spec,spec.labels[x],spec.rows[y],{...p,value:p.count,unit:spec.unit||'reads'},{sample:figure.kind==='stage_overview'?spec.rows[y]:spec.labels[x],change:p.change||'',value:p.count});}
     }

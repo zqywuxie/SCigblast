@@ -179,11 +179,12 @@ def _render_overview(data, output, *, top_n=20, figure_audit=None):
                 batch=selected[page:page+20]
                 for field,kind,label,color in (('match_percent','primers','Unique primer matching','#419A8B'),('mapping_percent','primer_mapping','Mapping rate by primer',blue)):
                     if kind=='primer_mapping' and stage!='mapping':continue
-                    title=f'{sample} / {chain} · {label} · {stage_label}'
+                    title=f'Sample: {sample} / Chain: {chain} · {label} · {stage_label}'
                     values=[r[field] or 0 for r in batch]
                     texts=[('N/A' if r[field] is None else f'{r[field]:.4f}%')+f" · {r['matched_reads']:,}" if kind=='primers' else
                         ('N/A' if r[field] is None else f'{r[field]:.2f}%')+f" · {number(r['mapped_reads'])} / {r['matched_reads']:,}" for r in batch]
-                    fig,_,_=horizontal([r['primer'] for r in batch],values,title,value_labels=texts,xlabel='Unique primer match (%)' if kind=='primers' else 'Mapping rate (%)',colors=color)
+                    fig,ax,_=horizontal([r['primer'] for r in batch],values,title,value_labels=texts,xlabel='Unique primer match (%)' if kind=='primers' else 'Mapping rate (%)',colors=color)
+                    ax.set_ylabel('Primer', fontsize=9)
                     save(fig,label_name(sample)+f'__{chain}__{stage}__{kind}_{page//20+1}',title,sample,chain,kind,preparation=stage)
 
         for sample, primers in (data.get('catalog') or {}).get('assignments', {}).items():

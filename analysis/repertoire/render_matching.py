@@ -5,7 +5,7 @@ import textwrap
 from .matching import CATEGORIES, summarize_matching
 from .palette import MATCH_COLORS
 from .io import label_name
-from .workbook_overview import sample_sort_key
+from .workbook_overview import sample_rows, sample_sort_key
 
 
 def render(data, *, pyplot, save, stage='', target_sample=''):
@@ -26,18 +26,27 @@ def render(data, *, pyplot, save, stage='', target_sample=''):
         if row['status'] == 'suspected':
             alternatives[(row['sample'], row['unit'])].append(row)
     assignments = (data.get('catalog') or {}).get('assignments', {})
+    sample_info = data.get('sample_overview') or sample_rows(data.get('samples', []), data.get('catalog'))
+    assignment_labels = defaultdict(list)
+    for row in sample_info:
+        name = str(row.get('primer_groups') or 'Not recorded')
+        name = {'未配置': 'Not configured', '未提供组名': 'Unnamed group'}.get(name, name)
+        label = f"{row['chain']}: {name}"
+        if label not in assignment_labels[row['sample']]:
+            assignment_labels[row['sample']].append(label)
     labels_map = data.get('matching_sample_labels') or {}
     batches, batch = [], []
     for key in keys:
         sample, unit = key
         groups = sorted({p.get('group', '') for p in assignments.get(sample, []) if p.get('group')})
-        original = dict(key=key, sample=labels_map.get(sample, sample), group=' / '.join(groups),
+        original = dict(key=key, sample=labels_map.get(sample, sample),
+                        groups=assignment_labels.get(sample) or groups or ['Not recorded'],
                         suspected=False, values={c: grouped[key][c]['percent'] for c in CATEGORIES})
         choices = alternatives[key]
         # Repeat the original on each page if one sample has many alternatives.
         for start in range(0, max(1, len(choices)), 11):
             block = [original] + [dict(key=key, sample=labels_map.get(sample, sample),
-                group=r['tested_group'], suspected=True,
+                groups=[r['tested_group']+'*'], suspected=True,
                 values={c: r[c+'_percent'] for c in CATEGORIES}) for r in choices[start:start+11]]
             if batch and len(batch)+len(block)>12:
                 batches.append(batch)
@@ -48,14 +57,14 @@ def render(data, *, pyplot, save, stage='', target_sample=''):
     for page, batch in enumerate(batches, 1):
         labels = []
         for row in batch:
-            lines = [(row['group'] or 'Assigned')+('*' if row['suspected'] else '')]
+            lines = ['Sample: '+row['sample'], 'Suspected group:' if row['suspected'] else 'Primer groups:', *row['groups']]
             if repeated[row['key'][0]]>1:
                 lines.append(row['key'][1])
-            labels.append('\n'.join('\n'.join(textwrap.wrap(line, 14, break_on_hyphens=False)) for line in lines))
+            labels.append('\n'.join('\n'.join(textwrap.wrap(line, 22, break_on_hyphens=False)) for line in lines))
         max_lines = max(label.count('\n')+1 for label in labels)
-        bottom_in = 1.15+max_lines*.16
+        bottom_in = .35+max_lines*.16
         height = 3.65+bottom_in
-        fig, ax = pyplot.subplots(figsize=(max(8.2, len(batch)*1.35+1.4), height))
+        fig, ax = pyplot.subplots(figsize=(max(8.2, len(batch)*1.8+1.4), height))
         fig.subplots_adjust(left=.075, right=.985, top=1-.95/height, bottom=bottom_in/height)
         positions, x = [], 0
         for i, row in enumerate(batch):
@@ -88,16 +97,6 @@ def render(data, *, pyplot, save, stage='', target_sample=''):
             if row['suspected']:
                 label.set_color('#B84A48')
         ax.tick_params(axis='x',length=0,pad=9)
-        # Put the sample once below its assigned and alternative primer groups.
-        start=0
-        for end in range(len(batch)):
-            if end+1<len(batch) and batch[end+1]['key']==batch[start]['key']:continue
-            center=(positions[start]+positions[end])/2
-            width=max(18,min(36,(end-start+1)*18))
-            sample='\n'.join(textwrap.wrap(batch[start]['sample'],width,break_on_hyphens=True))
-            ax.text(center,-(.21+max_lines*.14)/(height-bottom_in-.95),sample,
-                transform=ax.get_xaxis_transform(),ha='center',va='top',fontsize=8.5,color='#53616D',clip_on=False)
-            start=end+1
         ax.set_yticks([0,25,50,75,100],['0%','25%','50%','75%','100%'])
         ax.spines['left'].set_visible(False)
         ax.set_axisbelow(True)
